@@ -67,21 +67,26 @@ def scheduler_hint(at: str) -> str:
             f"  {int(mm)} {int(hh)} * * * cd {cfgmod.VAULT} && {launcher} >/dev/null 2>&1")
 
 
-HOOKS_JSON = r"""Register the hooks. Write this to `.claude/settings.local.json` in the vault
-root. Two things that are easy to get wrong: the event names sit at the TOP level of that
-file (there is no "hooks" wrapper key), and $CLAUDE_PROJECT_DIR keeps it portable, so the
-same file works unchanged on another machine.
+HOOKS_JSON = r"""Register the hooks. Merge this into `.claude/settings.local.json` in the vault
+root (or settings.json if you want it shared). Note the double nesting — event names live
+under a top-level "hooks" key, and each event holds a list of matchers that each hold a list
+of hooks. Dropping the outer "hooks" wrapper is silent: Claude Code reads the file, finds no
+hooks, and nothing ever fires. $CLAUDE_PROJECT_DIR keeps the paths portable.
 
 {
-  "SessionStart": [
-    {"hooks": [{"type": "command",
-                "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/hook_session_start.py\""}]}
-  ],
-  "Stop": [
-    {"hooks": [{"type": "command",
-                "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/hook_record.py\""}]}
-  ]
-}"""
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command",
+                  "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/hook_session_start.py\""}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command",
+                  "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/hook_record.py\""}]}
+    ]
+  }
+}
+
+Verify with `/hooks` in a new session: if the list is empty, the shape is wrong."""
 
 
 def plan(cfg: dict) -> str:

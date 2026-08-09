@@ -36,7 +36,8 @@ in a sentence. Do not dump all four at once, and do not proceed to the next befo
 Then write `palimpsest.json` (schema in `tools/config.py`), and give them, in this order: the
 exact scheduler command for their OS for the time they chose (`python tools/setup.py` prints
 it), the hook registration JSON for `.claude/settings.local.json` (also printed by `setup.py`;
-note the event names sit at the TOP level of that file, with no `"hooks"` wrapper key),
+the event names nest under a top-level `"hooks"` key — omitting that wrapper fails silently,
+and `/hooks` in a fresh session shows an empty list),
 `git config core.hooksPath tools/githooks` for the commit guards, and finally
 `python tools/sync.py` for the first run.
 
