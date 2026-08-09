@@ -44,6 +44,7 @@ _ARGS = {
     "link":        ["link_notes.py"],
     "maintenance": ["maintenance.py"],
     "dedupe":      ["dedupe.py"],
+    "triage":      ["triage_skills.py"],
     "weekly":      ["weekly_review.py"],
     "briefing":    ["briefing.py"],
 }

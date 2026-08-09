@@ -37,11 +37,14 @@ DEFAULTS = {
         "link": True,
         "maintenance": True,
         "dedupe": True,
+        # Cheap (~1s) and it only decides reading order, so it stays on even when the
+        # skills proposer above is off — there is already a queue to work through.
+        "triage": True,
         "weekly": True,
         "briefing": True,
     },
     "timeouts": {"import": 180, "extract": 2400, "skills": 2400, "link": 120,
-                 "maintenance": 120, "dedupe": 120, "weekly": 120, "briefing": 120},
+                 "maintenance": 120, "dedupe": 120, "triage": 120, "weekly": 120, "briefing": 120},
     "sync": {"cadence": "daily", "at": "06:00"},
 }
 

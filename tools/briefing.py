@@ -10,7 +10,7 @@ Fills today's Daily/YYYY-MM-DD.md with:
 Safe to re-run: if today's note already has a briefing block it is refreshed in place,
 and your own content below it is preserved.
 
-Usage (from vault root):  python _tools/briefing.py
+Usage (from vault root):  python tools/briefing.py
 """
 from __future__ import annotations
 import sys, re, random
@@ -71,6 +71,29 @@ def recent_convs(days: int = 2) -> list[str]:
                 pass
     return out
 
+def skills_nudge() -> str | None:
+    """One line about the proposal queue, or nothing if there is nothing to do.
+
+    The queue reached 622 against 20 promoted precisely because it was invisible — it lived
+    in a folder nobody opened. Surfacing the batch size (not the queue size) is the point:
+    "8 to look at" is an invitation, "622 waiting" is a reason to close the note.
+    """
+    proposed = VAULT / "Skills" / "_proposed"
+    review = VAULT / "Reviews" / "Skill Proposals.md"
+    if not proposed.exists():
+        return None
+    n = len(list(proposed.glob("*.md")))
+    if not n:
+        return None
+    if not review.exists():
+        return (f"- {n} unreviewed proposal(s). Run `python tools/triage_skills.py` to get a "
+                f"batch worth reading.")
+    m = re.search(r"→\s*(\d+)\s+in this batch", review.read_text(encoding="utf-8", errors="ignore"))
+    batch = m.group(1) if m else "a few"
+    return (f"- We have **{n} proposed skills**; I've picked **{batch}** worth tackling in "
+            f"[[Skill Proposals]]. Promote the keepers, delete the rest — 10 minutes.")
+
+
 def build_block() -> str:
     today = date.today().isoformat()
     tasks = open_tasks(recent_daily(today))
@@ -87,6 +110,12 @@ def build_block() -> str:
     if rc:
         lines.append("\n### 🤖 Recent conversations")
         lines += [f"- [[{c}]]" for c in rc]
+    nudge = skills_nudge()
+    if nudge:
+        # Last, deliberately. It is an invitation, not a task: putting it above the day's
+        # actual work would train you to skip the whole block.
+        lines.append("\n### 🛠 Skill proposals")
+        lines.append(nudge)
     lines.append(END)
     return "\n".join(lines)
 
