@@ -34,7 +34,11 @@ DIR_WEIGHT = {"10 Notes": 1.6, "Skills": 1.6, "20 Projects": 1.4, "30 Areas": 1.
 # nothing better matches.
 PROPOSED_WEIGHT = 0.5
 LOG_NOTE = VAULT / "40 Resources" / "Brain Q&A Log.md"
-DEFAULT_MODEL = "claude-sonnet-4-6"
+# Deliberately NOT the extraction model. Distilling is a bulk job run nightly on every
+# conversation, so it optimises for cost; answering is interactive, occasional, and judged
+# directly by you, so it optimises for quality. Same reason you would not staff a call centre
+# and a design review with the same tier.
+DEFAULT_MODEL = "claude-sonnet-5"
 STOP = set("a an the of to in on for and or is are be was were been do does did i we you my our your "
            "what how why when which who whom this that these those with from as at by it its their there "
            "about into over under can could should would will shall may might have has had not no".split())

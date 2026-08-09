@@ -28,7 +28,14 @@ VAULT = Path(__file__).resolve().parent.parent
 CONV_DIR = VAULT / "40 Resources" / "Claude Conversations"
 NOTES_DIR = VAULT / "10 Notes"
 STATE_FILE = Path(__file__).resolve().parent / ".extract_state.json"
-DEFAULT_MODEL = "claude-sonnet-4-6"
+# Kept in step with tools/config.py's DEFAULTS["extraction_model"], which is what the
+# pipeline passes explicitly. This is only the fallback for running the tool by hand — and a
+# fallback that disagrees with the configured default is a silent cost surprise.
+try:
+    from config import DEFAULTS as _CFG_DEFAULTS
+    DEFAULT_MODEL = _CFG_DEFAULTS["extraction_model"]
+except Exception:
+    DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 

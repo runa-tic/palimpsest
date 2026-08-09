@@ -37,11 +37,23 @@ in a sentence. Do not dump all four at once, and do not proceed to the next befo
 
 Then write `palimpsest.json` (schema in `tools/config.py`), and give them, in this order: the
 exact scheduler command for their OS for the time they chose (`python tools/setup.py` prints
-it), the hook registration JSON for `.claude/settings.local.json` (also printed by `setup.py`;
-the event names nest under a top-level `"hooks"` key — omitting that wrapper fails silently,
-and `/hooks` in a fresh session shows an empty list),
-`git config core.hooksPath tools/githooks` for the commit guards, and finally
+it), `git config core.hooksPath tools/githooks` for the commit guards, and finally
 `python tools/sync.py` for the first run.
+
+**Do not hand them hook-registration JSON if they cloned this repo** — `.claude/settings.json`
+ships with SessionStart and Stop already wired, and you can prove it: the notice you are
+reading came from that hook. Only walk through registration if they copied the tools into an
+existing vault, in which case `setup.py` prints the snippet, and the event names must nest
+under a top-level `"hooks"` key (omitting that wrapper fails silently, and `/hooks` in a fresh
+session shows an empty list).
+
+Two things worth telling them unprompted at the end, because both fail *silently*. The hooks
+invoke `python3`; on Windows that often resolves to a WindowsApps alias which can be turned
+off under Settings → App execution aliases, after which nothing is recorded and no first-run
+notice appears. Offer to pin `.claude/settings.json` to an absolute interpreter path if they
+want that dependency gone. And the pipeline's own model default differs from the one you just
+wrote to `palimpsest.json` only if they ran a tool by hand — `sync.py` always passes the
+configured model explicitly.
 
 If they decline, say the vault will stay unconfigured and this prompt will return next session,
 then help with whatever they actually asked for. **Once `palimpsest.json` exists, ignore this
