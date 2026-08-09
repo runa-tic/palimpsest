@@ -18,37 +18,19 @@ STALE_DAYS = 3
 sys.path.insert(0, str(TOOLS))
 import config as cfgmod
 
+# Reinforcement only. CLAUDE.md is the authority here, because a hook is conditional — it
+# needs to be registered, trusted and actually executable — while CLAUDE.md is loaded every
+# session by construction. The first install of this repo proved the difference: the hooks
+# silently never ran, the model saw none of this, and it opened by offering a briefing for a
+# vault that had never been set up. Keep this a pointer, not a second copy that can drift.
 FIRST_RUN = """\
 # 🧠 Palimpsest — first run
 
-This vault has no `palimpsest.json`, so nobody has made the setup decisions yet. Don't run
-the pipeline and don't create notes until they're made — the choices change what every
-nightly run costs and what leaves the machine.
+There is no `palimpsest.json` at the vault root, so this vault has never been set up.
 
-Greet the user, say plainly that this is a fresh Palimpsest vault, and walk them through
-four questions **one at a time**, recommending a default and explaining the trade-off in a
-sentence. Then write the answers by running `python tools/setup.py` for them, or by writing
-`palimpsest.json` directly using the schema in `tools/config.py`.
-
-1. **Extraction model.** Distilling runs once per conversation, every night, so this is the
-   recurring cost of the whole system. Recommend `claude-haiku-4-5-20251001`; note that
-   Sonnet gives noticeably better notes for several times the nightly cost.
-2. **Skills proposer in the nightly sync?** Recommend OFF, and say why concretely: in the
-   vault this came from it consumed most of the sync window, failed most of its inputs
-   without checkpointing so the same failures retried nightly, and grew a 654-deep proposal
-   queue against 16 promoted skills. Better run by hand with `--limit`.
-3. **Sync time.** It rewrites notes while it runs, so it wants an hour they're never working
-   in the vault. Recommend 06:00 local. Afterwards, give them the exact scheduler command
-   for their OS — `python tools/setup.py` prints it — and warn that a Startup-folder
-   shortcut only fires at logon, which on an always-on machine means it never runs.
-4. **Redaction deny list.** `tools/.redact_terms.txt` is scrubbed from recorded transcripts
-   and blocked at commit time. It is deny-list-only by design, because blanket scrubbing
-   shreds real content — so anything unlisted passes through verbatim. Ask them to seed it
-   with their own email addresses and phone numbers before the first commit.
-
-Then point them at `git config core.hooksPath tools/githooks` for the commit guards, and at
-`python tools/sync.py` for the first run. Read `notes/` if they ask why any default is what
-it is — each note was written the day the alternative failed.
+Follow the **FIRST RUN** section at the top of `CLAUDE.md` now: do not offer a briefing, do
+not create notes, do not run the pipeline. Ask whether they want the one-time setup, and if
+so put the four questions to them one at a time.
 """
 
 

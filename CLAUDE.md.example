@@ -6,6 +6,44 @@ from your own knowledge: you think *with* and *as* this vault.
 
 Copy this file to `CLAUDE.md` at your vault root and adapt the paths and the last section.
 
+## FIRST RUN — check this before anything else, every session
+
+**Does `palimpsest.json` exist at the vault root?** Check with a tool call; do not assume.
+
+**If it does not exist, this vault has never been set up.** Everything below in this file is
+suspended until it is. Do not offer a briefing, do not read Vault Health, do not create notes,
+do not run the pipeline — there is nothing to brief on and the setup choices change what every
+nightly run costs. Instead, open by saying plainly that this is a fresh Palimpsest vault that
+needs a one-time setup, and ask whether they want to do it now.
+
+If they say yes, ask these **one at a time**, recommending the default and giving the trade-off
+in a sentence. Do not dump all four at once, and do not proceed to the next before they answer.
+
+1. **Which model distils transcripts into notes?** It runs once per conversation, every night,
+   so it is the recurring cost of the whole system. Recommend `claude-haiku-4-5-20251001`.
+   Sonnet gives noticeably better notes for several times the nightly cost.
+2. **Run the skills proposer in the nightly sync?** Recommend **off**, concretely: in the vault
+   this came from it consumed most of the sync window, failed most of its inputs without
+   checkpointing so the same failures retried every night, and grew a 654-deep proposal queue
+   against 16 actually-promoted skills. Better run by hand with `--limit` when wanted.
+3. **What time should the sync run?** It rewrites notes while it works, so it wants an hour
+   they are never mid-session in the vault. Recommend 06:00 local.
+4. **Seed the redaction deny list?** `tools/.redact_terms.txt` is scrubbed from recorded
+   transcripts and blocked at commit time. It is deny-list-only by design — blanket scrubbing
+   shreds real content — so anything unlisted passes through verbatim. Ask them to add their
+   own email addresses and phone numbers before the first commit.
+
+Then write `palimpsest.json` (schema in `tools/config.py`), and give them, in this order: the
+exact scheduler command for their OS for the time they chose (`python tools/setup.py` prints
+it), the hook registration JSON for `.claude/settings.local.json` (also printed by `setup.py`;
+note the event names sit at the TOP level of that file, with no `"hooks"` wrapper key),
+`git config core.hooksPath tools/githooks` for the commit guards, and finally
+`python tools/sync.py` for the first run.
+
+If they decline, say the vault will stay unconfigured and this prompt will return next session,
+then help with whatever they actually asked for. **Once `palimpsest.json` exists, ignore this
+entire section** and behave as the rest of this file describes.
+
 ## Operating protocol
 
 **1. Recall before you answer.**
@@ -83,8 +121,9 @@ stacked, so after one fix holds, re-test the whole path and say plainly what rem
 
 ## Start each session by
 
-Reading `Reviews/Vault Health.md` if it exists, and offering today's briefing if the user opens
-open-endedly. Otherwise just be the brain: recall, answer, capture.
+**Only once `palimpsest.json` exists** — until then the FIRST RUN section at the top of this
+file overrides everything here. Read `Reviews/Vault Health.md` if it exists, and offer today's
+briefing if the user opens open-endedly. Otherwise just be the brain: recall, answer, capture.
 
 ---
 
