@@ -67,15 +67,21 @@ def scheduler_hint(at: str) -> str:
             f"  {int(mm)} {int(hh)} * * * cd {cfgmod.VAULT} && {launcher} >/dev/null 2>&1")
 
 
-HOOKS_JSON = """\
-Add to your Claude Code settings (.claude/settings.json in the vault):
+HOOKS_JSON = r"""Register the hooks. Write this to `.claude/settings.local.json` in the vault
+root. Two things that are easy to get wrong: the event names sit at the TOP level of that
+file (there is no "hooks" wrapper key), and $CLAUDE_PROJECT_DIR keeps it portable, so the
+same file works unchanged on another machine.
 
-  "hooks": {
-    "Stop":         [{"hooks": [{"type": "command",
-                     "command": "python \\"%s\\""}]}],
-    "SessionStart": [{"hooks": [{"type": "command",
-                     "command": "python \\"%s\\""}]}]
-  }"""
+{
+  "SessionStart": [
+    {"hooks": [{"type": "command",
+                "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/hook_session_start.py\""}]}
+  ],
+  "Stop": [
+    {"hooks": [{"type": "command",
+                "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/hook_record.py\""}]}
+  ]
+}"""
 
 
 def plan(cfg: dict) -> str:
@@ -138,7 +144,7 @@ def interview(cfg: dict) -> int:
     print("\n" + "-" * 60)
     print(scheduler_hint(cfg["sync"]["at"]))
     print("\n" + "-" * 60)
-    print(HOOKS_JSON % (cfgmod.TOOLS / "hook_record.py", cfgmod.TOOLS / "hook_session_start.py"))
+    print(HOOKS_JSON)
     print("\nThen: git config core.hooksPath tools/githooks   (secret + PII commit guards)")
     print("And:  python tools/sync.py                        (first run, safe to repeat)\n")
     return 0
