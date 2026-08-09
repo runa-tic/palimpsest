@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""First-run setup: make the four decisions that shouldn't be inherited silently.
+"""First-run setup: make the five decisions that shouldn't be inherited silently.
 
 Run it directly (`python tools/setup.py`) for the interactive version, or let the
 SessionStart hook offer to walk you through the same choices conversationally — the hook
@@ -112,7 +112,7 @@ def main() -> int:
 
 
 def interview(cfg: dict) -> int:
-    print("Four decisions. Enter accepts the default in brackets.\n")
+    print("Five decisions. Enter accepts the default in brackets.\n")
 
     print("1) Which model distils transcripts into notes? It runs once per conversation,")
     print("   every night, so this is the recurring cost of the whole system.")
@@ -132,7 +132,13 @@ def interview(cfg: dict) -> int:
     print("   you are never mid-session in the vault.")
     cfg["sync"]["at"] = ask("   time (HH:MM, local)", cfg["sync"]["at"])
 
-    print("\n4) Redaction deny list. Anything you put in tools/.redact_terms.txt is scrubbed")
+    print("\n4) Nightly backup? The pipeline can end by committing that night's notes and")
+    print("   pushing them to your git remote, so the vault stops drifting from its backup.")
+    print("   It never bypasses the commit guards, never force-pushes, never commits code.")
+    print("   Leave it off until you have a remote you trust AND have seeded the deny list.")
+    cfg["steps"]["push"] = yes("   enable nightly commit+push", cfg["steps"].get("push", False))
+
+    print("\n5) Redaction deny list. Anything you put in tools/.redact_terms.txt is scrubbed")
     print("   from recorded transcripts and blocked at commit time. It is deny-list-only by")
     print("   design — blanket scrubbing shreds real content — which means anything you do")
     print("   not list passes through verbatim. Seed it now with your own addresses.")

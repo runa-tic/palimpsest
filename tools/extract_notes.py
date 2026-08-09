@@ -6,10 +6,10 @@ durable, reusable insights and writes each as an atomic note in "10 Notes/", lin
 its source conversation.
 
 Usage (from vault root):
-  python _tools/extract_notes.py                 # process new/changed conversations only
-  python _tools/extract_notes.py --force         # reprocess everything
-  python _tools/extract_notes.py --model claude-haiku-4-5-20251001   # cheaper/faster
-  python _tools/extract_notes.py --dry-run       # show what would be written
+  python tools/extract_notes.py                 # process new/changed conversations only
+  python tools/extract_notes.py --force         # reprocess everything
+  python tools/extract_notes.py --model claude-haiku-4-5-20251001   # cheaper/faster
+  python tools/extract_notes.py --dry-run       # show what would be written
 
 Requires the `claude` CLI on PATH and an active login. No API key needed.
 """
@@ -28,14 +28,7 @@ VAULT = Path(__file__).resolve().parent.parent
 CONV_DIR = VAULT / "40 Resources" / "Claude Conversations"
 NOTES_DIR = VAULT / "10 Notes"
 STATE_FILE = Path(__file__).resolve().parent / ".extract_state.json"
-# Kept in step with tools/config.py's DEFAULTS["extraction_model"], which is what the
-# pipeline passes explicitly. This is only the fallback for running the tool by hand — and a
-# fallback that disagrees with the configured default is a silent cost surprise.
-try:
-    from config import DEFAULTS as _CFG_DEFAULTS
-    DEFAULT_MODEL = _CFG_DEFAULTS["extraction_model"]
-except Exception:
-    DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 
 INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -60,6 +53,16 @@ Return ONLY a JSON array (no prose, no code fence) of objects with these fields:
   "title":  a concise claim stated as the insight itself (e.g. "Prompt caching cuts repeated-context cost")
   "body":   2-5 sentences elaborating the idea in your own words
   "tags":   1-3 lowercase topic tags, no '#', e.g. ["llm","prompting"]
+  "volatility": exactly one of "timeless", "dated", or "live" — how this note decays:
+      "timeless" — a principle, mechanism or trade-off that stays true regardless of when it
+          is read. "A deny list only protects the writer that runs it."
+      "dated" — true AS OF the conversation, and quietly wrong later: current deployment or
+          commit state, prices, model ids and their costs, library versions, API shapes,
+          measured numbers from a system that keeps changing, "X is broken / not yet done".
+      "live" — the durable part is a pointer that must be re-read to be trusted: a dashboard,
+          a queue, a leaderboard, an upstream doc.
+    When torn between "timeless" and "dated", choose "dated". A stale note believed to be
+    timeless is the expensive failure; a timeless note flagged for review costs a glance.
 
 The conversation transcript follows after the line "===CONVERSATION===".
 """
@@ -248,10 +251,20 @@ def write_atomic_note(note: dict, src: Path, date: str, dry: bool) -> str | None
         sim_line = f"similar_to: \"[[{near[0]}]]\"\nsimilarity: {near[1]:.2f}\n"
         print(f"  ! near-duplicate of an existing note ({near[1]:.0%}): {near[0][:60]}")
     tag_lines = "\n".join(f"  - {t}" for t in (["claude/extracted"] + [str(t) for t in tags]))
+    # How this claim decays. Notes carrying operational state read exactly like notes carrying
+    # principles, so a vault silently accumulates confident statements that stopped being true
+    # months ago — in the vault this came from, notes asserting "UNCOMMITTED" were wrong by the time anyone
+    # relied on them. Recording shelf life at write time is the only cheap moment to do it;
+    # nobody classifies 954 notes later. "unknown" when the model declines to choose, so the
+    # gap stays visible instead of defaulting into a lie.
+    vol = str(note.get("volatility") or "").strip().lower()
+    if vol not in ("timeless", "dated", "live"):
+        vol = "unknown"
     content = (
         "---\n"
         "type: note\n"
         f"created: {date}\n"
+        f"volatility: {vol}\n"
         f"source: \"[[{conversation_link(src)}]]\"\n"
         f"{sim_line}"
         "tags:\n"
@@ -261,7 +274,7 @@ def write_atomic_note(note: dict, src: Path, date: str, dry: bool) -> str | None
         f"{body}\n\n"
         + (f"> [!info]- Possible duplicate\n"
            f"> Written {date} despite closely resembling [[{near[0]}]] ({near[1]:.0%} similar).\n"
-           f"> Extraction never refuses a note — see DUP_NOTE_THRESHOLD in `_tools/extract_notes.py`\n"
+           f"> Extraction never refuses a note — see DUP_NOTE_THRESHOLD in `tools/extract_notes.py`\n"
            f"> for why blocking is unsafe here. Merge or delete one of the two if they say the "
            f"same thing.\n\n" if near else "")
         + "## Related\n- [[ ]]\n\n"

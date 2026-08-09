@@ -47,6 +47,7 @@ _ARGS = {
     "triage":      ["triage_skills.py"],
     "weekly":      ["weekly_review.py"],
     "briefing":    ["briefing.py"],
+    "push":        ["vault_push.py"],
 }
 # (label, script + args, timeout seconds)
 STEPS = [(name, args, CFG["timeouts"].get(name, 300))

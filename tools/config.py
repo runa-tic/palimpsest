@@ -42,9 +42,14 @@ DEFAULTS = {
         "triage": True,
         "weekly": True,
         "briefing": True,
+        # OFF by default, deliberately. It commits and pushes your vault to a remote — a
+        # sensible default for the author, an unpleasant surprise for anyone else. Turn it on
+        # once you have a remote you trust and have seeded tools/.redact_terms.txt, since the
+        # commit guards are what stand between an unattended commit and a published secret.
+        "push": False,
     },
     "timeouts": {"import": 180, "extract": 2400, "skills": 2400, "link": 120,
-                 "maintenance": 120, "dedupe": 120, "triage": 120, "weekly": 120, "briefing": 120},
+                 "maintenance": 120, "dedupe": 120, "triage": 120, "weekly": 120, "briefing": 120, "push": 180},
     "sync": {"cadence": "daily", "at": "06:00"},
 }
 

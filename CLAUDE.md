@@ -30,7 +30,12 @@ in a sentence. Do not dump all four at once, and do not proceed to the next befo
    against 16 actually-promoted skills. Better run by hand with `--limit` when wanted.
 3. **What time should the sync run?** It rewrites notes while it works, so it wants an hour
    they are never mid-session in the vault. Recommend 06:00 local.
-4. **Seed the redaction deny list?** `tools/.redact_terms.txt` is scrubbed from recorded
+4. **Nightly backup?** With it on, the pipeline ends by committing that night's notes and
+   pushing them to your git remote, so the vault stops drifting from its backup. Recommend
+   **off until they have a remote they trust and have seeded the deny list below** — the commit
+   guards are the only thing standing between an unattended commit and a published secret. It
+   never bypasses those guards, never force-pushes, and never commits code.
+5. **Seed the redaction deny list?** `tools/.redact_terms.txt` is scrubbed from recorded
    transcripts and blocked at commit time. It is deny-list-only by design — blanket scrubbing
    shreds real content — so anything unlisted passes through verbatim. Ask them to add their
    own email addresses and phone numbers before the first commit.

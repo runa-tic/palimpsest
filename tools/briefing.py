@@ -94,6 +94,53 @@ def skills_nudge() -> str | None:
             f"[[Skill Proposals]]. Promote the keepers, delete the rest — 10 minutes.")
 
 
+def dupes_nudge() -> str | None:
+    """One line about the duplicate backlog, naming the biggest family only.
+
+    dedupe.py has flagged 35 families / 73 removable notes for weeks and none were ever
+    merged, for the same reason 622 skill proposals were never read: a report nobody opens
+    is a report that does not exist. Name one family, not the total — "merge these 5" is a
+    task, "73 removable" is a statistic.
+    """
+    rpt = VAULT / "Reviews" / "Duplicate Candidates.md"
+    if not rpt.exists():
+        return None
+    txt = rpt.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r"would remove (\d+) files", txt)
+    removable = int(m.group(1)) if m else 0
+    if removable < 1:
+        return None
+    fam = re.search(r"^## (\d+) notes — up to \d+ removable\n((?:- \[\[.+?\]\]\n)+)", txt, re.M)
+    if not fam:
+        return None
+    members = re.findall(r"\[\[(.+?)\]\]", fam.group(2))
+    return (f"- **{removable} duplicate note(s)** could be merged away. Biggest family is "
+            f"**{fam.group(1)} notes** starting with [[{members[0]}]] — fold them into the "
+            f"best-written one. Full list: [[Duplicate Candidates]].")
+
+
+def memory_nudge() -> str | None:
+    """Memory entries asserting state that has aged out.
+
+    This is the one surface where staleness is actively dangerous: memory is loaded into
+    context at the start of every session and read as current fact. An entry still saying
+    the operator is abroad, 47 days after they came home, does not sit inertly — it shapes
+    what gets assumed and acted on.
+    """
+    health = VAULT / "Reviews" / "Vault Health.md"
+    if not health.exists():
+        return None
+    txt = health.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r"## 🧠 Memory needing re-verification \((\d+)\)", txt)
+    if not m or m.group(1) == "0":
+        return None
+    first = re.search(r"^- `(\d+)d` \*\*(.+?)\*\*", txt[m.end():], re.M)
+    oldest = f" Oldest is **{first.group(2)}** at {first.group(1)} days." if first else ""
+    return (f"- **{m.group(1)} memory entries** assert state that has aged out.{oldest} "
+            f"They load into context every session and are read as current — confirm, correct "
+            f"or delete. List: [[Vault Health]].")
+
+
 def build_block() -> str:
     today = date.today().isoformat()
     tasks = open_tasks(recent_daily(today))
@@ -110,12 +157,20 @@ def build_block() -> str:
     if rc:
         lines.append("\n### 🤖 Recent conversations")
         lines += [f"- [[{c}]]" for c in rc]
+    # Last, deliberately. These are invitations, not tasks: putting them above the day's
+    # actual work would train you to skip the whole block.
     nudge = skills_nudge()
     if nudge:
-        # Last, deliberately. It is an invitation, not a task: putting it above the day's
-        # actual work would train you to skip the whole block.
         lines.append("\n### 🛠 Skill proposals")
         lines.append(nudge)
+    dn = dupes_nudge()
+    if dn:
+        lines.append("\n### 👯 Duplicate notes")
+        lines.append(dn)
+    mn = memory_nudge()
+    if mn:
+        lines.append("\n### 🧠 Memory freshness")
+        lines.append(mn)
     lines.append(END)
     return "\n".join(lines)
 

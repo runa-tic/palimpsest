@@ -52,6 +52,17 @@ What took months was learning which of the obvious designs are wrong. Those are 
   contains nothing when the harness itself hands the sandboxed code a model call.
 - **Generated blocks are not durable state.** The daily briefing is regenerated output; a
   checkbox ticked inside it is silently overwritten on the next run.
+- **Word overlap cannot see a reworded duplicate.** "GramJS FloodWaitError carries the wait
+  duration on `.seconds`" and "…carries the wait on `.seconds`" are the same note twice and
+  score 0.13 lexically. `semantic.py` compares meaning instead — TF-IDF plus a truncated SVD,
+  on numpy alone, no model download — and similarity turns out *not* to be monotonic in
+  usefulness, so the rule is a semantic threshold **plus** a lexical floor.
+- **Notes rarely rot; memory does.** Extraction already discards temporary state, so shelf-life
+  labelling finds little in `10 Notes/`. The perishable claims live in Claude's memory
+  directory, which is loaded into context every session and asserts deployment state as fact —
+  one entry insisted its author was abroad for 47 days after they came home.
+- **Verification expires too.** Confirming a claim still true resets its clock rather than
+  exempting it forever; "still live" is itself perishable.
 
 ## Quickstart
 
@@ -80,6 +91,12 @@ argued rather than assumed, in `tools/config.py`.
 `sync.py` runs each step under a hard timeout, records `ok`/`failures` to
 `.sync_status.json`, and is safe to run repeatedly — every step no-ops when nothing changed.
 Drive it from a real daily scheduled job, not a logon-triggered shortcut.
+
+**Nightly backup is opt-in.** With `steps.push` enabled, the pipeline ends by committing the
+night's content and pushing it, so a vault that syncs automatically stops drifting from its
+remote. It never uses `--no-verify` (the secret and PII guards run exactly as on a human
+commit, and a block aborts the push), never force-pushes or resolves divergence, and never
+auto-commits anything under `tools/` — a 06:00 job should not immortalise a half-finished edit.
 
 ## Layout
 
