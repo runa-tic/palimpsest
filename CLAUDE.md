@@ -18,8 +18,10 @@ do not run the pipeline — there is nothing to brief on and the setup choices c
 nightly run costs. Instead, open by saying plainly that this is a fresh Palimpsest vault that
 needs a one-time setup, and ask whether they want to do it now.
 
-If they say yes, ask these **one at a time**, recommending the default and giving the trade-off
-in a sentence. Do not dump all four at once, and do not proceed to the next before they answer.
+If they say yes, ask these **five** questions **one at a time**, recommending the default and
+giving the trade-off in a sentence. Do not dump them all at once, and do not proceed to the
+next before they answer. Say "five" if you announce a count — the deny list is a question too,
+not an afterthought, and a user told "four" will wonder what went wrong at the fifth.
 
 1. **Which model distils transcripts into notes?** It runs once per conversation, every night,
    so it is the recurring cost of the whole system. Recommend `claude-haiku-4-5-20251001`.

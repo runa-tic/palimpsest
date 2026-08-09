@@ -74,18 +74,19 @@ git clone <this repo> && cd palimpsest
 git config core.hooksPath tools/githooks     # secret + PII commit guards
 claude                                        # first session: it will offer setup
 
-python tools/setup.py                      # four decisions; prints your OS's scheduler command
+python tools/setup.py                      # five decisions; prints your OS's scheduler command
 python tools/sync.py                       # the whole pipeline, idempotent
 python tools/ask.py "what did I decide about X?"
 python tools/rlm.py --steps 8 --subagents 20 "how has my thinking on X changed?"
 ```
 
 You can skip `setup.py` entirely: with the hooks registered, an unconfigured vault makes the
-SessionStart hook hand the *agent* the same four questions, and it walks you through them
+SessionStart hook hand the *agent* the same five questions, and it walks you through them
 conversationally and writes `palimpsest.json` for you. That is the intended path — the
-interface to this thing is a conversation, so onboarding may as well be one. The four choices
+interface to this thing is a conversation, so onboarding may as well be one. The five choices
 are the extraction model (the recurring nightly cost), whether the skills proposer runs in the
-pipeline, when the sync fires, and what goes in the redaction deny list; each default is
+pipeline, when the sync fires, whether to back up nightly to a remote you name, and what
+goes in the redaction deny list; each default is
 argued rather than assumed, in `tools/config.py`.
 
 `sync.py` runs each step under a hard timeout, records `ok`/`failures` to

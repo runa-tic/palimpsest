@@ -30,7 +30,7 @@ There is no `palimpsest.json` at the vault root, so this vault has never been se
 
 Follow the **FIRST RUN** section at the top of `CLAUDE.md` now: do not offer a briefing, do
 not create notes, do not run the pipeline. Ask whether they want the one-time setup, and if
-so put the four questions to them one at a time.
+so put the five questions to them one at a time.
 """
 
 
@@ -60,7 +60,7 @@ def sync_line() -> str:
     age, stale = _age(fin), (datetime.now() - fin).days >= STALE_DAYS
     if d.get("failures"):
         return (f"**Sync:** ⚠️ FAILED — {', '.join(d['failures'])} — {age} "
-                f"(details: `_tools/sync.log`)")
+                f"(details: `tools/sync.log`)")
     tail = "  ⚠️ stale" if stale else ""
     return (f"**Sync:** clean — {age} "
             f"({d.get('steps','?')} steps, {d.get('duration_sec','?')}s){tail}")
@@ -78,8 +78,9 @@ def main():
         return
     today = date.today().isoformat()
 
-    # A brand-new vault has nothing to brief on, and the four choices that shape everything
-    # after — extraction model, skills proposer, sync cadence, redaction list — are exactly
+    # A brand-new vault has nothing to brief on, and the five choices that shape everything
+    # after — extraction model, skills proposer, sync cadence, nightly backup, redaction
+    # list — are exactly
     # the ones a silent default would decide badly on someone's behalf. Hand them to the
     # agent instead of a wizard: this harness's interface IS the conversation.
     if not cfgmod.is_configured():
