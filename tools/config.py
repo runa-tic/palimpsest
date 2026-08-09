@@ -51,6 +51,11 @@ DEFAULTS = {
     "timeouts": {"import": 180, "extract": 2400, "skills": 2400, "link": 120,
                  "maintenance": 120, "dedupe": 120, "triage": 120, "weekly": 120, "briefing": 120, "push": 180},
     "sync": {"cadence": "daily", "at": "06:00"},
+    # Where the nightly backup pushes. MUST be set explicitly, and the reason is sharp: if you
+    # cloned Palimpsest and are using the clone as your vault, `origin` points at the HARNESS
+    # repo — so an unconfigured push would commit your private notes into someone else's
+    # project. Naming the remote is the one thing that cannot be safely defaulted.
+    "push_remote": None,
 }
 
 

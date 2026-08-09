@@ -19,7 +19,7 @@ Three rules it will not break:
    changes are reported, not committed.
 
 Usage:
-  python tools/vault_push.py            # commit content + push
+  python tools/vault_push.py            # commit content + push to config's push_remote
   python tools/vault_push.py --dry-run  # say what it would do
   python tools/vault_push.py --no-push  # commit only
 """
@@ -56,6 +56,22 @@ def main() -> int:
         return 0
 
     existing = [p for p in CONTENT if (VAULT / p).exists()]
+    # Drop gitignored paths BEFORE staging. `git add` fails outright when handed an ignored
+    # path, so one ignored directory meant nothing at all got staged and the whole nightly
+    # backup failed — while still reporting a tidy "nothing to commit". Worse, an ignored
+    # content dir is content that is silently never backed up, so it is worth saying out loud
+    # rather than skipping quietly. (Palimpsest's own repo ignores Daily/ and Reviews/ so the
+    # harness does not ship generated notes; a clone used AS a vault should un-ignore them.)
+    ignored = []
+    if existing:
+        chk = git("check-ignore", "--", *existing)
+        ignored = [l.strip().strip('"') for l in chk.stdout.splitlines() if l.strip()]
+        existing = [p for p in existing if p not in ignored]
+    if ignored:
+        print(f"vault-push: NOT backing up (gitignored): {', '.join(ignored)}")
+    if not existing:
+        print("vault-push: every content path is gitignored — nothing can be backed up")
+        return 1
     st = git("status", "--porcelain", "--", *existing)
     changed = [l for l in st.stdout.splitlines() if l.strip()]
 
@@ -81,6 +97,12 @@ def main() -> int:
         return 0
 
     if changed:
+        # An unattended commit with no configured identity dies on "unable to auto-detect
+        # email address", which reads like a bug rather than a one-line fix. Say the fix.
+        if not git("config", "user.email").stdout.strip():
+            print("vault-push: no git identity — commit skipped. Fix once with:")
+            print('  git config user.name "you"  &&  git config user.email "you@example.com"')
+            return 1
         add = git("add", "--", *existing)
         if add.returncode != 0:
             print(f"vault-push: FAILED to stage — {add.stderr.strip()[:200]}")
@@ -111,11 +133,29 @@ def main() -> int:
         print("vault-push: --no-push, stopping before the remote")
         return 0
 
-    if not git("remote").stdout.strip():
-        print("vault-push: no remote configured — commit only")
+    # The destination is never inferred. A clone of the harness has `origin` pointing at the
+    # harness repo, so "just push to origin" would publish a private vault into someone else's
+    # project — the failure would be silent, remote, and irreversible.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import config as cfgmod
+        remote = (cfgmod.load().get("push_remote") or "").strip()
+    except Exception:
+        remote = ""
+    if not remote:
+        print("vault-push: committed, but NOT pushed — `push_remote` is not set in "
+              "palimpsest.json.")
+        print("  Set it to YOUR vault's remote. If you cloned Palimpsest and are using the "
+              "clone as your vault,")
+        print("  `origin` still points at the harness repo and your notes would be pushed "
+              "there.")
         return 0
+    if remote not in git("remote").stdout.split():
+        print(f"vault-push: committed, but NOT pushed — remote '{remote}' does not exist "
+              f"(have: {' '.join(git('remote').stdout.split()) or 'none'})")
+        return 1
 
-    p = git("push")
+    p = git("push", remote, "HEAD")
     if p.returncode != 0:
         err = (p.stderr + p.stdout).strip()
         # Never force, never auto-merge. Diverged history is a human decision.

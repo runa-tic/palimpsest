@@ -98,6 +98,12 @@ remote. It never uses `--no-verify` (the secret and PII guards run exactly as on
 commit, and a block aborts the push), never force-pushes or resolves divergence, and never
 auto-commits anything under `tools/` — a 06:00 job should not immortalise a half-finished edit.
 
+Set `push_remote` in `palimpsest.json` to your own vault's remote. It is deliberately not
+inferred: if you cloned this repo and are using the clone as your vault, `origin` points at
+*this* project, and an unconfigured push would publish your private notes here. For that same
+reason a clone-as-vault should un-ignore `Daily/` and `Reviews/` — they are gitignored so the
+harness does not ship generated notes, and `vault_push` will tell you it is skipping them.
+
 ## Layout
 
 `tools/` holds the pipeline: `import_claude.py` and `hook_record.py` capture, `extract_notes.py`
