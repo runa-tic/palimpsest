@@ -114,13 +114,29 @@ def main() -> int:
 def interview(cfg: dict) -> int:
     print("Five decisions. Enter accepts the default in brackets.\n")
 
-    print("1) Which model distils transcripts into notes? It runs once per conversation,")
+    # FIRST, deliberately. Redaction is applied at WRITE time against whatever the deny list
+    # holds then, and the Stop hook records the session after every turn — so asking this last
+    # means several turns are already on disk unprotected, and a later entry cannot reach back
+    # and scrub them. Reproducing this project's own documented leak during its setup would be
+    # a poor advertisement for reading the notes.
+    print("1) Redaction deny list — FIRST, deliberately. tools/.redact_terms.txt is scrubbed")
+    print("   from recorded transcripts at WRITE time and blocked at commit time. Anything")
+    print("   said before this file exists is already on disk, and a later entry cannot")
+    print("   reach back and scrub it. Deny-list-only: anything unlisted passes verbatim.")
+    deny = cfgmod.TOOLS / ".redact_terms.txt"
+    if not deny.exists() and yes("   create it from the example now", True):
+        deny.write_text((cfgmod.TOOLS / ".redact_terms.example.txt").read_text(encoding="utf-8"),
+                        encoding="utf-8")
+        print(f"   wrote {deny.name} — add your addresses and phone numbers NOW, before the")
+        print("   rest of this setup is recorded")
+
+    print("\n2) Which model distils transcripts into notes? It runs once per conversation,")
     print("   every night, so this is the recurring cost of the whole system.")
     for m, why in MODELS:
         print(f"     {m} — {why}")
     cfg["extraction_model"] = ask("   model", cfg["extraction_model"])
 
-    print("\n2) Run the skills proposer in the nightly pipeline?")
+    print("\n3) Run the skills proposer in the nightly pipeline?")
     print("   It mines sessions for reusable procedures into Skills/_proposed/ for you to")
     print("   promote by hand. It is off by default because in the vault this came from it")
     print("   burned most of the sync window, failed most of its inputs without checkpointing")
@@ -128,25 +144,21 @@ def interview(cfg: dict) -> int:
     print("   against 16 promoted skills. Better run by hand with --limit when you want it.")
     cfg["steps"]["skills"] = yes("   enable in nightly sync", cfg["steps"]["skills"])
 
-    print("\n3) When should the sync run? It rewrites notes while it works, so pick an hour")
+    print("\n4) When should the sync run? It rewrites notes while it works, so pick an hour")
     print("   you are never mid-session in the vault.")
     cfg["sync"]["at"] = ask("   time (HH:MM, local)", cfg["sync"]["at"])
 
-    print("\n4) Nightly backup? The pipeline can end by committing that night's notes and")
-    print("   pushing them to your git remote, so the vault stops drifting from its backup.")
-    print("   It never bypasses the commit guards, never force-pushes, never commits code.")
-    print("   Leave it off until you have a remote you trust AND have seeded the deny list.")
+    print("\n5) Nightly backup? The pipeline can end by committing that night's notes and")
+    print("   pushing them to the remote named in push_remote, so the vault stops drifting")
+    print("   from its backup. It never bypasses the commit guards, never force-pushes,")
+    print("   never commits code. Leave it off until you have a remote you trust.")
     cfg["steps"]["push"] = yes("   enable nightly commit+push", cfg["steps"].get("push", False))
-
-    print("\n5) Redaction deny list. Anything you put in tools/.redact_terms.txt is scrubbed")
-    print("   from recorded transcripts and blocked at commit time. It is deny-list-only by")
-    print("   design — blanket scrubbing shreds real content — which means anything you do")
-    print("   not list passes through verbatim. Seed it now with your own addresses.")
-    deny = cfgmod.TOOLS / ".redact_terms.txt"
-    if not deny.exists() and yes("   create it from the example now", True):
-        deny.write_text((cfgmod.TOOLS / ".redact_terms.example.txt").read_text(encoding="utf-8"),
-                        encoding="utf-8")
-        print(f"   wrote {deny.name} — edit it before your first commit")
+    if cfg["steps"]["push"]:
+        # Never inferred: a clone of this repo has `origin` pointing at the harness, so an
+        # unconfigured push would publish a private vault into someone else's project.
+        print("   Which remote? NOT guessed — if you cloned Palimpsest, `origin` is the")
+        print("   harness repo and your notes would be pushed there.")
+        cfg["push_remote"] = ask("   push_remote", cfg.get("push_remote") or "origin")
 
     cfgmod.save(cfg)
     print("\n" + "=" * 60)

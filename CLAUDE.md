@@ -23,24 +23,37 @@ giving the trade-off in a sentence. Do not dump them all at once, and do not pro
 next before they answer. Say "five" if you announce a count — the deny list is a question too,
 not an afterthought, and a user told "four" will wonder what went wrong at the fifth.
 
-1. **Which model distils transcripts into notes?** It runs once per conversation, every night,
+1. **Seed the redaction deny list — ASK THIS FIRST, before anything else.** `tools/.redact_terms.txt`
+   is scrubbed from recorded transcripts and blocked at commit time. It is deny-list-only by
+   design — blanket scrubbing shreds real content — so anything unlisted passes through
+   verbatim. Ask for their email addresses and phone numbers now and write the file
+   immediately.
+   **Why first:** the `Stop` hook records this conversation to disk after *every* turn, and
+   redaction is applied at write time against whatever the list holds *then*. Ask it fifth and
+   four turns are already on disk unprotected — if they mention an address while answering an
+   earlier question, it is written verbatim and a later deny-list entry cannot reach back and
+   scrub it. That is this project's own documented failure (see
+   `notes/Deny-list-only PII redaction leaks unless every address variant is explicitly blocked.md`),
+   so do not reproduce it during setup. Anything they typed *before* this point is already
+   recorded: say so plainly rather than implying the list protects it retroactively.
+2. **Which model distils transcripts into notes?** It runs once per conversation, every night,
    so it is the recurring cost of the whole system. Recommend `claude-haiku-4-5-20251001`.
    Sonnet gives noticeably better notes for several times the nightly cost.
-2. **Run the skills proposer in the nightly sync?** Recommend **off**, concretely: in the vault
+3. **Run the skills proposer in the nightly sync?** Recommend **off**, concretely: in the vault
    this came from it consumed most of the sync window, failed most of its inputs without
    checkpointing so the same failures retried every night, and grew a 654-deep proposal queue
-   against 16 actually-promoted skills. Better run by hand with `--limit` when wanted.
-3. **What time should the sync run?** It rewrites notes while it works, so it wants an hour
+   against 16 actually-promoted skills. Better run by hand with `--limit` when wanted. If they
+   choose Sonnet above *and* turn this on, say plainly that this is the expensive corner of the
+   config and the first run's duration is worth watching.
+4. **What time should the sync run?** It rewrites notes while it works, so it wants an hour
    they are never mid-session in the vault. Recommend 06:00 local.
-4. **Nightly backup?** With it on, the pipeline ends by committing that night's notes and
-   pushing them to your git remote, so the vault stops drifting from its backup. Recommend
-   **off until they have a remote they trust and have seeded the deny list below** — the commit
-   guards are the only thing standing between an unattended commit and a published secret. It
-   never bypasses those guards, never force-pushes, and never commits code.
-5. **Seed the redaction deny list?** `tools/.redact_terms.txt` is scrubbed from recorded
-   transcripts and blocked at commit time. It is deny-list-only by design — blanket scrubbing
-   shreds real content — so anything unlisted passes through verbatim. Ask them to add their
-   own email addresses and phone numbers before the first commit.
+5. **Nightly backup?** With it on, the pipeline ends by committing that night's notes and
+   pushing them to the remote named in `push_remote`, so the vault stops drifting from its
+   backup. Recommend **off until they have a remote they trust** — the commit guards are the
+   only thing standing between an unattended commit and a published secret. It never bypasses
+   those guards, never force-pushes, and never commits code. If they say yes, you must also
+   ask which remote and write `push_remote`: it is never inferred, because a clone of this
+   repo has `origin` pointing at the harness and their notes would be published here.
 
 Then write `palimpsest.json` (schema in `tools/config.py`), and give them, in this order: the
 exact scheduler command for their OS for the time they chose (`python tools/setup.py` prints
