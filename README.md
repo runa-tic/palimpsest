@@ -116,7 +116,8 @@ and `extract_skills.py` distil, `link_notes.py` wires, `maintenance.py`, `dedupe
 `weekly_review.py` report, `briefing.py` and `hook_session_start.py` close the loop, `ask.py`
 and `rlm.py`/`rlm_worker.py` retrieve, and `redact.py`, `scan_secrets.py` and `scan_pii.py`
 keep private strings out of git. `templates/` holds the note schemas. `CLAUDE.md` is
-the operating protocol — the part that makes an agent behave like the vault's brain rather
+the operating protocol (with `SETUP.md` holding the one-time onboarding, so it costs no
+context once configured) — the part that makes an agent behave like the vault's brain rather
 than a chatbot standing next to it.
 
 ## Limitations, honestly

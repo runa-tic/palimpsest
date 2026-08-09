@@ -28,9 +28,9 @@ FIRST_RUN = """\
 
 There is no `palimpsest.json` at the vault root, so this vault has never been set up.
 
-Follow the **FIRST RUN** section at the top of `CLAUDE.md` now: do not offer a briefing, do
-not create notes, do not run the pipeline. Ask whether they want the one-time setup, and if
-so put the five questions to them one at a time.
+Read **`SETUP.md`** and follow it now: do not offer a briefing, do not create notes, do not
+run the pipeline. Ask whether they want the one-time setup, and if so put its five questions
+to them one at a time.
 """
 
 
