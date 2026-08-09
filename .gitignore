@@ -1,0 +1,18 @@
+# Pipeline state and logs — per-machine, never shared
+tools/.sync_status.json
+tools/.extract_state.json
+tools/.extract_skills_state.json
+tools/.extract_docs_state.json
+tools/sync.log
+tools/logs/
+tools/.rlm_scratch/
+__pycache__/
+*.pyc
+
+# Redaction deny list: holds the raw private strings you want scrubbed. LOCAL ONLY.
+tools/.redact_terms.txt
+# Allowlist for the secret scanner (known-public strings)
+tools/.secret_scan_allow.txt
+
+# Per-vault setup choices (written by tools/setup.py) — not shared
+palimpsest.json

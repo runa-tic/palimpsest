@@ -1,0 +1,28 @@
+#!/bin/sh
+# Vault secret guard. Blocks a commit if staged changes contain a
+# credential-shaped string. Enable on this machine with:
+#   git config core.hooksPath _tools/githooks
+#
+# Bypass once (use sparingly): git commit --no-verify
+
+PY=python
+command -v "$PY" >/dev/null 2>&1 || PY=python3
+
+"$PY" "_tools/scan_secrets.py"
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo ""
+  echo "Commit blocked by secret-scan. Redact the value (or add a known-public"
+  echo "string to _tools/.secret_scan_allow.txt), then commit again."
+  echo "To bypass once: git commit --no-verify"
+  exit "$status"
+fi
+
+# Deny-listed PII. redact.py only guards notes the conversation recorder writes;
+# hand-authored notes bypass it entirely, which is how a term deny-listed on 07-23
+# reappeared in an atomic note on 08-04.
+"$PY" "_tools/scan_pii.py"
+status=$?
+
+exit "$status"

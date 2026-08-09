@@ -1,0 +1,111 @@
+# Palimpsest
+
+*Conversations in, atomic notes out — a self-distilling Obsidian vault for Claude Code, and
+several months of notes on everything that went wrong building it.*
+
+A palimpsest is a manuscript scraped down and written over, the earlier text still faintly
+readable underneath. That is what this does to a working log: sessions are captured verbatim,
+distilled into atomic notes, linked into maps of content, deduplicated, reviewed weekly, and
+surfaced back to the agent that produced them.
+
+It runs against a real vault, daily, and has done since June 2026.
+
+## What it actually does
+
+A `Stop` hook records every Claude Code session into the vault as a conversation note, live,
+after each turn. A nightly pipeline then distils those transcripts into **atomic notes** (one
+idea, in your own words, with frontmatter and tags), wires each new note into the relevant map
+of content and its nearest siblings, proposes reusable **skills** — "when X, do Y, because Z" —
+into a review queue, regenerates a vault-health report, flags likely duplicate notes, writes a
+weekly review, and refreshes the daily briefing. A `SessionStart` hook feeds that briefing back
+in, so the next session opens already knowing what is stale, what rolled over, and what you
+were last working on.
+
+Two ways to ask it things. `ask.py` scores every note by keyword, feeds the best handful to a
+model and answers with citations — right for lookups. `rlm.py` is the other shape: the corpus
+stays a *variable* in a sandboxed Python REPL, and a root model that never sees the vault
+writes code to slice it and fans stateless sub-agents out over the slices. Context cost stays
+flat in corpus size, so it answers questions whose evidence is spread across hundreds of
+transcripts — "how did my thinking on X change", "audit every claim of type Y". The idea is
+borrowed from Prime Intellect's Prime Agent; the self-modifying half of that design is
+deliberately *not* borrowed, for reasons in the notes.
+
+No API key. Every model call shells out to the local `claude` CLI under your existing login.
+
+## Why it is shaped this way
+
+The code is a few thousand lines of Python and you could write something like it in a weekend.
+What took months was learning which of the obvious designs are wrong. Those are in
+[`notes/`](notes/), each one written the day something broke:
+
+- **The skills loop proposes; a human promotes.** An agent that reads its own trajectory and
+  edits its own prompts is a proposal queue with the promotion gate deleted, and the gate is
+  the only part that was load-bearing.
+- **Extraction quality collapses under naive volume**, and deduplication is a judgment call —
+  so the dedupe step *flags* candidates instead of merging them.
+- **Redaction is deny-list-only on purpose**, because blanket email and number scrubbing
+  shreds real content — and that choice leaks unless every variant is listed.
+- **A deny list that only runs in one writer is not a policy.** Redaction lived inside the
+  transcript recorder, so hand-written notes walked straight past it. Enforcement moved to the
+  commit hook, the one chokepoint every writer crosses.
+- **A sandbox that can call an LLM has egress**, so read scope is send scope. Blocking sockets
+  contains nothing when the harness itself hands the sandboxed code a model call.
+- **Generated blocks are not durable state.** The daily briefing is regenerated output; a
+  checkbox ticked inside it is silently overwritten on the next run.
+
+## Quickstart
+
+```bash
+git clone <this repo> && cd palimpsest
+cp -r templates/ /path/to/your/vault/Templates/
+cp -r tools/     /path/to/your/vault/tools/
+
+# capture + guards
+git -C /path/to/your/vault config core.hooksPath tools/githooks
+# register tools/hook_record.py as a Stop hook and tools/hook_session_start.py as a
+# SessionStart hook in your Claude Code settings
+
+python tools/setup.py                      # four decisions; prints your OS's scheduler command
+python tools/sync.py                       # the whole pipeline, idempotent
+python tools/ask.py "what did I decide about X?"
+python tools/rlm.py --steps 8 --subagents 20 "how has my thinking on X changed?"
+```
+
+You can skip `setup.py` entirely: with the hooks registered, an unconfigured vault makes the
+SessionStart hook hand the *agent* the same four questions, and it walks you through them
+conversationally and writes `palimpsest.json` for you. That is the intended path — the
+interface to this thing is a conversation, so onboarding may as well be one. The four choices
+are the extraction model (the recurring nightly cost), whether the skills proposer runs in the
+pipeline, when the sync fires, and what goes in the redaction deny list; each default is
+argued rather than assumed, in `tools/config.py`.
+
+`sync.py` runs each step under a hard timeout, records `ok`/`failures` to
+`.sync_status.json`, and is safe to run repeatedly — every step no-ops when nothing changed.
+Drive it from a real daily scheduled job, not a logon-triggered shortcut.
+
+## Layout
+
+`tools/` holds the pipeline: `import_claude.py` and `hook_record.py` capture, `extract_notes.py`
+and `extract_skills.py` distil, `link_notes.py` wires, `maintenance.py`, `dedupe.py` and
+`weekly_review.py` report, `briefing.py` and `hook_session_start.py` close the loop, `ask.py`
+and `rlm.py`/`rlm_worker.py` retrieve, and `redact.py`, `scan_secrets.py` and `scan_pii.py`
+keep private strings out of git. `templates/` holds the note schemas. `CLAUDE.md.example` is
+the operating protocol — the part that makes an agent behave like the vault's brain rather
+than a chatbot standing next to it.
+
+## Limitations, honestly
+
+Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
+assume that. The skills extractor is disabled in the default pipeline — it burned most of a
+sync window and failed most of its inputs without checkpointing, which is documented in
+`sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
+absence takes several nightly runs to drain. The retrieval scorer is keyword-based, not
+embeddings. None of this is a product; it is one person's working system, published because
+the failure log is more useful than the code.
+
+## Credit
+
+Written by runa-tic. Claude Code was the environment it was built in and the subject it was built
+around, which is also why the failure log exists.
+
+MIT.

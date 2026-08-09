@@ -1,0 +1,20 @@
+# Redaction deny list — copy to .redact_terms.txt (git-ignored) and fill in.
+# Read by redact.py, applied by the conversation recorder before a note is written, and
+# enforced again at commit time by scan_pii.py.
+#
+# Format, one per line:
+#   plain line   -> literal, case-insensitive substring match
+#   re: PATTERN  -> Python regex (case-insensitive)
+#   # comment    -> ignored
+#
+# Deny-list driven on purpose: a vault legitimately holds long numeric ids, addresses and
+# tickers, so blanket heuristics over-redact and shred real content. The cost of that choice
+# is that anything unlisted passes through verbatim — see
+# notes/Deny-list-only PII redaction leaks unless every address variant is explicitly blocked.md
+#
+# Deny the local-part stem too: partial fragments leak where the full address does not.
+
+# you@example.com
+# you@
+# +1 555-0100
+# re: ACCT[-\s]?\d{6,}
