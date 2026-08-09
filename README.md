@@ -55,15 +55,13 @@ What took months was learning which of the obvious designs are wrong. Those are 
 
 ## Quickstart
 
+The clone is a working vault. `CLAUDE.md` and `.claude/settings.json` ship configured, so
+opening a Claude Code session in it walks you through setup on the first turn.
+
 ```bash
 git clone <this repo> && cd palimpsest
-cp -r templates/ /path/to/your/vault/Templates/
-cp -r tools/     /path/to/your/vault/tools/
-
-# capture + guards
-git -C /path/to/your/vault config core.hooksPath tools/githooks
-# register tools/hook_record.py as a Stop hook and tools/hook_session_start.py as a
-# SessionStart hook in your Claude Code settings
+git config core.hooksPath tools/githooks     # secret + PII commit guards
+claude                                        # first session: it will offer setup
 
 python tools/setup.py                      # four decisions; prints your OS's scheduler command
 python tools/sync.py                       # the whole pipeline, idempotent
@@ -89,7 +87,7 @@ Drive it from a real daily scheduled job, not a logon-triggered shortcut.
 and `extract_skills.py` distil, `link_notes.py` wires, `maintenance.py`, `dedupe.py` and
 `weekly_review.py` report, `briefing.py` and `hook_session_start.py` close the loop, `ask.py`
 and `rlm.py`/`rlm_worker.py` retrieve, and `redact.py`, `scan_secrets.py` and `scan_pii.py`
-keep private strings out of git. `templates/` holds the note schemas. `CLAUDE.md.example` is
+keep private strings out of git. `templates/` holds the note schemas. `CLAUDE.md` is
 the operating protocol — the part that makes an agent behave like the vault's brain rather
 than a chatbot standing next to it.
 

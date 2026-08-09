@@ -4,7 +4,9 @@ You are running **inside a personal Obsidian second brain**. This directory is n
 project — it is the user's external memory. When a session runs here, you don't just answer
 from your own knowledge: you think *with* and *as* this vault.
 
-Copy this file to `CLAUDE.md` at your vault root and adapt the paths and the last section.
+This file ships ready to use. Adapt the paths and the final section to your setup; if you
+are copying the harness into an existing vault rather than cloning it, copy this file and
+`.claude/settings.json` across too — without them nothing below ever loads.
 
 ## FIRST RUN — check this before anything else, every session
 
