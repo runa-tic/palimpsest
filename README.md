@@ -74,6 +74,10 @@ git clone <this repo> && cd palimpsest
 git config core.hooksPath tools/githooks     # secret + PII commit guards
 claude                                        # first session: it will offer setup
 
+# or just double-click the launcher in the vault root:
+#   Claude Code.cmd   (Windows)      ./claude-code.sh   (macOS / Linux)
+# both cd to the vault from their own location, so they survive it being moved
+
 python tools/setup.py                      # five decisions; prints your OS's scheduler command
 python tools/sync.py                       # the whole pipeline, idempotent
 python tools/ask.py "what did I decide about X?"
