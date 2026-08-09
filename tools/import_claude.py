@@ -206,9 +206,25 @@ def process_transcript(f: Path, include_thinking=False, include_tools=False, all
 
 def import_code(args):
     projects = Path.home() / ".claude" / "projects"
-    files = sorted(projects.glob("*/*.jsonl"))
+    # Scope to THIS vault's own project by default. Globbing */*.jsonl imports every Claude
+    # Code conversation on the machine, from every unrelated project — measured on a fresh
+    # install: 155 conversations, 134 of them from a different vault entirely. That is a
+    # privacy surprise (a work vault silently absorbing personal project transcripts), and it
+    # makes the first sync cost one model call per conversation for material the user never
+    # asked to distil. Claude Code names each project directory by slugifying its path.
+    if getattr(args, "all_projects", False):
+        files = sorted(projects.glob("*/*.jsonl"))
+        scope = "ALL projects on this machine"
+    else:
+        slug = re.sub(r"[^A-Za-z0-9]", "-", str(VAULT))
+        files = sorted((projects / slug).glob("*.jsonl"))
+        scope = f"this vault only ({slug})"
+    print(f"  import scope: {scope}"
+          + ("" if getattr(args, "all_projects", False)
+             else " — use --all-projects to widen"))
     if not files:
-        print(f"No transcripts found under {projects}")
+        print(f"No transcripts found under {projects}"
+              + ("" if getattr(args, "all_projects", False) else f"/{slug}"))
         return
     count = sum(1 for f in files
                 if process_transcript(f, args.include_thinking, args.include_tools))
@@ -281,6 +297,10 @@ def main():
     pc = sub.add_parser("code", help="import local Claude Code transcripts")
     pc.add_argument("--include-thinking", action="store_true", help="include assistant reasoning (collapsible)")
     pc.add_argument("--include-tools", action="store_true", help="note tool calls")
+    pc.add_argument("--all-projects", action="store_true",
+                    help="import EVERY Claude Code project on this machine, not just this "
+                         "vault's. Off by default: it pulls in unrelated projects' transcripts "
+                         "and costs one distillation call per conversation.")
     pw = sub.add_parser("web", help="import a claude.ai conversations.json export")
     pw.add_argument("export", help="path to conversations.json (or the unzipped export folder)")
     pw.add_argument("--include-thinking", action="store_true")

@@ -51,6 +51,14 @@ not an afterthought, and a user told "four" will wonder what went wrong at the f
    ask which remote and write `push_remote`: it is never inferred, because a clone of this
    repo has `origin` pointing at the harness and their notes would be published here.
 
+**Before telling them to run the first sync, warn them what it costs.** `import_claude` pulls
+this vault's own Claude Code transcripts and `extract_notes` then makes one model call per
+conversation — on a machine with real history that is minutes to tens of minutes and a real
+bill, not a quick smoke test. Tell them the count first (`ls ~/.claude/projects/<this-vault's-slug>`)
+so the number is their decision. Do NOT start a sync yourself while the interview is still
+running: the pipeline rewrites notes and the setup is not finished until `palimpsest.json` is
+written. If they want a cheap first look, `python tools/briefing.py` alone is instant.
+
 Then write `palimpsest.json` (schema in `tools/config.py`), and give them, in this order: the
 exact scheduler command for their OS for the time they chose (`python tools/setup.py` prints
 it), `git config core.hooksPath tools/githooks` for the commit guards, and finally
