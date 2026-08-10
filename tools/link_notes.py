@@ -118,6 +118,32 @@ def needs_linking(text: str) -> bool:
     m = REL_PAT.search(text)
     return bool(m) and "[[ ]]" in m.group(0)
 
+INDEX = MOCS / "_MOC Index.md"
+IDX_START, IDX_END = "<!-- moc-index:start -->", "<!-- moc-index:end -->"
+
+
+def refresh_moc_index(moc_names) -> None:
+    """Keep the map-of-maps current.
+
+    Every MOC created from templates/MOC.md ends with '*Part of [[_MOC Index]].*', so that
+    note must exist or each new map ships a broken link and Vault Health never goes green.
+    Regenerating the list here means the hub cannot drift out of date the way a hand-kept
+    index does — and an index nobody trusts is one nobody opens.
+    """
+    if not INDEX.exists():
+        return
+    body = ("\n".join(f"- [[{n}]]" for n in sorted(moc_names))
+            or "*(none yet — create your first map from `templates/MOC.md`)*")
+    txt = INDEX.read_text(encoding="utf-8")
+    if IDX_START not in txt or IDX_END not in txt:
+        return
+    new = re.sub(re.escape(IDX_START) + r".*?" + re.escape(IDX_END),
+                 f"{IDX_START}\n{body}\n{IDX_END}", txt, flags=re.DOTALL)
+    if new != txt:
+        INDEX.write_text(new, encoding="utf-8")
+        print(f"  _MOC Index: {len(list(moc_names))} map(s)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true", help="relink every note, not just placeholders")
@@ -181,6 +207,7 @@ def main():
             f.write_text(txt, encoding="utf-8")
             note = f" (+{len(curated)} kept in curated sections)" if curated else ""
             print(f"  {moc}: {len(mocs[moc])} -> {len(fresh)}{note}")
+        refresh_moc_index([m for m in mocs if m != "_MOC Index"])
         print(f"Rebuilt {len(assigned)} MOC(s). {homeless} note(s) matched none.")
         return
 
@@ -222,6 +249,7 @@ def main():
         print(f"  linked: {stem}  ->  {best_moc or '(no MOC match)'}")
         linked += 1
 
+    refresh_moc_index([m for m in mocs if m != "_MOC Index"])
     print(f"Done. Linked {linked} note(s).")
 
 if __name__ == "__main__":
