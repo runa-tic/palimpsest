@@ -17,13 +17,17 @@ a few hundred thousand vectors and would add a dependency plus a consistency pro
 Cache: tools/cache/embed-<model>/ holds vectors.npy (float16) + manifest.json keyed by file
 path and content hash; reopening embeds only files whose bytes changed.
 
+Writers: one at a time per cache dir (see _WriterLock). The nightly sync runs `embed.py` as a
+step so the first query of the day finds the index current; an interactive query that opens the
+index at the same moment waits for it instead of racing it.
+
   from embed import Index
   idx = Index.open(files)                 # load cache, embed new/changed, save
   idx.search("how do I ...", top=8)       # [Hit(path, score, start, end)]
   idx.doc_scores("...")                   # {relpath: (best-chunk cosine, start, end)}
 """
 from __future__ import annotations
-import sys, os, re, json, hashlib, time, math
+import sys, os, re, json, hashlib, time, math, importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
@@ -46,6 +50,57 @@ CHECKPOINT = 2048
 # slots went to raw transcripts and the notes distilled from them ranked ~200th; R@8 on English
 # went 0.23 -> 0.48 from this term alone. 0.005/0.01/0.02 all help; 0.01 is the knee.
 LEN_BETA = 0.01
+LOCK_WAIT = 120     # seconds a second writer waits before proceeding anyway
+LOCK_STALE = 3600   # a lock file older than this belongs to a process that died holding it
+
+
+class _WriterLock:
+    """One writer per cache dir. Two processes that opened the index together (the nightly step
+    and an interactive query, or two queries) both saved; the atomic renames kept the files
+    consistent, but the last writer dropped the other's new rows until the next open re-embedded
+    them. The lock is a file created with O_EXCL, which is portable and crash-tolerant: a lock
+    older than LOCK_STALE is treated as abandoned, and a waiter gives up after LOCK_WAIT and
+    proceeds anyway, which is only the old behaviour and never a hang."""
+
+    def __init__(self, cache_dir: Path):
+        self.path = cache_dir / ".lock"
+        self.fd = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        t0, told = time.time(), False
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, str(os.getpid()).encode())
+                return self
+            except FileExistsError:
+                try:
+                    age = time.time() - self.path.stat().st_mtime
+                except OSError:
+                    continue                      # it vanished between the two calls; retry
+                if age > LOCK_STALE:
+                    try:
+                        self.path.unlink()
+                    except OSError:
+                        pass
+                    continue
+                if time.time() - t0 > LOCK_WAIT:
+                    print(f"embed: another writer has held the index for {age:.0f}s; proceeding without the lock",
+                          file=sys.stderr)
+                    return self
+                if not told:
+                    print("embed: another process is updating the index; waiting", file=sys.stderr)
+                    told = True
+                time.sleep(1)
+
+    def __exit__(self, *_):
+        if self.fd is not None:                   # never remove a lock we did not take
+            os.close(self.fd)
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
 FRONTMATTER = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.S)
 
 
@@ -172,11 +227,23 @@ class Index:
             wanted[self._rel(p)] = (p, hashlib.sha1(raw).hexdigest(),
                                     strip_frontmatter(raw.decode("utf-8", "ignore")))
 
+        if not any(self._delta(wanted)):
+            return
+        with _WriterLock(self.cache_dir):
+            # Another writer may have saved while we waited: reload and recompute against the
+            # files on disk so its rows are kept rather than overwritten.
+            self._load()
+            stale, fresh = self._delta(wanted)
+            if not stale and not fresh:
+                return
+            self._apply(wanted, stale, fresh, progress)
+
+    def _delta(self, wanted: dict) -> tuple[list[str], list[str]]:
         stale = [r for r in self.files if r not in wanted or self.files[r]["sha"] != wanted[r][1]]
         fresh = [r for r in wanted if r not in self.files or self.files[r]["sha"] != wanted[r][1]]
-        if not stale and not fresh:
-            return
+        return stale, fresh
 
+    def _apply(self, wanted: dict, stale: list[str], fresh: list[str], progress: bool):
         # keep vectors of unchanged files (row order == self.rows order)
         stale_set = set(stale)
         if self.rows:
@@ -257,6 +324,12 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    if importlib.util.find_spec("sentence_transformers") is None:
+        # The nightly sync runs this unconditionally; without the optional package it is a no-op,
+        # not a failure, so the sync stays green on a vault that never opted in.
+        print("embed: sentence-transformers is not installed; nothing to build "
+              "(opt in with `pip install sentence-transformers`)")
+        sys.exit(0)
     from ask import gather
     idx = Index.open(gather())
     dim = idx.vec.shape[1] if idx.vec.size else 0

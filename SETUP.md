@@ -85,7 +85,9 @@ entire section** and behave as the rest of this file describes.
 
 ## Optional, after setup: local embeddings for `ask.py`
 
-Not one of the five questions, and never part of the nightly run. By default `ask.py` ranks by
+Not one of the five questions. The nightly sync has an `embed` step that keeps the index current
+once it exists and is a no-op until the package is installed, so nothing here changes what
+`sync.py` costs by default. Out of the box `ask.py` ranks by
 keyword overlap, which needs nothing installed and is fine for lookups in the language the notes
 are written in. It cannot see that a question in one language and a note in another mean the
 same thing, and it cannot see a paraphrase. A local embedding model can, and it stays local.
@@ -94,8 +96,8 @@ If they want that: `pip install sentence-transformers` (torch and a ~120M-parame
 multilingual model, about a gigabyte, CPU only), then `python tools/embed.py` to build the index.
 Tell them the cost before they run it: roughly 20 chunks a second on a laptop CPU, so a vault
 with a few thousand files is tens of minutes, checkpointed every 2,048 chunks and resumable.
-After that, `ask.py` is hybrid by default; each later call embeds only the files that changed
-since the last one. `--mode lexical` is the keyword-only behaviour and needs nothing.
+After that, `ask.py` is hybrid by default; the nightly sync keeps the index current, and a call
+between syncs embeds only the files that changed since the last one. `--mode lexical` is the keyword-only behaviour and needs nothing.
 
 Without the package installed, `ask.py` says so once on stderr and answers by keyword. The
 index lives in `tools/cache/`, which is gitignored. `python tools/bench_retrieval.py --gen 100

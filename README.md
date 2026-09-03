@@ -147,9 +147,9 @@ assume that. The skills extractor is disabled in the default pipeline — it bur
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
 absence takes several nightly runs to drain. Embeddings are opt-in and CPU-bound: the first
-index over a large vault takes tens of minutes, the nightly sync does not refresh it (the first
-question after a day of edits pays for embedding what changed), and the small multilingual
-model closes only part of the cross-language gap — recall@8 of 0.25 in Russian against 0.58
+index over a large vault takes tens of minutes (the nightly sync then keeps it fresh, and that
+step is a no-op until the package is installed), and the small multilingual model closes only
+part of the cross-language gap — recall@8 of 0.25 in Russian against 0.58
 in English on the same notes. None of this is a product; it is one person's working system, published because
 the failure log is more useful than the code.
 

@@ -46,6 +46,7 @@ _ARGS = {
     "dedupe":      ["dedupe.py"],
     "triage":      ["triage_skills.py"],
     "weekly":      ["weekly_review.py"],
+    "embed":       ["embed.py"],
     "briefing":    ["briefing.py"],
     "push":        ["vault_push.py"],
 }
