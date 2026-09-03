@@ -82,7 +82,9 @@ stacked, so after one fix holds, re-test the whole path and say plainly what rem
 
 ## The toolkit (`tools/`, all idempotent, no API key)
 
-- `ask.py "q"` — cited answer from the best-matching notes. One hop; right for lookups.
+- `ask.py "q"` — cited answer from the best-matching notes. One hop; right for lookups. Ranks by
+  keyword overlap fused with local embeddings when `sentence-transformers` is installed (opt-in,
+  see `SETUP.md`), keyword-only otherwise; `--mode lexical|embed` for either alone.
 - `rlm.py "q"` — the corpus as a variable in a sandboxed REPL; a root model slices it and fans
   sub-agents over the slices. For synthesis across many notes. Costs sub-agent calls.
 - `import_claude.py code` — pull in Claude Code conversations.

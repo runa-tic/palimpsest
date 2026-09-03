@@ -21,8 +21,11 @@ weekly review, and refreshes the daily briefing. A `SessionStart` hook feeds tha
 in, so the next session opens already knowing what is stale, what rolled over, and what you
 were last working on.
 
-Two ways to ask it things. `ask.py` scores every note by keyword, feeds the best handful to a
-model and answers with citations — right for lookups. `rlm.py` is the other shape: the corpus
+Two ways to ask it things. `ask.py` ranks every note twice — by keyword overlap and by a local
+multilingual embedding model — fuses the two rankings by rank position, feeds the best handful
+to a model and answers with citations; right for lookups, and it works in a second language
+because the embedding half does. That half is opt-in (`pip install sentence-transformers`,
+CPU only, nothing leaves the machine) and without it `ask.py` is plain keyword search. `rlm.py` is the other shape: the corpus
 stays a *variable* in a sandboxed Python REPL, and a root model that never sees the vault
 writes code to slice it and fans stateless sub-agents out over the slices. Context cost stays
 flat in corpus size, so it answers questions whose evidence is spread across hundreds of
@@ -57,6 +60,18 @@ What took months was learning which of the obvious designs are wrong. Those are 
   score 0.13 lexically. `semantic.py` compares meaning instead — TF-IDF plus a truncated SVD,
   on numpy alone, no model download — and similarity turns out *not* to be monotonic in
   usefulness, so the rule is a semantic threshold **plus** a lexical floor.
+- **Max over chunks favours long documents.** Scoring a file by its best chunk's cosine hands a
+  1,000-chunk transcript a thousand draws at the noise ceiling and a one-paragraph note a single
+  draw. The first embedding benchmark on this vault put 230 of 320 top-8 slots on raw
+  transcripts and ranked the notes distilled from them around 200th, *below keyword search*.
+  A penalty in ln(chunks) took English recall@8 from 0.23 to 0.48 by itself.
+- **Rank fusion with a noise list loses to the good list alone.** Reciprocal rank fusion needs no
+  calibration between a term count and a cosine, but it gives every list an equal vote. A
+  Russian question against English notes yields a keyword list that is noise, and equal-weight
+  fusion scored below embeddings alone. Weighting the keyword lane at 0.3 keeps its wins on
+  exact identifiers: recall@8 of 0.58 English / 0.25 Russian against 0.31 / 0.02 for keyword
+  search, on 150 notes × two languages of synthetic questions (`bench_retrieval.py` regenerates
+  the whole table on your own notes).
 - **Notes rarely rot; memory does.** Extraction already discards temporary state, so shelf-life
   labelling finds little in `10 Notes/`. The perishable claims live in Claude's memory
   directory, which is loaded into context every session and asserts deployment state as fact —
@@ -82,6 +97,10 @@ python tools/setup.py                      # five decisions; prints your OS's sc
 python tools/sync.py                       # the whole pipeline, idempotent
 python tools/ask.py "what did I decide about X?"
 python tools/rlm.py --steps 8 --subagents 20 "how has my thinking on X changed?"
+
+pip install sentence-transformers          # optional: local embeddings for ask.py (~1 GB, CPU)
+python tools/embed.py                      # build the index once; later runs embed only what changed
+python tools/bench_retrieval.py --gen 100 --run   # keyword vs embeddings vs hybrid, on YOUR notes
 ```
 
 You can skip `setup.py` entirely: with the hooks registered, an unconfigured vault makes the
@@ -113,8 +132,9 @@ harness does not ship generated notes, and `vault_push` will tell you it is skip
 
 `tools/` holds the pipeline: `import_claude.py` and `hook_record.py` capture, `extract_notes.py`
 and `extract_skills.py` distil, `link_notes.py` wires, `maintenance.py`, `dedupe.py` and
-`weekly_review.py` report, `briefing.py` and `hook_session_start.py` close the loop, `ask.py`
-and `rlm.py`/`rlm_worker.py` retrieve, and `redact.py`, `scan_secrets.py` and `scan_pii.py`
+`weekly_review.py` report, `briefing.py` and `hook_session_start.py` close the loop, `ask.py`,
+`embed.py` and `rlm.py`/`rlm_worker.py` retrieve (`bench_retrieval.py` scores the first two),
+and `redact.py`, `scan_secrets.py` and `scan_pii.py`
 keep private strings out of git. `templates/` holds the note schemas. `CLAUDE.md` is
 the operating protocol (with `SETUP.md` holding the one-time onboarding, so it costs no
 context once configured) — the part that makes an agent behave like the vault's brain rather
@@ -126,8 +146,11 @@ Built for Windows with Obsidian and a PARA layout, so paths and a couple of proc
 assume that. The skills extractor is disabled in the default pipeline — it burned most of a
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
-absence takes several nightly runs to drain. The retrieval scorer is keyword-based, not
-embeddings. None of this is a product; it is one person's working system, published because
+absence takes several nightly runs to drain. Embeddings are opt-in and CPU-bound: the first
+index over a large vault takes tens of minutes, the nightly sync does not refresh it (the first
+question after a day of edits pays for embedding what changed), and the small multilingual
+model closes only part of the cross-language gap — recall@8 of 0.25 in Russian against 0.58
+in English on the same notes. None of this is a product; it is one person's working system, published because
 the failure log is more useful than the code.
 
 ## Credit

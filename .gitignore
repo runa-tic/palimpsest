@@ -6,6 +6,8 @@ tools/.extract_docs_state.json
 tools/sync.log
 tools/logs/
 tools/.rlm_scratch/
+# Local embedding index (tens of MB, rebuilt from content hashes) and benchmark queries
+tools/cache/
 __pycache__/
 *.pyc
 
