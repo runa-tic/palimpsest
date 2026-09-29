@@ -97,8 +97,12 @@ def scan_text(text: str, allow: list[str]) -> list[tuple]:
 
 
 def staged_files() -> list[str]:
+    """Paths whose staged version is new content: Added, Copied, Modified, and Renamed. With
+    --name-only a rename or copy yields its DESTINATION, which is the path `git show :path`
+    reads. R was missing until the Codex review of 2026-09: rename a note and add a key in the
+    same commit and neither guard read a byte of it."""
     out = subprocess.run(
-        ["git", "diff", "--cached", "-z", "--name-only", "--diff-filter=ACM"],
+        ["git", "diff", "--cached", "-z", "--name-only", "--diff-filter=ACMR"],
         cwd=VAULT, capture_output=True, text=True, encoding="utf-8",
     ).stdout
     return [p for p in out.split("\0") if p]
@@ -171,6 +175,8 @@ def main() -> int:
         for rel in staged_files():
             if is_skipped(rel):
                 continue
+            # The name is content too: import_claude.py names files after the conversation.
+            sources.append((f"{rel} [path]", rel))
             c = staged_content(rel)
             if c is not None:
                 sources.append((rel, c))
@@ -178,6 +184,11 @@ def main() -> int:
 
     high, warn = [], []
     for rel, text in sources:
+        if rel.endswith(" [path]"):
+            # The path is being scanned as content, so it must not be printed raw either.
+            for _, rules in (("HIGH", HIGH), ("WARN", WARN)):
+                for _, rx in rules:
+                    rel = rx.sub(lambda m: mask(m.group(0)), rel)
         for sev, label, lineno, masked in scan_text(text, allow):
             (high if sev == "HIGH" else warn).append((rel, label, lineno, masked))
 
