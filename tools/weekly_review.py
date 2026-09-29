@@ -4,7 +4,7 @@
 Writes Reviews/Weekly/YYYY-Www.md (per ISO week). Safe to run daily — it refreshes the
 current week's file in place. Wired into sync.py.
 
-Usage (from vault root):  python _tools/weekly_review.py
+Usage (from vault root):  python tools/weekly_review.py
 """
 from __future__ import annotations
 import sys, re, time

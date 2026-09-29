@@ -3,7 +3,7 @@
 
 `redact.py` runs inside the conversation recorder, so it only protects notes the *hook*
 writes. Anything authored by hand — an atomic note, a project page, a daily entry — never
-passes through it, and a term added to `_tools/.redact_terms.txt` months ago walks back
+passes through it, and a term added to `tools/.redact_terms.txt` months ago walks back
 into the vault the moment someone types it. Found exactly that on 2026-08-08: a farm login
 address, deny-listed since 07-23, sitting in an atomic note written 08-04.
 
@@ -18,7 +18,7 @@ Values are never printed. The Stop hook records this session into the vault, so 
 address while removing it just recreates the leak in a new file; masked forms only.
 
 Usage:
-  python _tools/scan_pii.py        # scan staged changes (used by pre-commit)
+  python tools/scan_pii.py        # scan staged changes (used by pre-commit)
 """
 from __future__ import annotations
 import sys, re
@@ -98,7 +98,7 @@ def main() -> int:
     print("")
     print("Scrub the value from the file (do NOT paste it into the terminal — this session")
     print("is recorded into the vault). If the term no longer needs denying, remove it from")
-    print("_tools/.redact_terms.txt. To bypass once: git commit --no-verify")
+    print("tools/.redact_terms.txt. To bypass once: git commit --no-verify")
     return 1
 
 

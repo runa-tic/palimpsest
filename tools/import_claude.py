@@ -6,10 +6,10 @@ Two sources:
   2. claude.ai    -> conversations.json from a data export (Settings > Privacy > Export data)
 
 Usage (run from the vault root):
-  python _tools/import_claude.py code                      # import all local Claude Code sessions
-  python _tools/import_claude.py web path/to/conversations.json
-  python _tools/import_claude.py code --include-thinking    # also include assistant reasoning
-  python _tools/import_claude.py code --include-tools       # also note tool calls
+  python tools/import_claude.py code                      # import all local Claude Code sessions
+  python tools/import_claude.py web path/to/conversations.json
+  python tools/import_claude.py code --include-thinking    # also include assistant reasoning
+  python tools/import_claude.py code --include-tools       # also note tool calls
 
 Re-running is safe: a note is only rewritten if its source changed (tracked by id).
 """
@@ -122,7 +122,7 @@ def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
     out = "\n".join(fm_lines) + "\n\n" + body
     # Scrub sensitive strings (credentials + the local deny list) before the note is
     # written, so the synced log never carries them. Best-effort: redaction must never
-    # break recording. See _tools/redact.py.
+    # break recording. See tools/redact.py.
     try:
         import redact
         out, _ = redact.redact_text(out)

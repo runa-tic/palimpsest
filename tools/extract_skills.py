@@ -12,10 +12,10 @@ status: proposed. A human (or Claude) reviews, edits, and promotes the good ones
 "Skills/" — nothing is auto-published. See Skills/README.md.
 
 Usage (from vault root):
-  python _tools/extract_skills.py                 # process new/changed conversations only
-  python _tools/extract_skills.py --force         # reprocess everything
-  python _tools/extract_skills.py --dry-run       # show what would be proposed
-  python _tools/extract_skills.py --limit 1       # at most N conversations
+  python tools/extract_skills.py                 # process new/changed conversations only
+  python tools/extract_skills.py --force         # reprocess everything
+  python tools/extract_skills.py --dry-run       # show what would be proposed
+  python tools/extract_skills.py --limit 1       # at most N conversations
 
 Requires the `claude` CLI on PATH and an active login. No API key needed.
 """

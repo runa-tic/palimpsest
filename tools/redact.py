@@ -10,7 +10,7 @@ the fix is durable instead of whack-a-mole.
 Two redaction sources:
   1. Built-in credential shapes, reused from scan_secrets HIGH (API keys, tokens,
      private keys). Unambiguously must never sync, so they are always masked.
-  2. A local, git-ignored deny list: _tools/.redact_terms.txt — one term per line.
+  2. A local, git-ignored deny list: tools/.redact_terms.txt — one term per line.
          plain line   -> literal, case-insensitive substring match
          re: PATTERN  -> Python regex (case-insensitive)
          # comment
@@ -92,7 +92,7 @@ def redact_text(s: str) -> tuple[str, int]:
 
 
 if __name__ == "__main__":
-    # Quick self-check / manual scrub: `python _tools/redact.py < file` prints redacted.
+    # Quick self-check / manual scrub: `python tools/redact.py < file` prints redacted.
     import sys
     data = sys.stdin.read()
     out, hits = redact_text(data)
