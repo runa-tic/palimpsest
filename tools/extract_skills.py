@@ -289,6 +289,7 @@ def main():
 
     state = load_state()
     processed = 0
+    failed: list[str] = []
     total = 0
     for src in sources:
         key = str(src.relative_to(VAULT))
@@ -306,6 +307,7 @@ def main():
             skills = extract_skills_from(transcript, args.model)
         except Exception as e:
             print(f"  ! skipped ({e})")
+            failed.append(src.name)      # not recorded in state, so the next run retries it
             continue
         written = [w for s in skills
                    if (w := write_proposed_skill(s, src, date, args.dry_run, args.dup_threshold))]
@@ -320,6 +322,15 @@ def main():
     print(f"\nDone. Processed {processed} conversation(s), proposed {total} skill(s) into Skills/_proposed/.")
     if total and not args.dry_run:
         print("Review them and promote the keepers into Skills/ (status: active).")
+
+
+    if failed:
+        # Keep going past a failure, but never report the run clean. Exiting 0 here let a night
+        # where EVERY conversation failed show as a clean step in sync.py (Codex review, 2026-09;
+        # the 2026-07-28 run lost 70 of 136 conversations this way, unseen).
+        print(f"FAILED on {len(failed)} conversation(s) — will retry next run: "
+              + ", ".join(failed[:5]) + (" …" if len(failed) > 5 else ""))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
