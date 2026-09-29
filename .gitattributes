@@ -1,0 +1,9 @@
+# The State ledger is append-only and written from every machine that shares the vault: git
+# unions the lines instead of stopping the rebase, and the fold is order-independent (latest
+# valid_from wins), so a union is always the right merge for it.
+State/facts.jsonl merge=union
+State/proposed.jsonl merge=union
+# Deliberately NOT Daily/*.md. A union merge of two machines' renders of the same day keeps BOTH
+# briefing blocks, silently; a stopped rebase is loud. With the pull step on, the briefing is
+# never rendered on a stale tree, so a daily-note conflict should not arise — and if it does, a
+# human should see it.

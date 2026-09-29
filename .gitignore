@@ -1,5 +1,12 @@
 # Pipeline state and logs — per-machine, never shared
 tools/.sync_status.json
+tools/.sync.lock
+tools/.vault_push.lock
+# State ledger: regenerated on every fold, or per-machine. facts.jsonl, entities.json,
+# proposed.jsonl and seen/<machine>.json ARE committed — they are the ledger.
+State/Register.md
+State/current.json
+State/.observed.json
 tools/.extract_state.json
 tools/.extract_skills_state.json
 tools/.extract_docs_state.json

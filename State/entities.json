@@ -1,0 +1,15 @@
+{
+ "kinds": {
+  "host": {"stale_after_h": null},
+  "service": {"stale_after_h": 24},
+  "timer": {"stale_after_h": 26},
+  "flag": {"stale_after_h": 24},
+  "workflow": {"stale_after_h": null}
+ },
+ "entities": {
+  "station": {
+   "kind": "flag",
+   "desc": "which machine holds the vault for hand-written work (tools/state.py station)"
+  }
+ }
+}
