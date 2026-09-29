@@ -9,8 +9,8 @@ then rewrites the note's Related section and adds it to that MOC's note list.
 Deterministic, no model calls — safe to run on every sync.
 
 Usage (from vault root):
-  python _tools/link_notes.py
-  python _tools/link_notes.py --all   # relink every note, not just placeholders
+  python tools/link_notes.py
+  python tools/link_notes.py --all   # relink every note, not just placeholders
 """
 from __future__ import annotations
 import sys, re, argparse

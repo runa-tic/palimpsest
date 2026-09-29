@@ -11,12 +11,12 @@ Severity:
         assignments) -> reported only, never blocks (unless --strict)
 
 Usage (from vault root):
-  python _tools/scan_secrets.py            # scan staged changes (used by pre-commit)
-  python _tools/scan_secrets.py --all      # scan the whole vault
-  python _tools/scan_secrets.py PATH ...   # scan specific files/dirs
-  python _tools/scan_secrets.py --strict   # also block on WARN findings
+  python tools/scan_secrets.py            # scan staged changes (used by pre-commit)
+  python tools/scan_secrets.py --all      # scan the whole vault
+  python tools/scan_secrets.py PATH ...   # scan specific files/dirs
+  python tools/scan_secrets.py --strict   # also block on WARN findings
 
-Allowlist: _tools/.secret_scan_allow.txt  (substrings of known-public values;
+Allowlist: tools/.secret_scan_allow.txt  (substrings of known-public values;
            any line containing one is exempt; '#' starts a comment).
 Bypass one commit (use sparingly): git commit --no-verify
 """
