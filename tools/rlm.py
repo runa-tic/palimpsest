@@ -32,8 +32,8 @@ try:
 except Exception:
     pass
 
-VAULT = Path(__file__).resolve().parent.parent
-TOOLS = VAULT / "_tools"
+TOOLS = Path(__file__).resolve().parent   # derived, never spelled: this was "_tools", the layout
+VAULT = TOOLS.parent                       # of the vault it came from, and the worker never started
 SCRATCH = TOOLS / ".rlm_scratch"
 LOGDIR = TOOLS / "logs" / "rlm"
 ROOT_MODEL = "claude-opus-5"
