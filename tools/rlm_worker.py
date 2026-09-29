@@ -20,7 +20,7 @@ from collections import Counter, defaultdict
 
 VAULT = Path(sys.argv[1]).resolve()
 SCRATCH = Path(sys.argv[2]).resolve()
-TOOLS = VAULT / "_tools"
+TOOLS = Path(__file__).resolve().parent   # this file's own dir, where ask.py lives (not VAULT / "_tools")
 sys.path.insert(0, str(TOOLS))
 import ask  # reuse the vault's proven keyword scorer rather than inventing a second one
 
