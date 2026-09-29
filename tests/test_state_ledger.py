@@ -30,6 +30,11 @@ def main() -> int:
          "fold: latest valid_from wins; alias resolves", r.stdout)
     facts = (v / "State" / "facts.jsonl").read_text().splitlines()
     c.ok(len(facts) == 2, "append-only: both facts are kept", str(len(facts)))
+    r = __import__("subprocess").run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import ask; "
+                                      "print(ask.state_context('where does the api run now?')[0])"],
+                                     cwd=v, capture_output=True, text=True)
+    c.ok("my-api.host = server-1" in r.stdout, "ask.py's state hop puts the current fact in the prompt (by alias)",
+         r.stdout + r.stderr)
     r = st(v, "show", "--hot", "--opener")
     c.ok("my-api" in r.stdout and "server-1" in r.stdout, "opener block shows hot entities", r.stdout)
     c.ok((v / "State" / "Register.md").exists(), "fold writes the Register")
