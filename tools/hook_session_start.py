@@ -65,6 +65,41 @@ def sync_line() -> str:
     return (f"**Sync:** clean — {age} "
             f"({d.get('steps','?')} steps, {d.get('duration_sec','?')}s){tail}")
 
+def pull_line() -> str:
+    """Rebase onto the remote before the briefing runs, so a session never starts rendering
+    today's note on a tree the other machine has moved past. Reports what happened; a conflict
+    is left for a human and said out loud."""
+    try:
+        p = subprocess.run([PY, str(TOOLS / "vault_push.py"), "--pull-only"], cwd=str(VAULT),
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
+        out = (p.stdout or "").strip().splitlines()
+        msg = out[-1].replace("vault-push: ", "") if out else f"exit {p.returncode}, no output"
+    except subprocess.TimeoutExpired:
+        msg = "timed out after 60s (remote unreachable?)"
+    except Exception as e:
+        msg = f"could not run ({type(e).__name__})"
+    warn = "" if msg.startswith("pull:") else "⚠️ "
+    return f"**Pull at start:** {warn}{msg}"
+
+
+def pull_is_ok(pull: str) -> bool:
+    """True only when pull_line() reported a completed pull (no ⚠️, not empty)."""
+    return pull.startswith("**Pull at start:**") and "⚠️" not in pull
+
+
+def state_block() -> str:
+    """The State ledger's hot entities, dated and sourced (tools/state.py). Empty when the vault
+    has no ledger. Read-only: the probes run in the sync, not here, so the opener stays fast."""
+    if not (VAULT / "State" / "entities.json").exists():
+        return ""
+    try:
+        p = subprocess.run([PY, str(TOOLS / "state.py"), "show", "--hot", "--opener"], cwd=str(VAULT),
+                           capture_output=True, text=True, encoding="utf-8", timeout=30)
+        return (p.stdout or "").strip()
+    except Exception as e:
+        return f"**State:** ⚠️ ledger unavailable ({type(e).__name__})"
+
+
 def run(script: str) -> str:
     try:
         return subprocess.run([PY, str(TOOLS / script)], cwd=str(VAULT),
@@ -90,7 +125,14 @@ def main():
         }}))
         return
 
-    run("briefing.py")                 # ensure today's daily note + briefing exists
+    cfg = cfgmod.load()
+    pull = pull_line() if cfg["steps"].get("pull") else ""
+    if not pull or pull_is_ok(pull):
+        run("briefing.py")             # ensure today's daily note + briefing exists
+    else:
+        # Never render on a tree that may be behind the other machine: the push-time rebase would
+        # then stop on today's note, or with merge=union keep both renders.
+        pull += " · briefing not refreshed (tree may be behind the other machine)"
     health_out = run("maintenance.py") # refresh Reviews/Vault Health.md
 
     brief = ""
@@ -111,6 +153,11 @@ def main():
         ctx += f"\n**Vault health:** {health}  (details: [[Vault Health]])\n"
     try:
         ctx += f"\n{sync_line()}\n"
+        if pull:
+            ctx += f"\n{pull}\n"
+        sb = state_block()
+        if sb:
+            ctx += f"\n{sb}\n"
     except Exception:
         pass  # the opener must never break on its own status line
     if brief:
