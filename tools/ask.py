@@ -139,7 +139,7 @@ def hybrid_rank(q: str, corpus: list[tuple[Path, str]], idx, k: int = RRF_K, dep
 # and is weaker and ~4x slower on English. Benchmarks, 2026-09 (notes/ has both): on a 291-note
 # subset R@1 0.35 -> 0.67 and R@8 0.72 -> 0.86; on a 5,286-file vault, depth sweep of R@8 / rerank
 # ms: 20 0.46/210, 50 0.55/500, 100 0.59/970, 150 0.62/2200, 200 0.63/3500 (hybrid alone 0.38).
-# Past 100, R@1, MRR and English R@8 are flat while latency doubles.
+# Past 100, R@1 and MRR are flat and English R@8 barely moves (0.73 -> 0.75) while latency doubles.
 RERANK_DEPTH = 100
 RERANK_CHARS = 1200
 RERANK_MODELS = {"en": "cross-encoder/ms-marco-MiniLM-L-6-v2",

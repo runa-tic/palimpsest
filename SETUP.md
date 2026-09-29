@@ -103,3 +103,24 @@ Without the package installed, `ask.py` says so once on stderr and answers by ke
 index lives in `tools/cache/`, which is gitignored. `python tools/bench_retrieval.py --gen 100
 --run` writes a report to `40 Resources/` comparing keyword, embeddings and hybrid on questions
 generated from their own notes, in English and Russian; the README's numbers came from it.
+
+The same install enables the **rerank**: `ask.py` reorders its top 100 with a cross-encoder,
+English or multilingual by the question's script. The two models (~0.5 GB) download from
+Hugging Face on the first question; `--no-rerank` skips them. On the source vault it took
+recall@8 from 0.38 to 0.59 for about a second per question — see `notes/`.
+
+## Optional: two machines, and the State ledger
+
+Only if they work the vault from more than one machine, or want the agent to know what is true
+*right now* (where a service runs, whether a job is alive). Neither is one of the five questions.
+
+- **Two machines:** set `push_remote`, then turn on both `steps.push` and `steps.pull` in
+  `palimpsest.json` on each machine, and give each a distinct `machine` name. Every run then
+  pulls first, skips the briefing if the pull failed, and rebases before pushing; conflicts
+  are reported, never resolved.
+- **State ledger:** turn on `steps.state`. The sync then records this machine's last run and
+  where its checkout stands against the remote in `State/`. Anything else they care about is a
+  command probe under `"probes"` in `palimpsest.json` (format in `tools/state.py`'s docstring),
+  or a fact they state by hand with `python tools/state.py add`. Tell them what it is for: a
+  fact about the present gets a date and a source, and the newest dated fact wins.
+

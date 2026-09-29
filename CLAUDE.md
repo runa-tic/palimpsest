@@ -28,6 +28,13 @@ For any substantive question, search the vault first and ground your answer in i
   *not yet in the brain*.
 - Shortcuts: `python tools/ask.py "question"` for a lookup; `python tools/rlm.py "question"`
   when the answer needs many notes at once rather than the best few.
+- **State before prose.** If the vault has a State ledger (`State/entities.json`), a question
+  about where something runs, whether it is up, or which flag is set is answered from
+  `python tools/state.py show <entity>` first — `ask.py` does this hop itself. A note that
+  restates state is evidence with a date, not the current value; when they disagree the newer
+  dated fact wins and the note is what gets fixed. When something moves, restarts or changes
+  hands, record it: `python tools/state.py add <entity> <attr> <value> --source "[[note]]"`
+  (omit `--since` for "now").
 
 **2. Capture as you go.**
 When the conversation produces something durable — a decision, an insight, a fact worth
@@ -83,8 +90,9 @@ stacked, so after one fix holds, re-test the whole path and say plainly what rem
 ## The toolkit (`tools/`, all idempotent, no API key)
 
 - `ask.py "q"` — cited answer from the best-matching notes. One hop; right for lookups. Ranks by
-  keyword overlap fused with local embeddings when `sentence-transformers` is installed (opt-in,
-  see `SETUP.md`), keyword-only otherwise; `--mode lexical|embed` for either alone.
+  keyword overlap fused with local embeddings, then a language-routed cross-encoder rereads the
+  top 100, when `sentence-transformers` is installed (opt-in, see `SETUP.md`); keyword-only
+  otherwise. `--mode lexical|embed`, `--no-rerank`, `--retrieve-only` (sources, no model call).
 - `rlm.py "q"` — the corpus as a variable in a sandboxed REPL; a root model slices it and fans
   sub-agents over the slices. For synthesis across many notes. Costs sub-agent calls.
 - `import_claude.py code` — pull in Claude Code conversations.
@@ -93,6 +101,8 @@ stacked, so after one fix holds, re-test the whole path and say plainly what rem
 - `link_notes.py` — auto-link notes lacking links into MOCs + siblings.
 - `maintenance.py` / `dedupe.py` / `weekly_review.py` — vault health, duplicate candidates, review.
 - `briefing.py` — fill today's daily note.
+- `state.py` — the State ledger: `show` / `add` / `retract` / `probe` / `lint` / `station`.
+- `vault_push.py` — commit content, rebase onto `push_remote`, push; `--pull-only` to catch up.
 - `sync.py` — run the whole pipeline.
 
 ## Start each session by
