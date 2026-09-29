@@ -131,6 +131,88 @@ def hybrid_rank(q: str, corpus: list[tuple[Path, str]], idx, k: int = RRF_K, dep
             fused[key] = (fused.get(key, (0.0, p))[0] + w / (k + r + 1), p)
     return [p for _, p in sorted(fused.values(), key=lambda x: -x[0])]
 
+# Cross-encoder rerank of the fused list's head. A bi-encoder (embed.py) embeds question and note
+# separately and compares vectors; a cross-encoder reads the pair together and scores relevance
+# directly — much sharper at the top, far too slow to run over a whole vault, so it only reorders
+# the first RERANK_DEPTH. Routed by the question's script: ms-marco is English-only (on Russian
+# questions it pushed the right note from rank 1-6 to 9-148), mmarco is its multilingual sibling
+# and is weaker and ~4x slower on English. Benchmarks, 2026-09 (notes/ has both): on a 291-note
+# subset R@1 0.35 -> 0.67 and R@8 0.72 -> 0.86; on a 5,286-file vault, depth sweep of R@8 / rerank
+# ms: 20 0.46/210, 50 0.55/500, 100 0.59/970, 150 0.62/2200, 200 0.63/3500 (hybrid alone 0.38).
+# Past 100, R@1, MRR and English R@8 are flat while latency doubles.
+RERANK_DEPTH = 100
+RERANK_CHARS = 1200
+RERANK_MODELS = {"en": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+                 "multi": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"}
+_CE: dict[str, object] = {}
+
+def _cross_encoder(q: str):
+    lane = "multi" if re.search(r"[А-Яа-яЁё]", q) else "en"
+    if lane not in _CE:
+        from sentence_transformers import CrossEncoder
+        _CE[lane] = CrossEncoder(RERANK_MODELS[lane], device="cpu")
+    return _CE[lane]
+
+def rerank(q: str, ranked: list[Path], text_of: dict[str, str], spans: dict[str, tuple[int, int]] | None = None,
+           depth: int = RERANK_DEPTH) -> list[Path]:
+    """Reorder ranked[:depth] by cross-encoder score over (question, title + passage); the tail keeps
+    its order. The passage is the note's head, or for a long file the region around embed.py's best
+    chunk. Any failure (model not downloaded, offline) returns the input object unchanged."""
+    head = ranked[:depth]
+    if len(head) < 2:
+        return ranked
+    try:
+        from embed import strip_frontmatter
+        model = _cross_encoder(q)
+        pairs = []
+        for f in head:
+            key = f.resolve().as_posix().lower()
+            body = strip_frontmatter(text_of.get(key, ""))
+            lo = spans[key][0] if spans and key in spans and len(body) > 2 * RERANK_CHARS else 0
+            pairs.append((q, f"{f.stem}. {body[lo: lo + RERANK_CHARS]}"))
+        scores = model.predict(pairs, batch_size=32, show_progress_bar=False)
+    except Exception as e:
+        print(f"rerank: skipped ({type(e).__name__}: {str(e)[:120]})", file=sys.stderr)
+        return ranked
+    return [f for _, f in sorted(zip(scores, head), key=lambda x: -x[0])] + ranked[depth:]
+
+def state_context(q: str) -> tuple[str, list[str]]:
+    """State-first hop. If the question names a registered State-ledger entity (or alias), prepend
+    the ledger's current facts for it — dated, sourced — so "where does X run" is answered from
+    State/facts.jsonl before any note is searched. Prose that restates state rots; the ledger folds."""
+    try:
+        import importlib.util as _iu
+        spec = _iu.spec_from_file_location("state", Path(__file__).resolve().parent / "state.py")
+        st = _iu.module_from_spec(spec); spec.loader.exec_module(st)
+        kinds, ents, alias = st.load_entities()
+        if not ents:
+            return "", []
+        ql = q.lower()
+        hits: list[str] = []
+        for name, eid in sorted(alias.items(), key=lambda kv: -len(kv[0])):
+            if len(name) < 3 or eid in hits:
+                continue
+            if re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", ql):
+                hits.append(eid)
+        if not hits:
+            return "", []
+        facts, _ = st.load_facts()
+        cur, obs = st.fold(facts), st.load_observed()
+        lines = ["### STATE (ledger — current view, dated and sourced; prefer it over prose for "
+                 "where-does-X-run / status / flag questions; cite [[State Register]] and the fact's source)"]
+        for eid in hits[:6]:
+            recs = cur.get(eid, {})
+            if not recs:
+                lines.append(f"- {eid}: no facts recorded")
+                continue
+            for attr, rec in sorted(recs.items(), key=lambda kv: st.attr_order(kv[0])):
+                lines.append(f"- {eid}.{attr} = {st.render_value(rec)}  ({rec.get('kind')}, "
+                             f"{st.when_str(rec, eid, attr, obs)}; source: {st.src_str(rec) or 'n/a'})")
+        return "\n".join(lines) + "\n", hits
+    except Exception as e:
+        print(f"state hop skipped ({type(e).__name__})", file=sys.stderr)
+        return "", []
+
 def main():
     ap = argparse.ArgumentParser(description="Ask your second brain.")
     ap.add_argument("question", nargs="+")
@@ -142,13 +224,21 @@ def main():
     # last query (~40 s after a day of edits). --mode lexical is the old behaviour.
     ap.add_argument("--mode", choices=["lexical", "embed", "hybrid"], default="hybrid",
                     help="retrieval: weighted fusion of keyword + local embeddings (default), or either alone")
+    # rerank is the default since 2026-09 (see RERANK_DEPTH). Needs the two cross-encoders (~0.5 GB,
+    # fetched from Hugging Face on first use); without them it warns and keeps the hybrid order.
+    ap.add_argument("--no-rerank", dest="rerank", action="store_false",
+                    help=f"skip the cross-encoder reorder of the top {RERANK_DEPTH} (embed/hybrid modes)")
     ap.add_argument("--log", action="store_true", help="append the Q&A to Brain Q&A Log.md")
+    ap.add_argument("--retrieve-only", action="store_true",
+                    help="print the ranked sources and stop — no model call (for checking retrieval)")
     args = ap.parse_args()
 
     q = " ".join(args.question)
+    state_ctx, _ = state_context(q)
     corpus = load_corpus()
     text_of = {f.resolve().as_posix().lower(): txt for f, txt in corpus}
     spans: dict[str, tuple[int, int]] = {}
+    reranked = False
     if args.mode != "lexical" and importlib.util.find_spec("sentence_transformers") is None:
         # Embeddings are opt-in: torch plus sentence-transformers is a gigabyte-class install and
         # everything else here runs on numpy. Without it, answer anyway.
@@ -162,12 +252,23 @@ def main():
         idx = Index.open([f for f, _ in corpus])
         spans = {(VAULT / r).resolve().as_posix().lower(): (s, e) for r, (_, s, e) in idx.doc_scores(q).items()}
         ranked = embed_rank(q, idx) if args.mode == "embed" else hybrid_rank(q, corpus, idx)
+        if args.rerank:
+            fused = ranked
+            ranked = rerank(q, fused, text_of, spans)
+            reranked = ranked is not fused      # rerank hands back its input object when it falls back
     top = ranked[: args.top]
+    label = f"{args.mode}{'+rerank' if reranked else ''}"
     if not top:
         print("No relevant notes found. Try different words, or import/extract more first.")
         return
+    if args.retrieve_only:
+        print(f"sources ({label}):\n" + "\n".join(f"  {i}. {f.stem}" for i, f in enumerate(top, 1)))
+        return
 
     ctx, used, budget = [], 0, 300_000
+    if state_ctx:
+        ctx.append(state_ctx)
+        used += len(state_ctx)
     for f in top:
         key = f.resolve().as_posix().lower()
         txt = text_of[key]
@@ -188,7 +289,10 @@ def main():
     prompt = (
         "You are the user's second brain. Answer the QUESTION using ONLY the notes below. "
         "Cite every claim inline as [[Note Title]] using the exact NOTE titles. "
-        "Be concise and direct. If the notes don't contain the answer, say so plainly.\n\n"
+        "Be concise and direct. If the notes don't contain the answer, say so plainly. "
+        "If a STATE block is present it is the state ledger's current view (dated, sourced): for "
+        "questions about where something runs, its status or its flags, answer from STATE and cite "
+        "[[State Register]] plus the fact's own source.\n\n"
         f"QUESTION: {q}\n\n===NOTES===\n" + "\n".join(ctx)
     )
     proc = subprocess.run(["claude", "-p", "--model", args.model],
@@ -199,7 +303,7 @@ def main():
         sys.exit(1)
     ans = proc.stdout.strip()
     print(ans)
-    print(f"\n— sources scanned ({args.mode}): " + ", ".join(f.stem for f in top))
+    print(f"\n— sources scanned ({label}): " + ", ".join(f.stem for f in top))
 
     if args.log:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")

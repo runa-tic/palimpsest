@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark lexical vs embedding vs hybrid retrieval on this vault.
+"""Benchmark lexical vs embedding vs hybrid vs hybrid+rerank retrieval on this vault.
 
 Ground truth is synthetic. For a seeded random sample of atomic notes, the claude CLI writes
 one English question the note answers, phrased away from the title's own words, and one
@@ -161,10 +161,18 @@ def run():
     from embed import Index, MODEL
     idx = Index.open([p for p, _ in corpus])
 
+    text_of = {p.resolve().as_posix().lower(): t for p, t in corpus}
+
+    def reranked(q):
+        # exactly ask.py's default path: hybrid, then the language-routed cross-encoder
+        spans = {(VAULT / r).resolve().as_posix().lower(): (s, e) for r, (_, s, e) in idx.doc_scores(q).items()}
+        return [rel(p) for p in ask.rerank(q, ask.hybrid_rank(q, corpus, idx), text_of, spans)[:TOPK]]
+
     systems = {
         "lexical": lambda q: [rel(p) for p in ask.lexical_rank(q, corpus)[:TOPK]],
         "embed":   lambda q: [rel(p) for p in ask.embed_rank(q, idx)[:TOPK]],
         "hybrid":  lambda q: [rel(p) for p in ask.hybrid_rank(q, corpus, idx)[:TOPK]],
+        "hybrid+rerank": reranked,
     }
     results = {s: {"en": [], "ru": []} for s in systems}
     resf = {s: {"en": [], "ru": []} for s in systems}          # family-aware ranks
