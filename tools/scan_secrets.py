@@ -30,18 +30,18 @@ try:
 except Exception:
     pass
 
-VAULT = Path(__file__).resolve().parent.parent
-TOOLS = VAULT / "_tools"
+TOOLS = Path(__file__).resolve().parent     # was VAULT / "_tools": the allow list was never read
+VAULT = TOOLS.parent
 ALLOW_FILE = TOOLS / ".secret_scan_allow.txt"
 
 # Directories never scanned (protected, binary-heavy, or would self-flag).
 SKIP_DIRS = {".git", "_media", "node_modules", ".obsidian", "__pycache__"}
 # Specific repo-relative paths never scanned.
 SKIP_PATHS = {
-    "_tools/.secrets",
-    "_tools/scan_secrets.py",
-    "_tools/.secret_scan_allow.txt",
-    "_tools/.redact_terms.txt",
+    "tools/.secrets",
+    "tools/scan_secrets.py",
+    "tools/.secret_scan_allow.txt",
+    "tools/.redact_terms.txt",
 }
 
 # (label, compiled regex). These shapes are high-confidence credentials.
