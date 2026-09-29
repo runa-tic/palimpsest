@@ -58,6 +58,18 @@ def sanitize(name: str, maxlen: int = 80) -> str:
     name = re.sub(r"\s+", " ", name)
     return (name[:maxlen].rstrip() or "Untitled")
 
+def redact_title(title: str) -> str:
+    """The title becomes the FILENAME and the note's `# header`, so it is redacted up front and
+    once — write_note() only scrubs the body, and a filename built from the raw title (the first
+    60 chars of the first user message, when there is no ai-title) put deny-listed terms and
+    pasted keys into the vault's file names (Codex review, 2026-09). Best-effort, like
+    write_note: redaction must never break recording."""
+    try:
+        import redact
+        return redact.redact_text(title)[0]
+    except Exception:
+        return title
+
 def iso_to_date(ts: str | None) -> str:
     if not ts:
         return ""
@@ -176,8 +188,10 @@ def process_transcript(f: Path, include_thinking=False, include_tools=False, all
 
     if not turns:
         return None
-    if not title:
-        title = next((txt[:60] for role, txt in turns if role == "user"), "Untitled")
+    # Redact BEFORE truncating: a key straddling char 60 would be cut into a fragment no
+    # credential pattern matches, and its head would land in the filename.
+    title = redact_title(title) if title else next(
+        (redact_title(txt)[:60] for role, txt in turns if role == "user"), "Untitled")
 
     proj_label = f.parent.name.split("-")[-1] or f.parent.name
     date = iso_to_date(first_ts)
@@ -250,7 +264,7 @@ def import_web(args):
         data = data.get("conversations", [data])
     count = 0
     for conv in data:
-        name = conv.get("name") or "Untitled"
+        name = redact_title(conv.get("name") or "Untitled")
         created = conv.get("created_at")
         updated = conv.get("updated_at")
         uuid = conv.get("uuid", "")
