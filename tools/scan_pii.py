@@ -41,6 +41,33 @@ def is_hard(term: str) -> bool:
     return len(term) >= 5 and sum(c.isalpha() for c in term) >= len(term) - 1
 
 
+def _safe_path(rel: str, literals, regexes) -> str:
+    """The path as printed: every deny-listed term in it masked, since the path itself may be
+    what carries the term (and this output is recorded into the vault)."""
+    for t in sorted(literals, key=len, reverse=True):
+        rel = re.sub(re.escape(t), lambda m: mask(m.group(0)), rel, flags=re.I)
+    for rx in regexes:
+        rel = rx.sub(lambda m: mask(m.group(0)), rel)
+    return rel
+
+
+def _scan(rel: str, content: str, hard, soft, regexes, blocking: list, warning: list) -> None:
+    if not content:
+        return
+    for term in hard:
+        n = len(re.findall(re.escape(term), content, re.I))
+        if n:
+            blocking.append((rel, mask(term), n))
+    for term in soft:
+        n = len(re.findall(re.escape(term), content, re.I))
+        if n:
+            warning.append((rel, mask(term), n))
+    for rx in regexes:
+        n = len(rx.findall(content))
+        if n:
+            blocking.append((rel, f"re:{mask(rx.pattern)}", n))
+
+
 def main() -> int:
     literals, regexes = _load_deny()
     if not literals and not regexes:
@@ -51,21 +78,11 @@ def main() -> int:
     blocking: list[tuple[str, str, int]] = []
     warning: list[tuple[str, str, int]] = []
     for rel in staged_files():
-        content = staged_content(rel)
-        if not content:
-            continue
-        for term in hard:
-            n = len(re.findall(re.escape(term), content, re.I))
-            if n:
-                blocking.append((rel, mask(term), n))
-        for term in soft:
-            n = len(re.findall(re.escape(term), content, re.I))
-            if n:
-                warning.append((rel, mask(term), n))
-        for rx in regexes:
-            n = len(rx.findall(content))
-            if n:
-                blocking.append((rel, f"re:{mask(rx.pattern)}", n))
+        # Scan the path as well as the content: a note named after a person or a conversation
+        # title carries the term in its filename, where a contents-only scan never looks.
+        for label, content in ((f"{rel} [path]", rel), (rel, staged_content(rel) or "")):
+            _scan(_safe_path(label, literals, regexes), content, hard, soft, regexes, blocking, warning)
+
 
     for rel, m, n in warning:
         print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m} (numeric/short; not blocking)")
