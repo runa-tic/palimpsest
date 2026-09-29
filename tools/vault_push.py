@@ -37,7 +37,7 @@ VAULT = Path(__file__).resolve().parent.parent
 # Generated or hand-written knowledge: safe to snapshot unattended.
 CONTENT = ["00 Inbox", "10 Notes", "20 Projects", "30 Areas", "40 Resources", "50 Archive",
            "60 Maps of Content", "Daily", "Reviews", "Skills", "Templates"]
-CODE_HINT = "_tools"
+CODE_HINT = "tools"
 
 
 def git(*args, check: bool = False) -> subprocess.CompletedProcess:
@@ -118,7 +118,13 @@ def main() -> int:
                f"Content only — anything under {CODE_HINT}/ is left for a deliberate commit.\n"
                f"Written by tools/vault_push.py; secret-scan and pii-scan ran as normal.")
         # NO --no-verify. If a guard blocks, that is the system working.
-        c = git("commit", "-m", msg)
+        # Commit ONLY the content areas this run changed. A bare `git commit` takes the whole
+        # index, so anything someone had staged by hand (a half-finished tools/ edit) rode along
+        # inside "vault: nightly sync" (Codex review, 2026-09). `git commit -- <pathspec>` leaves
+        # everything else staged and out of this commit; the guards see the same temporary index.
+        # Areas, not all existing dirs: a pathspec naming a dir git knows nothing about (an empty
+        # Daily/) fails the whole commit.
+        c = git("commit", "-m", msg, "--", *sorted(areas))
         if c.returncode != 0:
             out = (c.stdout + c.stderr).strip()
             if "pii-scan" in out or "secret-scan" in out or "blocked" in out.lower():
@@ -131,6 +137,8 @@ def main() -> int:
 
     if args.no_push:
         print("vault-push: --no-push, stopping before the remote")
+        if code_changed:
+            print(f"  note: {len(code_changed)} change(s) under {CODE_HINT}/ left uncommitted (by design)")
         return 0
 
     # The destination is never inferred. A clone of the harness has `origin` pointing at the
