@@ -75,7 +75,8 @@ What took months was learning which of the obvious designs are wrong. Those are 
   exact identifiers: recall@8 of 0.58 English / 0.25 Russian against 0.31 / 0.02 for keyword
   search, on 150 notes × two languages of synthetic questions (`bench_retrieval.py` regenerates
   the whole table on your own notes).
-- **A reranker beat a whole memory server.** Hindsight — LLM fact extraction, background
+- **A reranker beat a whole memory server** — on retrieval over already-distilled notes, a 291-note
+  subset and synthetic questions, one run. Hindsight — LLM fact extraction, background
   consolidation, four-way recall and a reranker — put the right note first more often than plain hybrid did. A per-stage
   look showed the win was its reranker, and its default one sank Russian recall@8 to 0.12. The
   same class of model on `ask.py`'s own candidates, routed by language, scored recall@1 0.67
