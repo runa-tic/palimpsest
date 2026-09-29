@@ -24,8 +24,11 @@ were last working on.
 Two ways to ask it things. `ask.py` ranks every note twice — by keyword overlap and by a local
 multilingual embedding model — fuses the two rankings by rank position, feeds the best handful
 to a model and answers with citations; right for lookups, and it works in a second language
-because the embedding half does. That half is opt-in (`pip install sentence-transformers`,
-CPU only, nothing leaves the machine) and without it `ask.py` is plain keyword search. `rlm.py` is the other shape: the corpus
+because the embedding half does. A cross-encoder then rereads the top 100 against the question
+and reorders them — English and multilingual models, picked by the question's script. That
+whole half is opt-in (`pip install sentence-transformers`, CPU only, nothing leaves the
+machine) and without it `ask.py` is plain keyword search. A question that names something the
+State ledger tracks gets the ledger's dated facts first, before any note. `rlm.py` is the other shape: the corpus
 stays a *variable* in a sandboxed Python REPL, and a root model that never sees the vault
 writes code to slice it and fans stateless sub-agents out over the slices. Context cost stays
 flat in corpus size, so it answers questions whose evidence is spread across hundreds of
@@ -72,6 +75,23 @@ What took months was learning which of the obvious designs are wrong. Those are 
   exact identifiers: recall@8 of 0.58 English / 0.25 Russian against 0.31 / 0.02 for keyword
   search, on 150 notes × two languages of synthetic questions (`bench_retrieval.py` regenerates
   the whole table on your own notes).
+- **A reranker beat a whole memory server.** Hindsight — LLM fact extraction, background
+  consolidation, four-way recall and a reranker — put the right note first more often than plain hybrid did. A per-stage
+  look showed the win was its reranker, and its default one sank Russian recall@8 to 0.12. The
+  same class of model on `ask.py`'s own candidates, routed by language, scored recall@1 0.67
+  against its 0.51, with no LLM calls, at a tenth of the latency. On the full vault, reranking
+  20 / 100 candidates gives recall@8 0.46 / 0.59, against 0.38 for hybrid alone.
+- **State belongs in dated facts, not prose.** A months-old paragraph in an always-loaded file
+  said a service was down and outranked two current notes. `state.py` keeps where-things-run as
+  append-only facts with two clocks and a deterministic fold, and probes that append only on
+  change. Its own first audit found it lying three ways — each machine read the other as stale,
+  the git probe said "level" over unpushed work, and a laptop's DNS outage became "server
+  unreachable" — and the fix for the last had to be a verified TLS handshake, because behind a
+  TUN proxy a TCP connect to nowhere succeeds.
+- **A union merge never fails, so it never tells you.** Two machines rendered the same daily
+  note, a union merge kept both briefing blocks, and nothing complained. Union is for
+  append-only files whose readers ignore order; everything regenerated gets a pull-first guard
+  and byte-identical renders instead.
 - **Notes rarely rot; memory does.** Extraction already discards temporary state, so shelf-life
   labelling finds little in `10 Notes/`. The perishable claims live in Claude's memory
   directory, which is loaded into context every session and asserts deployment state as fact —
@@ -100,7 +120,14 @@ python tools/rlm.py --steps 8 --subagents 20 "how has my thinking on X changed?"
 
 pip install sentence-transformers          # optional: local embeddings for ask.py (~1 GB, CPU)
 python tools/embed.py                      # build the index once; later runs embed only what changed
-python tools/bench_retrieval.py --gen 100 --run   # keyword vs embeddings vs hybrid, on YOUR notes
+python tools/bench_retrieval.py --gen 100 --run   # keyword vs embeddings vs hybrid (+rerank), on YOUR notes
+
+python tools/state.py register my-api --kind service --hot   # the State ledger: what is true right now
+python tools/state.py add my-api host server-1 --source "[[Deploy notes]]"
+python tools/state.py show my-api                  # current value, when, who, why, what it superseded
+python tools/state.py probe                         # built-in probes + any declared in palimpsest.json
+
+for t in tests/test_*.py; do python "$t"; done      # regression tests: throwaway vaults, no model calls
 ```
 
 You can skip `setup.py` entirely: with the hooks registered, an unconfigured vault makes the
@@ -122,6 +149,13 @@ remote. It never uses `--no-verify` (the secret and PII guards run exactly as on
 commit, and a block aborts the push), never force-pushes or resolves divergence, and never
 auto-commits anything under `tools/` — a 06:00 job should not immortalise a half-finished edit.
 
+**Two machines on one vault** work since 2026-09: turn on `steps.pull` as well, and each run
+starts by rebasing onto the remote, skips the briefing if that pull failed (so neither machine
+renders today's note on a stale tree), and ends by committing, rebasing again and pushing. A
+conflict is aborted and reported, never resolved; a per-machine lock keeps the session-start
+pull and the scheduled run from racing. `state.py station take` / `release` records which
+machine is working by hand, if you want that convention.
+
 Set `push_remote` in `palimpsest.json` to your own vault's remote. It is deliberately not
 inferred: if you cloned this repo and are using the clone as your vault, `origin` points at
 *this* project, and an unconfigured push would publish your private notes here. For that same
@@ -134,8 +168,10 @@ harness does not ship generated notes, and `vault_push` will tell you it is skip
 and `extract_skills.py` distil, `link_notes.py` wires, `maintenance.py`, `dedupe.py` and
 `weekly_review.py` report, `briefing.py` and `hook_session_start.py` close the loop, `ask.py`,
 `embed.py` and `rlm.py`/`rlm_worker.py` retrieve (`bench_retrieval.py` scores the first two),
+`state.py` keeps the State ledger, `vault_push.py` backs up and syncs machines,
 and `redact.py`, `scan_secrets.py` and `scan_pii.py`
-keep private strings out of git. `templates/` holds the note schemas. `CLAUDE.md` is
+keep private strings out of git — in file names as well as contents. `tests/` holds
+stdlib-only regression scripts; each builds throwaway git vaults and makes no model calls. `templates/` holds the note schemas. `CLAUDE.md` is
 the operating protocol (with `SETUP.md` holding the one-time onboarding, so it costs no
 context once configured) — the part that makes an agent behave like the vault's brain rather
 than a chatbot standing next to it.
@@ -149,8 +185,10 @@ sync window and failed most of its inputs without checkpointing, which is docume
 absence takes several nightly runs to drain. Embeddings are opt-in and CPU-bound: the first
 index over a large vault takes tens of minutes (the nightly sync then keeps it fresh, and that
 step is a no-op until the package is installed), and the small multilingual model closes only
-part of the cross-language gap — recall@8 of 0.25 in Russian against 0.58
-in English on the same notes. None of this is a product; it is one person's working system, published because
+part of the cross-language gap: on the full source vault, recall@8 with the rerank is 0.45 in
+Russian against 0.73 in English, and for a third of Russian questions the right note never
+reaches the reranker's 100 candidates. The rerank adds about a second per question on a laptop
+CPU and a ~0.5 GB model download on first use. None of this is a product; it is one person's working system, published because
 the failure log is more useful than the code.
 
 ## Credit
