@@ -26,6 +26,10 @@ DEFAULTS = {
     "version": 1,
     "extraction_model": "claude-haiku-4-5-20251001",
     "steps": {
+        # OFF by default: only meaningful with a remote (push_remote below). Rebases onto the remote
+        # BEFORE anything else runs, so a second machine never renders today's daily on a tree the
+        # other one has moved past; if it fails, the briefing step is skipped for that run.
+        "pull": False,
         "import": True,
         "extract": True,
         # OFF by default, and not out of caution. In the vault this came from, the skills
@@ -45,6 +49,10 @@ DEFAULTS = {
         # A no-op until sentence-transformers is installed (see SETUP.md), so it is safe on by
         # default; with it, a normal day's edits take well under a minute.
         "embed": True,
+        # The State ledger's read-only probes (tools/state.py probe): this machine's last sync
+        # run, where the checkout stands against the remote, and any probes declared below.
+        # OFF by default — it creates State/ in the vault; turn it on when you want the ledger.
+        "state": False,
         "briefing": True,
         # OFF by default, deliberately. It commits and pushes your vault to a remote — a
         # sensible default for the author, an unpleasant surprise for anyone else. Turn it on
@@ -52,7 +60,7 @@ DEFAULTS = {
         # commit guards are what stand between an unattended commit and a published secret.
         "push": False,
     },
-    "timeouts": {"import": 180, "extract": 2400, "skills": 2400, "link": 120,
+    "timeouts": {"pull": 150, "state": 120, "import": 180, "extract": 2400, "skills": 2400, "link": 120,
                  "maintenance": 120, "dedupe": 120, "triage": 120, "weekly": 120, "embed": 1800,
                  "briefing": 120, "push": 180},
     "sync": {"cadence": "daily", "at": "06:00"},
@@ -61,6 +69,15 @@ DEFAULTS = {
     # repo — so an unconfigured push would commit your private notes into someone else's
     # project. Naming the remote is the one thing that cannot be safely defaulted.
     "push_remote": None,
+    # This machine's name in the State ledger (tools/state.py); default: the short hostname. Two
+    # machines sharing a vault must not share a name.
+    "machine": None,
+    # Command probes for the State ledger — anything machine-specific (a server, a service, a
+    # timer) is declared here, never hard-coded. See tools/state.py's docstring for the format.
+    "probes": [],
+    # Hosts tried (TCP 443) before a failed probe is recorded as "unreachable": if none answers,
+    # it is this machine that is offline, and nothing is recorded about the target.
+    "network_control": ["github.com", "1.1.1.1"],
 }
 
 

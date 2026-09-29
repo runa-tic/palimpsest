@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 r"""Palimpsest — full sync pipeline orchestrator.
 
-Runs import -> extract -> link -> maintenance -> briefing, each with a hard timeout so
-a single stuck step can never block the whole run. Logs to tools/sync.log.
+Runs [pull ->] import -> extract -> link -> maintenance -> ... -> briefing [-> push], each with
+a hard timeout so a single stuck step can never block the whole run. Logs to tools/sync.log.
+With a remote and two machines, turn on "pull" and "push" in palimpsest.json: the pull runs
+FIRST, and if it fails the briefing is skipped for that run (see skip_reason).
 
 Run manually:   python tools/sync.py
 For an unattended cadence, drive this from your OS scheduler. A Startup-folder shortcut is
@@ -11,7 +13,7 @@ up for weeks the brain silently stops syncing. Use a real daily job, and read th
 in .sync_status.json rather than the scheduler's exit code — the launcher returns immediately.
 """
 from __future__ import annotations
-import sys, json, subprocess
+import os, sys, json, time, subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -28,6 +30,8 @@ LOG = TOOLS / "sync.log"
 # the verdict here lets hook_session_start.py surface it in the session opener instead —
 # the one place the operator reliably reads.
 STATUS = TOOLS / ".sync_status.json"
+LOCK = TOOLS / ".sync.lock"
+LOCK_STALE_S = 3 * 3600  # a lock older than this belongs to a run that died; take it over
 PY = sys.executable or "python"
 
 sys.path.insert(0, str(TOOLS))
@@ -38,7 +42,11 @@ import config as cfgmod
 # them. Order below is the pipeline order; palimpsest.json only toggles and re-times it.
 CFG = cfgmod.load()
 _ARGS = {
+    # Pull FIRST: regenerating the briefing or the reviews before pulling is how two machines
+    # end up writing the same day's note on different bases.
+    "pull":        ["vault_push.py", "--pull-only"],
     "import":      ["import_claude.py", "code"],
+    "state":       ["state.py", "probe"],
     "extract":     ["extract_notes.py", "--model", CFG["extraction_model"]],
     "skills":      ["extract_skills.py", "--model", CFG["extraction_model"]],
     "link":        ["link_notes.py"],
@@ -74,12 +82,57 @@ def write_status(started: datetime, failures: list[str]):
         log(f"!! could not write {STATUS.name}: {e}")
 
 
+def skip_reason(name: str, failures: list[str]) -> str:
+    """Why a step must not run given the steps that already failed this run ('' = run it).
+    Only the briefing depends on the tree being current: rendering today's daily on a base the
+    other machine has moved past creates or rewrites the file, and the push-time rebase then
+    either stops on it or — with Daily/*.md merge=union — silently keeps BOTH renders (a doubled
+    briefing block in the source vault). Every other step is machine-local."""
+    if name == "briefing" and "pull" in failures:
+        return "pull failed, tree may be behind the other machine"
+    return ""
+
+
+def acquire_lock() -> bool:
+    """Atomic create; a stale lock (a run that died) is reclaimed. Keeps a manual run and the
+    scheduled one from interleaving their commits and pulls."""
+    try:
+        if LOCK.exists() and time.time() - LOCK.stat().st_mtime > LOCK_STALE_S:
+            LOCK.unlink()
+        fd = os.open(str(LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, f"pid {os.getpid()} started {datetime.now():%Y-%m-%d %H:%M:%S}".encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+
+
 def main():
+    if not acquire_lock():
+        print(f"sync: another run holds {LOCK.name} — skipping this one")
+        log(f"\n===== SYNC SKIPPED {datetime.now():%Y-%m-%d %H:%M:%S} — lock held =====")
+        sys.exit(0)
+    try:
+        _main()
+    finally:
+        try:
+            LOCK.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _main():
     started = datetime.now()
     log(f"\n===== SYNC START {started:%Y-%m-%d %H:%M:%S} =====")
     failures: list[str] = []
     for name, args, timeout in STEPS:
         log(f"\n[{datetime.now():%H:%M:%S}] === {name} ===")
+        why = skip_reason(name, failures)
+        if why:
+            log(f"!! {name} skipped — {why}")
+            print(f"{name}: SKIPPED ({why})")
+            failures.append(name)
+            continue
         try:
             p = subprocess.run([PY, str(TOOLS / args[0]), *args[1:]], cwd=str(VAULT),
                                capture_output=True, text=True, encoding="utf-8", timeout=timeout)

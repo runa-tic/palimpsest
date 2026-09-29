@@ -47,7 +47,9 @@ def active_projects() -> list[str]:
             continue
         if re.search(r"^status:\s*active", p.read_text(encoding="utf-8", errors="ignore"), re.M):
             out.append(p.stem)
-    return out
+    # sorted: glob order is the filesystem's (APFS and NTFS disagree), so two machines rendering
+    # the same day produced blocks that differed only in order — and a union merge keeps both.
+    return sorted(out)
 
 def note_of_day() -> str | None:
     notes = [p.stem for p in NOTES.glob("*.md") if not p.name.startswith("_")]
@@ -69,7 +71,7 @@ def recent_convs(days: int = 2) -> list[str]:
                     out.append(p.stem)
             except ValueError:
                 pass
-    return out
+    return sorted(out)  # same reason as active_projects(): byte-identical on every machine
 
 def skills_nudge() -> str | None:
     """One line about the proposal queue, or nothing if there is nothing to do.
