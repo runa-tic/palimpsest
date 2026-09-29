@@ -306,6 +306,7 @@ def main():
 
     state = load_state()
     processed = 0
+    failed: list[str] = []
     total_notes = 0
     for src in sources:
         key = str(src.relative_to(VAULT))
@@ -324,6 +325,7 @@ def main():
             notes = extract_notes_from(transcript, args.model)
         except Exception as e:
             print(f"  ! skipped ({e})")
+            failed.append(src.name)      # not recorded in state, so the next run retries it
             continue
         written = [w for n in notes if (w := write_atomic_note(n, src, date, args.dry_run))]
         total_notes += len(written)
@@ -335,6 +337,15 @@ def main():
             print("  (no durable insights)")
 
     print(f"\nDone. Processed {processed} conversation(s), wrote {total_notes} atomic note(s).")
+
+    if failed:
+        # Keep going past a failure, but never report the run clean. Exiting 0 here let a night
+        # where EVERY conversation failed show as a clean step in sync.py (Codex review, 2026-09;
+        # the 2026-07-28 run lost 70 of 136 conversations this way, unseen).
+        print(f"FAILED on {len(failed)} conversation(s) — will retry next run: "
+              + ", ".join(failed[:5]) + (" …" if len(failed) > 5 else ""))
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

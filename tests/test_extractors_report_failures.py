@@ -1,0 +1,56 @@
+"""An extraction run where conversations failed must not report success.
+
+Codex review P2: extract_notes.py / extract_skills.py caught each conversation's failure,
+printed "skipped" and carried on — then exited 0 even when EVERY conversation failed, so
+sync.py recorded the step as clean. They now keep going, but exit non-zero when any
+conversation failed, and sync.py marks the step failed.
+
+A fake `claude` on PATH fails any conversation containing FAILME and returns [] otherwise.
+"""
+import json, os, stat, sys
+from _util import Checks, make_vault, run, write
+
+FAKE_CLAUDE = """#!/bin/sh
+input=$(cat)
+case "$input" in *FAILME*) echo "usage limit reached"; exit 1;; *) echo "[]";; esac
+"""
+
+
+def main() -> int:
+    c = Checks("extractors: failures are reported")
+    v = make_vault()
+    bindir = v / "fakebin"
+    fc = write(v, "fakebin/claude", FAKE_CLAUDE)
+    fc.chmod(fc.stat().st_mode | stat.S_IEXEC)
+    env = {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+    conv = "40 Resources/Claude Conversations/Claude Code/demo"
+    write(v, f"{conv}/2026-09-01 good (aaaaaaaa).md", "---\ntype: x\n---\n\n# good\n\nfine talk\n")
+    write(v, f"{conv}/2026-09-01 bad (bbbbbbbb).md", "---\ntype: x\n---\n\n# bad\n\nFAILME please\n")
+
+    for script, state in (("extract_notes.py", ".extract_state.json"),
+                          ("extract_skills.py", ".extract_skills_state.json")):
+        r = run(v, script, env=env)
+        c.ok(r.returncode != 0, f"{script}: exits non-zero when a conversation failed", r.stdout[-400:])
+        c.ok("good" in r.stdout and "bad" in r.stdout, f"{script}: still processes the others", r.stdout[-400:])
+        st = json.loads((v / "tools" / state).read_text()) if (v / "tools" / state).exists() else {}
+        keys = " ".join(st)
+        c.ok("good" in keys and "bad" not in keys, f"{script}: the failure is not recorded as done (retries next run)",
+             keys)
+
+    v2 = make_vault()
+    fc2 = write(v2, "fakebin/claude", FAKE_CLAUDE)
+    fc2.chmod(fc2.stat().st_mode | stat.S_IEXEC)
+    env2 = {"PATH": f"{v2 / 'fakebin'}{os.pathsep}{os.environ['PATH']}"}
+    write(v2, f"{conv}/2026-09-01 bad (bbbbbbbb).md", "---\ntype: x\n---\n\n# bad\n\nFAILME\n")
+    steps = {k: False for k in ("import", "extract", "skills", "link", "maintenance", "dedupe", "triage",
+                                "weekly", "embed", "briefing", "push", "pull")}
+    steps["extract"] = True
+    write(v2, "palimpsest.json", json.dumps({"version": 1, "steps": steps}))
+    run(v2, "sync.py", env=env2)
+    status = json.loads((v2 / "tools" / ".sync_status.json").read_text())
+    c.ok(status.get("failures") == ["extract"], "sync.py records the extract step as FAILED", str(status))
+    return c.done()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
