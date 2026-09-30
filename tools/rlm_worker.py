@@ -14,7 +14,7 @@ egress channel in its own right, so an unrestricted read is an unrestricted send
 Environment variables are scrubbed to a functional minimum for the same reason.
 """
 from __future__ import annotations
-import sys, os, io, re, ast, json, math, contextlib, collections, statistics, sysconfig
+import sys, os, io, re, ast, json, math, contextlib, collections, statistics, sysconfig, threading
 from pathlib import Path
 from collections import Counter, defaultdict
 
@@ -178,19 +178,26 @@ def _gather() -> list[Path]:
 # ---------------------------------------------------------------- LLM brokering
 
 _BUDGET = {"used": 0, "limit": int(sys.argv[3]) if len(sys.argv) > 3 else 40}
+# One request/reply on the pipe at a time. Frames carry no id, so when model code called rlm()
+# from several threads, whichever thread read stdin first took the next reply (results swapped
+# between texts), and every thread passed the budget check before any counted (10 calls ran
+# under --subagents 5; review, 2026-09-30). The parent serves one frame at a time anyway, so
+# the lock costs no parallelism: rlm_map is the parallel path.
+_BROKER_LOCK = threading.Lock()
 
 
 def _broker(calls: list[dict]) -> list[str]:
-    room = _BUDGET["limit"] - _BUDGET["used"]
-    if room <= 0:
-        return ["[budget exhausted: no sub-agent calls remaining]"] * len(calls)
-    dropped = 0
-    if len(calls) > room:
-        dropped = len(calls) - room
-        calls = calls[:room]
-    _send({"t": "rlm", "calls": calls})
-    reply = _recv()
-    _BUDGET["used"] += len(calls)
+    with _BROKER_LOCK:
+        room = _BUDGET["limit"] - _BUDGET["used"]
+        if room <= 0:
+            return ["[budget exhausted: no sub-agent calls remaining]"] * len(calls)
+        dropped = 0
+        if len(calls) > room:
+            dropped = len(calls) - room
+            calls = calls[:room]
+        _BUDGET["used"] += len(calls)     # reserved before sending: budget() never under-reports
+        _send({"t": "rlm", "calls": calls})
+        reply = _recv()
     res = reply.get("results", [])
     if dropped:
         res = res + [f"[NOT RUN — sub-agent budget exhausted, {dropped} call(s) dropped]"] * dropped
