@@ -30,7 +30,7 @@ Idempotent: replacements leave a [redacted] marker the rules don't re-match, so 
 recorder can re-run every turn without compounding.
 """
 from __future__ import annotations
-import codecs, re, sys
+import codecs, re, sys, unicodedata
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
@@ -95,6 +95,21 @@ def _byte_lines(chunk: bytes, first: int, lines: list, problems: list) -> None:
                                 else "")))
 
 
+def _is_utf16(b: bytes, text: str, last: bool) -> bool:
+    """Whether a line of a section with a UTF-16 BOM really is UTF-16. The byte order is known here,
+    so CJK and emoji are text: judging them by _plausible re-read "\u674e" as the bytes "Ng", which
+    then redacted every "ng" in every transcript (second review, 2026-09-30). Wrong bytes read as
+    UTF-16 give replacement, control, unassigned, surrogate or private-use characters, or (UTF-8
+    appended after the section) run on past the section's last UTF-16 newline with a b"\n" inside
+    or an odd length. Only a line so marked is re-read as bytes. Limit: a character new in a Unicode
+    version later than this Python's reads as unassigned, and its line is re-read and flagged
+    (fail closed); a BOM-less UTF-16 CJK line still fails _plausible in both byte orders."""
+    if last and (b"\n" in b or len(b) % 2):
+        return False
+    return not any(c == "\ufffd" or (unicodedata.category(c) in ("Cc", "Cn", "Cs", "Co") and c not in "\t\r")
+                   for c in text)
+
+
 def _utf16_lines(bom: bytes, chunk: bytes, first: int, lines: list, problems: list) -> int:
     """A section that starts with a UTF-16 BOM, one line at a time. A line that does not read as
     UTF-16 (UTF-8 appended after it, or the rare cp1251 line starting "\u044f\u044e") is read as bytes
@@ -104,7 +119,7 @@ def _utf16_lines(bom: bytes, chunk: bytes, first: int, lines: list, problems: li
     for i, b in enumerate(parts, first):
         text = b.decode(enc, errors="replace")
         lines.append((i, text))
-        if not _plausible(text):
+        if not _is_utf16(b, text, last=i == first + len(parts) - 1):
             problems.append((i, "inside a UTF-16 section but not UTF-16; read both ways"))
             _byte_lines((bom if i == first else b"") + b.replace(b"\x00", b""), i, lines, problems)
     return first + len(parts) - 1

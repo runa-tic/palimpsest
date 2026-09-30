@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from redact import DENY_FILE, load_deny_report, is_phone, term_pattern   # the one parser/matcher
-from scan_secrets import staged_files, staged_content
+from scan_secrets import NotScanned, staged_blobs, staged_files
 
 
 def mask(term: str) -> str:
@@ -63,21 +63,20 @@ def _safe_path(rel: str, literals, regexes) -> str:
     return rel
 
 
-def _scan(rel: str, content: str, hard, soft, regexes, blocking: list, warning: list) -> None:
+def _scan(rel: str, content: str, hard, soft, regexes, blocking: dict, warning: dict) -> None:
+    """Add this text's match counts to blocking / warning, keyed (file label, term) with the
+    masked term as the value's label: a large file arrives in several runs of lines."""
     if not content:
         return
-    for term in hard:
-        n = len(term_pattern(term).findall(content))
-        if n:
-            blocking.append((rel, mask(term), n))
-    for term in soft:
-        n = len(term_pattern(term).findall(content))
-        if n:
-            warning.append((rel, mask(term), n))
+    for terms, into in ((hard, blocking), (soft, warning)):
+        for term in terms:
+            if n := len(term_pattern(term).findall(content)):
+                shown, k = into.get((rel, term), (mask(term), 0))
+                into[(rel, term)] = (shown, k + n)
     for rx in regexes:
-        n = len(rx.findall(content))
-        if n:
-            blocking.append((rel, f"re:{mask(rx.pattern)}", n))
+        if n := len(rx.findall(content)):
+            shown, k = blocking.get((rel, rx), (f"re:{mask(rx.pattern)}", 0))
+            blocking[(rel, rx)] = (shown, k + n)
 
 
 def main() -> int:
@@ -87,20 +86,28 @@ def main() -> int:
     hard = [t for t in literals if is_hard(t)]
     soft = [t for t in literals if not is_hard(t)]
 
-    blocking: list[tuple[str, str, int]] = []
-    warning: list[tuple[str, str, int]] = []
-    unscanned: list[str] = []
-    for rel in staged_files():
+    found: dict[tuple, tuple[str, int]] = {}
+    warned: dict[tuple, tuple[str, int]] = {}
+    unscanned: list[tuple[str, str]] = []
+    failed = False
+    for rel, blocks in staged_blobs(staged_files()):
         # Scan the path as well as the content: a note named after a person or a conversation
         # title carries the term in its filename, where a contents-only scan never looks.
-        content = staged_content(rel)
-        if content is None:
-            unscanned.append(_safe_path(rel, literals, regexes))
-        for label, text in ((f"{rel} [path]", rel), (rel, content or "")):
-            _scan(_safe_path(label, literals, regexes), text, hard, soft, regexes, blocking, warning)
+        _scan(_safe_path(f"{rel} [path]", literals, regexes), rel, hard, soft, regexes, found, warned)
+        label = _safe_path(rel, literals, regexes)
+        try:
+            for _, text in blocks:
+                _scan(label, text, hard, soft, regexes, found, warned)
+        except NotScanned as e:
+            unscanned.append((label, e.why))
+            failed |= e.fails
+    blocking = [(rel, m, n) for (rel, _), (m, n) in found.items()]
+    warning = [(rel, m, n) for (rel, _), (m, n) in warned.items()]
 
-    for rel in unscanned:
-        print(f"pii-scan: NOT scanned (over 5MB or unreadable): {rel}")
+    for rel, why in unscanned:
+        print(f"pii-scan: NOT scanned ({why}): {rel}")
+    if failed:
+        print("pii-scan: FAILED — a staged file above could not be scanned, so the commit is not clean.")
 
     for rel, m, n in warning:
         print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m} (numeric/short; not blocking)")
@@ -117,7 +124,7 @@ def main() -> int:
         print("Open it, check that the lines listed read correctly, save it as UTF-8 (Notepad:")
         print("Save As, Encoding UTF-8) and commit again.")
     if not blocking:
-        if problems:
+        if problems or failed:
             return 1
         print("pii-scan: clean (staged changes).")
         return 0
