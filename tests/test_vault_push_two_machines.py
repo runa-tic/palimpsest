@@ -5,13 +5,13 @@ this machine's push was rejected on every run and it silently stayed behind. Now
 pull --rebase --autostash, push; a same-line conflict aborts the rebase, restores the tree,
 reports the files and exits 1.
 """
-import json, shutil, subprocess, sys, tempfile
+import json, shutil, subprocess, sys
 from pathlib import Path
-from _util import Checks, TOOLS_SRC, git, run, write
+from _util import Checks, TOOLS_SRC, git, run, tempdir, write
 
 
 def clone(remote: Path, name: str) -> Path:
-    d = Path(tempfile.mkdtemp(prefix=f"palimpsest-{name}-"))
+    d = tempdir(f"palimpsest-{name}-")
     subprocess.run(["git", "clone", "-q", str(remote), str(d)], check=True)
     git(d, "config", "user.name", name); git(d, "config", "user.email", f"{name}@example.invalid")
     shutil.copytree(TOOLS_SRC, d / "tools", dirs_exist_ok=True, ignore=shutil.ignore_patterns("cache", "__pycache__"))
@@ -21,7 +21,7 @@ def clone(remote: Path, name: str) -> Path:
 
 def main() -> int:
     c = Checks("vault_push: two machines")
-    remote = Path(tempfile.mkdtemp(prefix="palimpsest-remote-")) / "vault.git"
+    remote = tempdir("palimpsest-remote-") / "vault.git"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
     seed = clone(remote, "seed")
     write(seed, ".gitignore", "tools/\npalimpsest.json\n")        # code is not what we are testing

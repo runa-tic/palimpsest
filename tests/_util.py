@@ -4,17 +4,50 @@ Every test builds its own vault under a temp dir, copies the tools it exercises,
 as subprocesses exactly as the git hook or the sync would. Nothing touches the real vault, no
 network, no model calls. Set PALIMPSEST_TOOLS to test a different tools/ tree (e.g. a checkout
 of main, to confirm a test fails before its fix).
+
+Every vault and dir made here (make_vault, tempdir) is removed when the test script exits; set
+PALIMPSEST_KEEP_TMP=1 to keep them for a post-mortem.
 """
 from __future__ import annotations
-import os, shutil, subprocess, sys, tempfile
+import atexit, os, shutil, stat, subprocess, sys, tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TOOLS_SRC = Path(os.environ.get("PALIMPSEST_TOOLS", REPO / "tools"))
+_MADE: list[Path] = []
+
+
+def _writable_retry(func, path, _exc) -> None:
+    """git makes its object files read-only, which Windows refuses to delete."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
+def _cleanup() -> None:
+    if os.environ.get("PALIMPSEST_KEEP_TMP"):
+        return
+    for d in reversed(_MADE):
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(d, onexc=_writable_retry)
+        else:
+            shutil.rmtree(d, onerror=_writable_retry)
+
+
+atexit.register(_cleanup)
+
+
+def tempdir(prefix: str = "palimpsest-test-") -> Path:
+    """A fresh temp dir, removed when the test script exits."""
+    d = Path(tempfile.mkdtemp(prefix=prefix))
+    _MADE.append(d)
+    return d
 
 
 def make_vault(with_hooks: bool = False) -> Path:
-    v = Path(tempfile.mkdtemp(prefix="palimpsest-test-"))
+    v = tempdir()
     shutil.copytree(TOOLS_SRC, v / "tools", ignore=shutil.ignore_patterns("cache", "__pycache__", "*.pyc"))
     git(v, "init", "-q", "-b", "main")
     git(v, "config", "user.name", "test")
