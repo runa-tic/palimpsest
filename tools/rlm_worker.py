@@ -365,6 +365,11 @@ def main() -> None:
         except Exception:
             import traceback
             err = traceback.format_exc(limit=6)
+        except BaseException as e:
+            # exit()/sys.exit()/KeyboardInterrupt from model code used to end this process and
+            # with it the namespace holding every paid sub-agent result. It ends the step instead.
+            err = (f"{type(e).__name__}{e.args!r}: exit() ends this step, not the REPL; "
+                   f"reply FINAL when you are done")
         _send({"t": "result", "out": buf.getvalue(), "err": err})
 
 

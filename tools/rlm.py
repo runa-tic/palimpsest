@@ -285,35 +285,47 @@ def main() -> int:
         print(textwrap.indent(_clip(code, 900), "  "))
         rec({"t": "code", "step": step, "code": code})
 
-        w_send({"t": "exec", "code": code})
         deadline = time.monotonic() + EXEC_TIMEOUT
-        timed_out = False
-        while True:  # service brokered sub-agent fan-outs until the step finishes
-            try:
-                msg = w_recv(deadline - time.monotonic())
-            except TimeoutError:
-                timed_out = True
+        timed_out, died = False, ""
+        try:
+            w_send({"t": "exec", "code": code})
+            while True:  # service brokered sub-agent fan-outs until the step finishes
+                try:
+                    msg = w_recv(deadline - time.monotonic())
+                except TimeoutError:
+                    timed_out = True
+                    break
+                if msg["t"] == "rlm":
+                    calls = msg["calls"]
+                    print(f"   → {len(calls)} sub-agent(s)…", flush=True)
+                    t_sub = time.monotonic()
+                    results = _fanout(calls, args.sub_model)
+                    deadline += time.monotonic() - t_sub      # sub-agent time does not count
+                    subs_used += len(calls)
+                    rec({"t": "subagents", "step": step, "n": len(calls),
+                         "prompts": [c["prompt"][:200] for c in calls],
+                         "chars_in": sum(len(c.get("text", "")) for c in calls),
+                         "results": [r[:2000] for r in results]})
+                    w_send({"t": "rlm_result", "results": results})
+                    continue
                 break
-            if msg["t"] == "rlm":
-                calls = msg["calls"]
-                print(f"   → {len(calls)} sub-agent(s)…", flush=True)
-                t_sub = time.monotonic()
-                results = _fanout(calls, args.sub_model)
-                deadline += time.monotonic() - t_sub      # sub-agent time does not count
-                subs_used += len(calls)
-                rec({"t": "subagents", "step": step, "n": len(calls),
-                     "prompts": [c["prompt"][:200] for c in calls],
-                     "chars_in": sum(len(c.get("text", "")) for c in calls),
-                     "results": [r[:2000] for r in results]})
-                w_send({"t": "rlm_result", "results": results})
-                continue
-            break
+        except (RuntimeError, ValueError, KeyError, OSError) as e:
+            # A dead worker (os._exit, OOM, a sandbox abort) or a garbled frame used to escape
+            # as a traceback that lost the run: no stop record, no summary. It ends the run
+            # the way a timeout does.
+            died = f"{type(e).__name__}: {e}"
         if timed_out:
             worker.kill()
             stopped = (f"[stopped: step {step} ran past EXEC_TIMEOUT ({EXEC_TIMEOUT}s, excluding sub-agent "
                       f"time); the REPL worker was killed]")
             print(f"   ✗ step {step} exceeded {EXEC_TIMEOUT}s — worker killed")
             rec({"t": "timeout", "step": step, "limit_s": EXEC_TIMEOUT})
+            break
+        if died:
+            worker.kill()
+            stopped = f"[stopped: the REPL worker died during step {step} ({died})]"
+            print(f"   ✗ REPL worker died during step {step} ({died})")
+            rec({"t": "worker_died", "step": step, "error": died})
             break
         out = (msg.get("out") or "") + (("\n" + msg["err"]) if msg.get("err") else "")
         shown = _clip(out.strip(), 6000)
@@ -328,6 +340,10 @@ def main() -> int:
         worker.wait(timeout=10)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         worker.kill()
+    try:
+        worker.stdin.close()   # else a dead worker's unflushed "exit" frame errors again at shutdown
+    except (OSError, ValueError):
+        pass
 
     print("=" * 70 + "\n" + (answer or stopped or "(no answer)") + "\n" + "=" * 70)
     print(f"sub-agents: {subs_used}/{args.subagents} · trace: {trace.relative_to(VAULT)}")
