@@ -77,10 +77,12 @@ def scheduler_hint(at: str) -> str:
         )
     # Quoted for sh: an unquoted `cd` into "My Vault" failed, && skipped the sync, and the
     # redirect hid it — every night. cron also turns a bare % into a newline, so escape it.
+    # stdout only repeats what sync.py already writes to sync.log; stderr is what it cannot log
+    # itself (a crash at import, config.py's DEFAULTS warning), so it is appended there, not lost.
     q = lambda s: shlex.quote(str(s)).replace("%", "\\%")
     return ("macOS / Linux — add to `crontab -e`:\n\n"
             f"  {int(mm)} {int(hh)} * * * cd {q(cfgmod.VAULT)} && {q(sys.executable)} {q(sync)} "
-            ">/dev/null 2>&1")
+            f">/dev/null 2>>{q(sync.with_name('sync.log'))}")
 
 
 HOOKS_JSON = r"""Register the hooks. Merge this into `.claude/settings.local.json` in the vault
