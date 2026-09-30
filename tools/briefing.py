@@ -184,7 +184,10 @@ def main():
     if f.exists():
         txt = f.read_text(encoding="utf-8")
         if START in txt and END in txt:
-            txt = re.sub(re.escape(START) + r".*?" + re.escape(END), block, txt, flags=re.DOTALL)
+            # A callback, not the string: re.sub reads backslashes in a replacement string as escapes,
+            # so a rolled-over task holding a Windows path (C:\Users\...) raised "bad escape \U" on
+            # every refresh (review, 2026-09-30).
+            txt = re.sub(re.escape(START) + r".*?" + re.escape(END), lambda _m: block, txt, flags=re.DOTALL)
         else:
             txt = txt.rstrip() + "\n\n" + block + "\n"
         f.write_text(txt, encoding="utf-8")
