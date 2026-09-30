@@ -168,6 +168,7 @@ def pull_rebase(remote: str) -> tuple[bool, str]:
     forces, never resolves: a conflicted rebase is aborted — git then re-applies the autostash —
     and the file list is reported for a human."""
     before = git("rev-parse", "HEAD").stdout.strip()
+    stashes = len(git("stash", "list").stdout.splitlines())
     br = branch()
     try:
         p = git("pull", "--rebase", "--autostash", remote, br, timeout=NET_TIMEOUT)
@@ -189,6 +190,13 @@ def pull_rebase(remote: str) -> tuple[bool, str]:
     if files:
         return False, (f"AUTOSTASH CONFLICT after pull in {len(files)} file(s) — your local "
                        f"edits are in `git stash list`; resolve by hand: {', '.join(files[:5])}")
+    # git also refuses the re-apply outright when a stashed file was rewritten between the stash
+    # and its re-apply (a racing Stop hook, the sync's own steps): it keeps the stash, exits 0 and
+    # leaves no unmerged path, so the edits vanished from the tree while this said "rebased"
+    # (review, 2026-09-30). A stash that outlived the pull is the tell.
+    if len(git("stash", "list").stdout.splitlines()) > stashes:
+        return False, ("AUTOSTASH NOT RE-APPLIED after pull — your local edits are in `git stash list` "
+                       "(newest entry), not in the tree; restore them by hand with `git stash pop`")
     if p.returncode != 0:
         return False, f"PULL FAILED (not retried) — {_last(p.stderr + p.stdout)}"
     after = git("rev-parse", "HEAD").stdout.strip()
