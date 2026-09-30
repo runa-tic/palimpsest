@@ -64,10 +64,19 @@ def parse(path: Path) -> dict:
     trigger = m.group(1) if m else ""
     if trigger.startswith('"'):
         # extract_skills writes the trigger JSON-escaped (a valid YAML double-quoted scalar);
-        # older proposals hold it raw between quotes, which json cannot always read.
+        # older proposals hold it raw between quotes. A raw one can still parse as JSON —
+        # "C:\new\tools" decodes to a newline and a tab — so the decoded text counts only if it
+        # is exactly what the writer would produce: it re-encodes to the same line, and holds no
+        # whitespace but spaces (the writer collapses it).
         try:
-            trigger = json.loads(trigger)
+            dec = json.loads(trigger)
+            ok = (isinstance(dec, str) and json.dumps(dec, ensure_ascii=False) == trigger
+                  and not re.search(r"[^\S ]", dec))
         except ValueError:
+            ok = False
+        if ok:
+            trigger = dec
+        else:
             trigger = trigger[1:-1] if len(trigger) > 1 and trigger.endswith('"') else trigger[1:]
     trigger = trigger.strip()
     m = re.search(r"^source:\s*\"?\[\[(.+?)\]\]", front, re.M)
