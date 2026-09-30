@@ -34,7 +34,8 @@ class NotATerminal(Exception):
 
 
 def ask(prompt: str, default: str, options: list[str] | None = None) -> str:
-    hint = f" [{default}]" if not options else f" ({'/'.join(options)}) [{default}]"
+    # An empty default gets no brackets: "push_remote []" read like a broken prompt.
+    hint = (f" ({'/'.join(options)})" if options else "") + (f" [{default}]" if default else "")
     try:
         got = input(f"{prompt}{hint}: ").strip()
     except EOFError:
@@ -217,7 +218,8 @@ def interview(cfg: dict) -> int:
     print("   pushing them to the remote named in push_remote, so the vault stops drifting")
     print("   from its backup. It never bypasses the commit guards, never force-pushes,")
     print("   never commits code. Leave it off until you have a remote you trust.")
-    cfg["steps"]["push"] = yes("   enable nightly commit+push", cfg["steps"].get("push", False))
+    pushing = bool(cfg["steps"].get("push"))
+    cfg["steps"]["push"] = yes("   enable nightly commit+push", pushing)
     if cfg["steps"]["push"]:
         # Never inferred: a clone of this repo has `origin` pointing at the harness, so an
         # unconfigured push would publish a private vault into someone else's project.
@@ -225,12 +227,19 @@ def interview(cfg: dict) -> int:
         print("   harness repo and your notes would be pushed there.")
         # No default either: a bracketed [origin] turned "Enter accepts the default" into
         # publishing the vault to the harness repo or the user's public fork. Blank = push off.
+        was = (cfg.get("push_remote") or "") if pushing else ""
         remote = ask("   push_remote (blank leaves push off)", cfg.get("push_remote") or "")
-        if remote == "origin" and not yes("   `origin` is where this clone came from. Push your "
-                                          "notes THERE", False):
-            remote = ""
+        if remote == "origin":
+            # Asked every time, even when origin was already saved: the setup that preceded this
+            # one defaulted to origin, so a saved origin may be an Enter, not a decision.
+            url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(cfgmod.VAULT),
+                                 capture_output=True, text=True).stdout.strip() or "no URL"
+            print(f"   `origin` is {url} — the repo this clone came from, unless you changed it.")
+            if not yes("   push your notes THERE", False):
+                remote = ""
         if not remote:
-            print("   no remote named — nightly push stays OFF")
+            print(f"   nightly push turned OFF (it was pushing to `{was}`)" if was else
+                  "   no remote named — nightly push stays OFF")
             cfg["steps"]["push"] = False
         cfg["push_remote"] = remote or None
 
