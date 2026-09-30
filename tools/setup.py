@@ -174,4 +174,7 @@ def interview(cfg: dict) -> int:
 
 
 if __name__ == "__main__":
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        print(__doc__.strip())
+        sys.exit(0)
     sys.exit(main())
