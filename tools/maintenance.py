@@ -72,8 +72,11 @@ def stem_of(target: str) -> str:
     return target.strip().split("/")[-1]
 
 def main():
-    files = [p for p in all_files() if p.suffix == ".md"]
+    every = all_files()
+    files = [p for p in every if p.suffix == ".md"]
     by_stem = {p.stem: p for p in files}
+    # Attachments: ![[diagram.png]] and [[paper.pdf]] point at real files, not at missing notes.
+    attachments = {p.name for p in every if p.suffix != ".md"}
     inbound = {p.stem: 0 for p in files}
     broken = []
 
@@ -221,11 +224,16 @@ def main():
                 continue
             s = stem_of(m.group(1))
             canon = s if s in inbound else alias_to_stem.get(s)
+            if not canon and s.lower().endswith(".md"):
+                # [[Note.md]] is a valid Obsidian link to Note — and an inbound one.
+                canon = s[:-3] if s[:-3] in inbound else alias_to_stem.get(s[:-3])
             if canon:
                 if canon != p.stem:
                     inbound[canon] += 1
             elif s in external:
                 pass          # resolvable, but it lives in the memory dir, not the vault
+            elif s in attachments:
+                pass          # an existing attachment: resolvable, not a note
             elif s.strip():
                 broken.append((p.stem, s))
 
