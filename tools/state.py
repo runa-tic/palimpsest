@@ -706,6 +706,10 @@ def probe_git() -> tuple[list[tuple[str, str, str]], dict]:
         behind = re.search(r"behind (\d+)", head)
         if "..." not in head:
             value = "no upstream"
+        elif "[gone]" in head:
+            # the fetch pruned the upstream branch (renamed or deleted on the host): no counts,
+            # and nothing upstream holds this machine's commits, which is not "level"
+            value = "upstream gone"
         elif ahead and behind:
             value = f"diverged (ahead {ahead.group(1)}, behind {behind.group(1)})"
         elif ahead:
