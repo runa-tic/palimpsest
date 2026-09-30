@@ -11,8 +11,8 @@ run once the other machine had pushed, and silently stayed behind for weeks).
 Rules it will not break:
 
 1. **The commit guards are never bypassed.** No `--no-verify`, ever. scan_secrets.py and
-   scan_pii.py run on every auto-commit exactly as they do on a human one, and a BLOCK aborts
-   the push and reports loudly. An unattended commit is precisely where a credential would
+   scan_pii.py run on every auto-commit exactly as they do on a human one — run directly when
+   this clone has no pre-commit hook — and a BLOCK aborts the push and reports loudly. An unattended commit is precisely where a credential would
    escape unnoticed, so the guard has to be strictest here, not most lenient.
 2. **It never force-pushes and never resolves a conflict.** It does `git pull --rebase
    --autostash`; a rebase that stops on a conflict is aborted (which restores the tree and the
@@ -49,6 +49,14 @@ VAULT = TOOLS.parent
 # Generated or hand-written knowledge: safe to snapshot unattended.
 CONTENT = ["00 Inbox", "10 Notes", "20 Projects", "30 Areas", "40 Resources", "50 Archive",
            "60 Maps of Content", "Daily", "Reviews", "Skills", "Templates", "State"]
+# Per-machine renders inside a content folder. maintenance.py rewrites the whole dashboard, with a
+# minute timestamp and this machine's counts, at every session start, so two machines' renders
+# always differ: once one machine had pushed its render, the other's pull stopped on the autostash
+# and every later run refused on the unmerged path (review, 2026-09-30). They are never
+# committed, and a local render is set aside across a pull and put back — the next run re-renders
+# it anyway, so nothing a human wrote is at stake.
+PER_MACHINE = ["Reviews/Vault Health.md"]
+KEEP_OUT = [f":(exclude){p}" for p in PER_MACHINE]
 CODE_HINT = "tools"
 # Committed only with --code (the commit guards still run): tools and the root config files.
 CODE = ["tools", ".claude", "CLAUDE.md", ".gitignore", ".gitattributes"]
@@ -88,6 +96,59 @@ def unmerged() -> list[str]:
     return [l for l in git("diff", "--name-only", "--diff-filter=U").stdout.splitlines() if l.strip()]
 
 
+def status(*paths: str) -> list[tuple[str, list[str]]]:
+    """`git status --porcelain -z` as (XY, paths). A rename or copy carries both paths. -z because
+    the plain form prints a rename as `old -> new` on one line and only the old side was read, so a
+    note moved Inbox -> Notes was committed as a deletion alone (review, 2026-09-30)."""
+    out = git("status", "--porcelain", "-z", "--", *paths).stdout.split("\0")
+    entries, i = [], 0
+    while i < len(out):
+        e, i = out[i], i + 1
+        if len(e) < 4:
+            continue
+        ps = [e[3:]]
+        if ("R" in e[:2] or "C" in e[:2]) and i < len(out):
+            ps.append(out[i]); i += 1          # -z: the destination first, then the source
+        entries.append((e[:2], ps))
+    return entries
+
+
+def guard_installed() -> bool:
+    """True when git will run tools/githooks/pre-commit on a commit here. core.hooksPath is
+    per-clone config that `git clone` does not carry, so the second machine of a vault (or anyone
+    who skipped the setup line) committed and pushed with no scan at all, under a message saying
+    the scans ran (review, 2026-09-30)."""
+    hook = git("rev-parse", "--git-path", "hooks/pre-commit").stdout.strip()
+    if not hook:
+        return False
+    hp = Path(hook) if Path(hook).is_absolute() else VAULT / hook
+    try:
+        if hp.resolve() != (TOOLS / "githooks" / "pre-commit").resolve():
+            return False
+    except OSError:
+        return False
+    return hp.is_file() and (os.name == "nt" or os.access(hp, os.X_OK))
+
+
+def run_guards() -> tuple[bool, str]:
+    """The pre-commit hook's two scans, run directly. (ok, output). They read the whole index —
+    a superset of what `git commit -- <areas>` takes, so stricter than the hook, never looser."""
+    out = []
+    for s in ("scan_secrets.py", "scan_pii.py"):
+        if not (TOOLS / s).is_file():
+            return False, f"{s} is missing — refusing to commit unscanned"
+        try:
+            g = subprocess.run([sys.executable or "python", str(TOOLS / s)], cwd=str(VAULT), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", env=ENV, timeout=300,
+                               creationflags=NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            return False, f"{s} timed out — refusing to commit unscanned"
+        out.append((g.stdout + g.stderr).strip())
+        if g.returncode != 0:
+            return False, "\n".join(out)
+    return True, "\n".join(out)
+
+
 def push_target() -> tuple[str, str]:
     """(remote, error). The remote is palimpsest.json's push_remote and must exist."""
     sys.path.insert(0, str(TOOLS))
@@ -110,11 +171,44 @@ def branch() -> str:
     return git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
 
+def _set_aside() -> dict[str, bytes]:
+    """Take this machine's uncommitted PER_MACHINE renders out of the pull's way: back to HEAD if
+    tracked, removed if not (an untracked render made the pull refuse to check out the other
+    machine's copy). Returns the bytes to put back."""
+    kept = {}
+    for rel in PER_MACHINE:
+        f = VAULT / rel
+        if not f.is_file() or not git("status", "--porcelain", "--", rel).stdout.strip():
+            continue
+        kept[rel] = f.read_bytes()
+        if git("cat-file", "-e", f"HEAD:{rel}").returncode == 0:
+            git("checkout", "HEAD", "--", rel)
+        else:
+            git("rm", "-q", "--cached", "--ignore-unmatch", "--", rel)
+            f.unlink()
+    return kept
+
+
 def pull_rebase(remote: str) -> tuple[bool, str]:
     """`git pull --rebase --autostash <remote> <branch>`. Returns (ok, one-line report). Never
     forces, never resolves: a conflicted rebase is aborted — git then re-applies the autostash —
-    and the file list is reported for a human."""
+    and the file list is reported for a human. This machine's PER_MACHINE renders sit out the
+    pull and come back after it, whatever it did."""
+    kept = _set_aside()
+    try:
+        return _pull_rebase(remote)
+    finally:
+        for rel, data in kept.items():
+            try:
+                (VAULT / rel).parent.mkdir(parents=True, exist_ok=True)
+                (VAULT / rel).write_bytes(data)
+            except OSError:
+                pass  # a render; the next maintenance run writes it again
+
+
+def _pull_rebase(remote: str) -> tuple[bool, str]:
     before = git("rev-parse", "HEAD").stdout.strip()
+    stashes = len(git("stash", "list").stdout.splitlines())
     br = branch()
     try:
         p = git("pull", "--rebase", "--autostash", remote, br, timeout=NET_TIMEOUT)
@@ -136,6 +230,13 @@ def pull_rebase(remote: str) -> tuple[bool, str]:
     if files:
         return False, (f"AUTOSTASH CONFLICT after pull in {len(files)} file(s) — your local "
                        f"edits are in `git stash list`; resolve by hand: {', '.join(files[:5])}")
+    # git also refuses the re-apply outright when a stashed file was rewritten between the stash
+    # and its re-apply (a racing Stop hook, the sync's own steps): it keeps the stash, exits 0 and
+    # leaves no unmerged path, so the edits vanished from the tree while this said "rebased"
+    # (review, 2026-09-30). A stash that outlived the pull is the tell.
+    if len(git("stash", "list").stdout.splitlines()) > stashes:
+        return False, ("AUTOSTASH NOT RE-APPLIED after pull — your local edits are in `git stash list` "
+                       "(newest entry), not in the tree; restore them by hand with `git stash pop`")
     if p.returncode != 0:
         return False, f"PULL FAILED (not retried) — {_last(p.stderr + p.stdout)}"
     after = git("rev-parse", "HEAD").stdout.strip()
@@ -237,15 +338,24 @@ def _run() -> int:
         existing = [p for p in existing if p not in ignored]
     if ignored:
         print(f"vault-push: NOT backing up (gitignored): {', '.join(ignored)}")
+    # Anything outside the content folders and the code is never staged, and was never mentioned
+    # either: a note at the vault root or Obsidian's pasted attachments (the root, by default)
+    # were silently left out of the backup (review, 2026-09-30). Reported, not staged — an allow
+    # list cannot push what it never names, so what lives outside it stays the user's call.
+    known = set(CONTENT) | set(CODE)
+    outside = sorted({p.split("/")[0] + ("/" if "/" in p else "")
+                      for _, ps in status() for p in ps if p.split("/")[0] not in known})
+    if outside:
+        more = f" and {len(outside) - 8} more" if len(outside) > 8 else ""
+        print(f"vault-push: NOT backing up (outside the content folders): {', '.join(outside[:8])}{more} "
+              "— move into a content folder, commit by hand, or gitignore to silence")
     if not existing:
         print("vault-push: every content path is gitignored — nothing can be backed up")
         return 1
-    st = git("status", "--porcelain", "--", *existing)
-    changed = [l for l in st.stdout.splitlines() if l.strip()]
+    changed = status(*existing, *KEEP_OUT)
 
     code_paths = [c for c in CODE if _present(c)]
-    code_st = git("status", "--porcelain", "--", *code_paths) if code_paths else None
-    code_changed = [l for l in code_st.stdout.splitlines() if l.strip()] if code_st else []
+    code_changed = status(*code_paths) if code_paths else []
     if args.code and code_changed:
         changed += code_changed
         existing += code_paths
@@ -267,21 +377,35 @@ def _run() -> int:
             print("vault-push: no git identity — commit skipped. Fix once with:")
             print('  git config user.name "you"  &&  git config user.email "you@example.com"')
             return 1
-        add = git("add", "--", *existing)
+        add = git("add", "--", *existing, *KEEP_OUT)
         if add.returncode != 0:
             print(f"vault-push: FAILED to stage — {add.stderr.strip()[:200]}")
             return 1
         # Counts by top-level area, so the message says what the run actually produced.
+        # No hook on this clone means no guard at all, so run its scans here instead: a missing
+        # setup line must cost a warning, never an unscanned push.
+        hooked = guard_installed()
+        if not hooked:
+            print("vault-push: the pre-commit guard is not installed on this clone (core.hooksPath is not "
+                  "tools/githooks) — running its scans directly. Install once: git config core.hooksPath tools/githooks")
+            ok, out = run_guards()
+            if not ok:
+                print("vault-push: BLOCKED by a commit guard — NOT committing or pushing. Staged for review:")
+                print("  " + "\n  ".join(out.splitlines()[-6:]))
+                return 1
+        # Both sides of a rename, so a move between areas commits the addition with the deletion;
+        # only areas this run stages, so a note moved out of tools/ cannot take code along.
         areas: dict[str, int] = {}
-        for line in changed:
-            path = line[3:].strip().strip('"')
-            areas[path.split("/")[0]] = areas.get(path.split("/")[0], 0) + 1
+        for _, paths in changed:
+            for top in {p.split("/")[0] for p in paths} & set(existing):
+                areas[top] = areas.get(top, 0) + 1
         summary = ", ".join(f"{v} {k}" for k, v in sorted(areas.items(), key=lambda x: -x[1]))
         with_code = args.code and code_changed
         msg = (f"vault: sync {datetime.now():%Y-%m-%d}{' + code' if with_code else ''}\n\n"
                f"Automated snapshot of the sync pipeline's output ({summary}).\n"
                f"{'Code/config included (--code).' if with_code else f'Content only — anything under {CODE_HINT}/ is left for a deliberate commit.'}\n"
-               f"Written by tools/vault_push.py; secret-scan and pii-scan ran as normal.")
+               f"Written by tools/vault_push.py; secret-scan and pii-scan ran "
+               f"{'as the pre-commit hook' if hooked else 'directly (no pre-commit hook on this clone)'}.")
         # NO --no-verify. If a guard blocks, that is the system working.
         # Commit ONLY the content areas this run changed. A bare `git commit` takes the whole
         # index, so anything someone had staged by hand (a half-finished tools/ edit) rode along
@@ -289,7 +413,7 @@ def _run() -> int:
         # everything else staged and out of this commit; the guards see the same temporary index.
         # Areas, not all existing dirs: a pathspec naming a dir git knows nothing about (an empty
         # Daily/) fails the whole commit.
-        c = git("commit", "-m", msg, "--", *sorted(areas))
+        c = git("commit", "-m", msg, "--", *sorted(areas), *KEEP_OUT)
         if c.returncode != 0:
             out = (c.stdout + c.stderr).strip()
             if "pii-scan" in out or "secret-scan" in out or "blocked" in out.lower():
