@@ -12,7 +12,7 @@ Checks:
 Usage (from vault root):  python tools/maintenance.py
 """
 from __future__ import annotations
-import sys, os, re, time
+import sys, os, re, time, subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -70,6 +70,36 @@ def all_files() -> list[Path]:
 
 def stem_of(target: str) -> str:
     return target.strip().split("/")[-1]
+
+def git_touched(paths: list[Path]) -> dict[Path, float]:
+    """Last-commit time per path, for files that are committed and unchanged since.
+
+    mtime is when THIS checkout wrote the file: a clone, or a pull that rewrites it, resets it to
+    now, so the second machine never saw an abandoned project as stale and the two machines
+    committed different reports. A file that is untracked or edited since its last commit was
+    touched here, and keeps its mtime. Empty outside a git repo.
+    """
+    def git(*a):
+        try:
+            r = subprocess.run(["git", "-c", "core.quotePath=false", *a], cwd=VAULT,
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        return r.stdout if r.returncode == 0 else ""
+    rels = [str(p.relative_to(VAULT)).replace(os.sep, "/") for p in paths]
+    if not rels:
+        return {}
+    # Both relative to the vault, like log --relative below (status --porcelain would be relative
+    # to the repository root, which differs when the vault is a subfolder of a repo).
+    dirty = set(git("diff", "--name-only", "--relative", "HEAD", "--", *rels).splitlines())
+    dirty |= set(git("ls-files", "--others", "--", *rels).splitlines())
+    out, ts = {}, None
+    for line in git("log", "--format=@%ct", "--name-only", "--relative", "--", *rels).splitlines():
+        if line.startswith("@"):
+            ts = float(line[1:])
+        elif line and ts is not None and line not in out:
+            out[line] = ts
+    return {VAULT / r: out[r] for r in rels if r in out and r not in dirty}
 
 def main():
     every = all_files()
@@ -266,11 +296,12 @@ def main():
 
     stale = []
     cutoff = time.time() - 30 * 86400
-    for p in files:
-        if in_dir(p, "20 Projects") and not p.name.startswith("_"):
-            txt = p.read_text(encoding="utf-8", errors="ignore")
-            if re.search(r"^status:\s*active", txt, re.M) and p.stat().st_mtime < cutoff:
-                stale.append(p.stem)
+    projects = [p for p in files if in_dir(p, "20 Projects") and not p.name.startswith("_")]
+    touched = git_touched(projects)
+    for p in projects:
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+        if re.search(r"^status:\s*active", txt, re.M) and touched.get(p, p.stat().st_mtime) < cutoff:
+            stale.append(p.stem)
 
     # Aging claims. A note marked volatility: dated was true when written and says nothing
     # about whether it still is — which is how a stale deployment claim survived as a confident
