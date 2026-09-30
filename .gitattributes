@@ -10,6 +10,9 @@ State/proposed.jsonl merge=union
 # Line endings for what an interpreter reads. With core.autocrlf=true (the Git for Windows
 # installer default) the hook was checked out with CRLF: '#!/bin/sh\r' does not run and sh
 # rejects every line, so every commit — the nightly backup's too — was refused.
+# These rules reach fresh checkouts only: a vault that already has the CRLF hook keeps it
+# (the blob is unchanged, so git never rewrites the file and the tree looks clean). Repair it
+# once with `python tools/setup.py --fix-line-endings`; every setup.py run also does it.
 tools/githooks/* text eol=lf
 *.sh text eol=lf
 *.cmd text eol=crlf
