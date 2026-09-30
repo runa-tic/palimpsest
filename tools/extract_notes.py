@@ -14,7 +14,7 @@ Usage (from vault root):
 Requires the `claude` CLI on PATH and an active login. No API key needed.
 """
 from __future__ import annotations
-import sys, os, re, json, argparse, subprocess, hashlib
+import sys, os, re, json, argparse, subprocess, hashlib, shutil, tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -83,20 +83,31 @@ def load_state() -> dict:
 def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
-MAX_CHARS = 350_000  # keep a single request comfortably within the context window
+# Extraction needs no tools, and the transcript it reads is untrusted text (a pasted email, a web
+# page). Run in the vault, `claude -p` loaded the vault's CLAUDE.md and project allowlist, whose
+# protocol is "Grep/Read the vault, run the tools" — so mined text could steer it into reading
+# gitignored local files into a note, or running an allowlisted tool.
+DENIED_TOOLS = ["Bash", "Read", "Grep", "Glob", "LS", "Edit", "MultiEdit", "Write", "NotebookEdit",
+                "WebFetch", "WebSearch", "Task", "Agent", "Skill", "TodoWrite"]
 
-def call_claude(transcript: str, model: str) -> str:
-    full = PROMPT + "\n===CONVERSATION===\n" + transcript
+
+def run_claude(prompt: str, model: str) -> str:
+    # shutil.which honours PATHEXT: a bare "claude" argv does not find npm's claude.cmd on Windows.
+    exe = shutil.which("claude") or "claude"
     # On Windows, suppress the console window the `claude` CLI would otherwise spawn when this
     # runs under a windowless parent (pythonw at logon). Without this the sync pipeline pops up
     # stray, hard-to-close terminal windows. CREATE_NO_WINDOW exists only on Windows.
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    proc = subprocess.run(
-        ["claude", "-p", "--model", model],
-        input=full, capture_output=True, text=True, encoding="utf-8",
-        env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"},  # don't trigger vault hooks
-        creationflags=creationflags,
-    )
+    cwd = tempfile.mkdtemp(prefix="palimpsest-extract-")   # no project CLAUDE.md or settings
+    try:
+        proc = subprocess.run(
+            [exe, "-p", "--model", model, "--disallowedTools", ",".join(DENIED_TOOLS)],
+            input=prompt, capture_output=True, text=True, encoding="utf-8", cwd=cwd,
+            env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"},  # don't trigger vault hooks
+            creationflags=creationflags,
+        )
+    finally:
+        shutil.rmtree(cwd, ignore_errors=True)
     if proc.returncode != 0:
         # `claude -p` puts API / model / usage errors on STDOUT with rc=1 and an EMPTY stderr;
         # only argv parsing errors go to stderr (verified 2026-07-31: an invalid --model gives
@@ -106,6 +117,11 @@ def call_claude(transcript: str, model: str) -> str:
         err = proc.stderr.strip() or proc.stdout.strip() or "(no output on either stream)"
         raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {err[:500]}")
     return proc.stdout.strip()
+
+MAX_CHARS = 350_000  # keep a single request comfortably within the context window
+
+def call_claude(transcript: str, model: str) -> str:
+    return run_claude(PROMPT + "\n===CONVERSATION===\n" + transcript, model)
 
 def chunk_transcript(transcript: str, max_chars: int = MAX_CHARS) -> list[str]:
     """Split a long transcript on turn boundaries so each chunk fits in one request."""
