@@ -392,6 +392,22 @@ def check_profile_libs(c: Checks) -> None:
         shutil.rmtree(t, ignore_errors=True)
 
 
+def check_parent_budget(c: Checks) -> None:
+    """9. The sub-agent cap is the parent's: raising the worker's own _BUDGET from model code does not
+    buy calls past --subagents (the stub counts every sub-agent it is asked to run)."""
+    v = vault()
+    write(v, "10 Notes/n.md", "a note\n")
+    code = ("import sys\nsys.modules['__main__']._BUDGET['limit'] = 1000\n"
+            "res = rlm_map('echo', [f'T{i}' for i in range(10)])\n"
+            "print('RAN', sum(r.startswith('ECHO') for r in res), 'DROPPED', sum('NOT RUN' in r for r in res))\n")
+    r = drive(v, [f"```python\n{code}```", "FINAL\ndone"], "--steps", "3", "--subagents", "3")
+    out = r.stdout + r.stderr
+    n = sum(x.get("n", 0) for x in traces(v) if x["t"] == "subagents")
+    c.ok("RAN 3 DROPPED 7" in out and n == 3 and "sub-agents: 3/3" in out,
+         "the parent caps sub-agent calls at --subagents even when model code raises the worker's budget",
+         f"n={n} {out[-400:]}")
+
+
 def main() -> int:
     c = Checks("review 2026-09-30: rlm")
     try:
@@ -403,6 +419,7 @@ def main() -> int:
         check_hook_and_profile(c)
         check_resolver(c)
         check_profile_libs(c)
+        check_parent_budget(c)
     finally:
         for d in _MINE:
             shutil.rmtree(d, ignore_errors=True)
