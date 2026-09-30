@@ -192,13 +192,24 @@ def main() -> None:
         worker.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
         worker.stdin.flush()
 
-    def w_recv() -> dict:
-        line = worker.stdout.readline()
+    # A reader thread feeds a queue so every wait has a deadline (select() does not work on
+    # Windows pipes). readline() alone blocked forever: EXEC_TIMEOUT was declared and never
+    # enforced, so one `while True: pass` from the model hung the query (review, 2026-09-30).
+    import queue, threading, time
+    lines: "queue.Queue[str]" = queue.Queue()
+    threading.Thread(target=lambda: [lines.put(l) for l in iter(worker.stdout.readline, "")] + [lines.put("")],
+                     daemon=True).start()
+
+    def w_recv(timeout: float) -> dict:
+        try:
+            line = lines.get(timeout=max(timeout, 0.1))
+        except queue.Empty:
+            raise TimeoutError from None
         if not line:
             raise RuntimeError("REPL worker died")
         return json.loads(line)
 
-    ready = w_recv()
+    ready = w_recv(120)     # corpus load + handshake
     ndocs = ready["docs"]
     rec({"t": "start", "question": question, "docs": ndocs, "root": args.root_model,
          "sub": args.sub_model, "steps": args.steps, "subagents": args.subagents})
@@ -232,12 +243,20 @@ def main() -> None:
         rec({"t": "code", "step": step, "code": code})
 
         w_send({"t": "exec", "code": code})
+        deadline = time.monotonic() + EXEC_TIMEOUT
+        timed_out = False
         while True:  # service brokered sub-agent fan-outs until the step finishes
-            msg = w_recv()
+            try:
+                msg = w_recv(deadline - time.monotonic())
+            except TimeoutError:
+                timed_out = True
+                break
             if msg["t"] == "rlm":
                 calls = msg["calls"]
                 print(f"   → {len(calls)} sub-agent(s)…", flush=True)
+                t_sub = time.monotonic()
                 results = _fanout(calls, args.sub_model)
+                deadline += time.monotonic() - t_sub      # sub-agent time does not count
                 subs_used += len(calls)
                 rec({"t": "subagents", "step": step, "n": len(calls),
                      "prompts": [c["prompt"][:200] for c in calls],
@@ -245,6 +264,13 @@ def main() -> None:
                      "results": [r[:2000] for r in results]})
                 w_send({"t": "rlm_result", "results": results})
                 continue
+            break
+        if timed_out:
+            worker.kill()
+            answer = (f"[stopped: step {step} ran past EXEC_TIMEOUT ({EXEC_TIMEOUT}s, excluding sub-agent "
+                      f"time); the REPL worker was killed]")
+            print(f"   ✗ step {step} exceeded {EXEC_TIMEOUT}s — worker killed")
+            rec({"t": "timeout", "step": step, "limit_s": EXEC_TIMEOUT})
             break
         out = (msg.get("out") or "") + (("\n" + msg["err"]) if msg.get("err") else "")
         shown = _clip(out.strip(), 6000)
@@ -254,10 +280,10 @@ def main() -> None:
     else:
         answer = "[stopped: step budget exhausted before the root model produced an answer]"
 
-    w_send({"t": "exit"})
     try:
+        w_send({"t": "exit"})
         worker.wait(timeout=10)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError, ValueError):
         worker.kill()
 
     print("=" * 70 + "\n" + (answer or "(no answer)") + "\n" + "=" * 70)
