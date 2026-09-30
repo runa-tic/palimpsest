@@ -224,7 +224,8 @@ def state_context(q: str) -> tuple[str, list[str]]:
         cur, obs = st.fold(facts), st.load_observed()
         lines = ["### STATE (ledger — current view, dated and sourced; prefer it over prose for "
                  "where-does-X-run / status / flag questions; cite [[State Register]] and the fact's source. "
-                 "A ⚠️ flag means the value is uncertain: say it is stale or disputed, do not assert it as current)"]
+                 "A ⚠️ flag means the value is uncertain: say it is stale, disputed or not yet in effect, "
+                 "do not assert it as current)"]
         for eid in hits[:6]:
             recs = cur.get(eid, {})
             if not recs:
@@ -238,6 +239,11 @@ def state_context(q: str) -> tuple[str, list[str]]:
                     flags += f"  ⚠️ STALE: not re-observed since {st.last_seen(rec, eid, attr, obs)}"
                 for c in rec.get("conflicts") or []:
                     flags += f"  ⚠️ CONFLICT: {c.get('reason') or 'unresolved contradiction'}"
+                # As `state.py lint`: a valid_from later than now wins the fold already, so the
+                # value reads as current while it is only planned.
+                if (rec.get("valid_from") or "") > st.iso(st.utcnow()):
+                    flags += (f"  ⚠️ FUTURE-DATED: valid from {rec.get('valid_from')}, not yet; it "
+                              "outranks every observation until then")
                 lines.append(f"- {eid}.{attr} = {st.render_value(rec)}  ({rec.get('kind')}, "
                              f"{st.when_str(rec, eid, attr, obs)}; source: {st.src_str(rec) or 'n/a'}){flags}")
         return "\n".join(lines) + "\n", hits
