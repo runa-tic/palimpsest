@@ -694,7 +694,8 @@ def probe_git() -> tuple[list[tuple[str, str, str]], dict]:
     except Exception:
         CODE = ["tools", ".claude", "CLAUDE.md", ".gitignore", ".gitattributes"]
     try:
-        p = subprocess.run(["git", "status", "-sb", "--porcelain", "--", *CODE], cwd=str(VAULT),
+        # quotePath off: the default wrote a non-ASCII path into the shared ledger as octal escapes.
+        p = subprocess.run(["git", "-c", "core.quotePath=false", "status", "-sb", "--porcelain", "--", *CODE], cwd=str(VAULT),
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=20, creationflags=NO_WINDOW)
         if p.returncode != 0:
