@@ -16,7 +16,10 @@ def main():
     if os.environ.get("CLAUDE_BRAIN_NO_HOOK"):
         return
     try:
-        data = json.loads(sys.stdin.read() or "{}")
+        # Bytes, decoded as UTF-8: Claude Code sends UTF-8, but a piped text stdin on Windows
+        # decodes in the ANSI code page, so a non-ASCII user name in transcript_path became
+        # mojibake (or a decode error) and the turn was silently never recorded.
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
     except Exception:
         return
     tp = data.get("transcript_path")
