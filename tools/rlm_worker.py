@@ -14,7 +14,7 @@ egress channel in its own right, so an unrestricted read is an unrestricted send
 Environment variables are scrubbed to a functional minimum for the same reason.
 """
 from __future__ import annotations
-import sys, os, io, re, ast, json, math, contextlib, collections, statistics, sysconfig
+import sys, os, io, re, ast, json, math, contextlib, collections, statistics, sysconfig, threading
 from pathlib import Path
 from collections import Counter, defaultdict
 
@@ -24,7 +24,30 @@ TOOLS = Path(__file__).resolve().parent   # this file's own dir, where ask.py li
 sys.path.insert(0, str(TOOLS))
 import ask  # reuse the vault's proven keyword scorer rather than inventing a second one
 
-REAL_OUT = sys.stdout  # exec() redirects sys.stdout; protocol frames must bypass that
+
+def _claim_pipes():
+    """Take the protocol pipes onto private descriptors before any model code runs.
+
+    exec() redirects sys.stdout, so frames went through a saved REAL_OUT, but frames were read
+    from sys.stdin itself: the builtin exit()/quit() (site.Quitter) closes sys.stdin before it
+    raises SystemExit, so the step error was survived and the next read raised "I/O operation on
+    closed file", killing the worker and the run with it (review, 2026-09-30). The pipes now live
+    on dup()ed descriptors; fd 0 becomes the null device (sys.stdin/sys.__stdin__ read EOF, and
+    closing them closes nothing of ours) and fd 1 goes to stderr, so a stray write to
+    sys.__stdout__ lands on the terminal instead of in the frame stream."""
+    rin = os.fdopen(os.dup(0), "r", encoding="utf-8")
+    rout = os.fdopen(os.dup(1), "w", encoding="utf-8", newline="\n")
+    try:
+        nul = os.open(os.devnull, os.O_RDWR)
+        os.dup2(nul, 0)
+        os.close(nul)
+        os.dup2(2, 1)
+    except OSError:
+        pass
+    return rin, rout
+
+
+REAL_IN, REAL_OUT = _claim_pipes()
 
 CORPUS_DIRS = ["10 Notes", "Skills", "20 Projects", "30 Areas", "40 Resources",
                "60 Maps of Content", "Daily", "Reviews"]
@@ -36,9 +59,9 @@ def _send(obj) -> None:
 
 
 def _recv():
-    line = sys.stdin.readline()
+    line = REAL_IN.readline()
     if not line:
-        sys.exit(0)
+        raise SystemExit(0)
     return json.loads(line)
 
 
@@ -162,7 +185,7 @@ class Corpus:
 
 
 def _gather() -> list[Path]:
-    files = []
+    files, outside = [], 0
     for d in CORPUS_DIRS:
         root = VAULT / d
         if not root.exists():
@@ -171,26 +194,43 @@ def _gather() -> list[Path]:
             parts = f.relative_to(VAULT).parts
             if any(x.startswith("_") and x != "_proposed" for x in parts):
                 continue
+            # A note symlinked to a file outside the vault is a read the sandbox refuses, and
+            # every corpus-wide call (search/grep/chunks/filter) reads every note, so one such
+            # link made all of them fail (review, 2026-09-30). Skip it, and a dangling one.
+            real = f.resolve()
+            if not ((real == VAULT or VAULT in real.parents) and real.is_file()):
+                outside += 1
+                continue
             files.append(f)
+    if outside:
+        print(f"rlm_worker: skipped {outside} note(s) that resolve outside the vault or to nothing",
+              file=sys.stderr)
     return sorted(files)
 
 
 # ---------------------------------------------------------------- LLM brokering
 
 _BUDGET = {"used": 0, "limit": int(sys.argv[3]) if len(sys.argv) > 3 else 40}
+# One request/reply on the pipe at a time. Frames carry no id, so when model code called rlm()
+# from several threads, whichever thread read stdin first took the next reply (results swapped
+# between texts), and every thread passed the budget check before any counted (10 calls ran
+# under --subagents 5; review, 2026-09-30). The parent serves one frame at a time anyway, so
+# the lock costs no parallelism: rlm_map is the parallel path.
+_BROKER_LOCK = threading.Lock()
 
 
 def _broker(calls: list[dict]) -> list[str]:
-    room = _BUDGET["limit"] - _BUDGET["used"]
-    if room <= 0:
-        return ["[budget exhausted: no sub-agent calls remaining]"] * len(calls)
-    dropped = 0
-    if len(calls) > room:
-        dropped = len(calls) - room
-        calls = calls[:room]
-    _send({"t": "rlm", "calls": calls})
-    reply = _recv()
-    _BUDGET["used"] += len(calls)
+    with _BROKER_LOCK:
+        room = _BUDGET["limit"] - _BUDGET["used"]
+        if room <= 0:
+            return ["[budget exhausted: no sub-agent calls remaining]"] * len(calls)
+        dropped = 0
+        if len(calls) > room:
+            dropped = len(calls) - room
+            calls = calls[:room]
+        _BUDGET["used"] += len(calls)     # reserved before sending: budget() never under-reports
+        _send({"t": "rlm", "calls": calls})
+        reply = _recv()
     res = reply.get("results", [])
     if dropped:
         res = res + [f"[NOT RUN — sub-agent budget exhausted, {dropped} call(s) dropped]"] * dropped
@@ -235,7 +275,8 @@ _BLOCK_PREFIX = ("_winapi.", "subprocess.", "multiprocessing.", "os.exec", "os.s
 def _roots() -> tuple[Path, ...]:
     cand = [VAULT, SCRATCH, Path(sys.prefix), Path(sys.base_prefix),
             Path(sys.executable).parent]
-    for key in ("stdlib", "platstdlib", "purelib", "platlib", "data"):
+    # Not "data": on Homebrew Python that is /opt/homebrew itself, etc/ and var/ included.
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
         try:
             p = sysconfig.get_path(key)
             if p:
@@ -254,48 +295,206 @@ def _roots() -> tuple[Path, ...]:
 _READ_ROOTS = _roots()
 
 
-def _within(path, roots) -> bool:
+def _real_posix(s, _readlink=os.readlink, _getcwd=os.getcwd, _split=str.split, _rfind=str.rfind,
+                _starts=str.startswith, _oserr=OSError, _valerr=ValueError, _hops=40):
+    """os.path.realpath for a str, built only from C functions bound at definition time.
+
+    posixpath.realpath is Python code that looks up os.fspath/os.lstat/os.getcwd, stat.S_ISLNK and
+    isinstance in posixpath's module dict at call time, so model code that set posixpath.os to a
+    fake whose fspath() returns a scratch path passed every check the hook made; with no OS
+    sandbox that read files outside the vault and wrote tools/evil.py (review, 2026-09-30). This
+    walks the path one component at a time with readlink() (a component that is not a link, or
+    does not exist, is taken as it is, as realpath(strict=False) does) and never looks anything
+    up outside its own defaults: C functions, str methods and exception classes."""
+    if not _starts(s, "/"):
+        s = _getcwd() + "/" + s
+    pending = _split(s, "/")
+    pending.reverse()
+    out, hops = "", 0
+    while pending:
+        name = pending.pop()
+        if name == "" or name == ".":
+            continue
+        if name == "..":
+            if out:
+                out = out[:_rfind(out, "/")]
+            continue
+        cand = out + "/" + name
+        try:
+            target = _readlink(cand)
+        except _oserr:
+            out = cand
+            continue
+        hops += 1
+        if hops > _hops:
+            raise _valerr("too many symbolic links")
+        if _starts(target, "/"):
+            out = ""
+        more = _split(target, "/")
+        more.reverse()
+        pending += more
+    return out or "/"
+
+
+def _nt_final():
     try:
-        p = Path(os.fspath(path)).resolve()
-    except Exception:
-        return False
-    return any(p == r or r in p.parents for r in roots)
+        import nt
+        return nt._getfinalpathname
+    except (ImportError, AttributeError):
+        return None
+
+
+def _real_nt(s, _final=_nt_final(), _getcwd=os.getcwd, _replace=str.replace, _split=str.split,
+             _join=str.join, _starts=str.startswith, _ends=str.endswith, _upper=str.upper, _len=len,
+             _oserr=OSError, _valerr=ValueError):
+    """The Windows counterpart of _real_posix, on the same terms (bound C functions only). Win32
+    applies "." and ".." lexically before it follows any reparse point, so the path is made
+    absolute and normalised as text, then the longest prefix that exists goes through
+    GetFinalPathNameByHandle (links, junctions, 8.3 names, canonical case) and the rest is
+    appended. Device paths, drive-relative paths on another drive and components Win32 would
+    silently trim (trailing dot or space) are refused rather than guessed at."""
+    s = _replace(s, "/", "\\")
+    verbatim = _starts(s, "\\\\?\\")    # Win32 does not normalise these; "." and ".." are refused
+    if _starts(s, "\\\\?\\UNC\\"):
+        s = "\\\\" + s[8:]
+    elif verbatim:
+        s = s[4:]
+    elif _starts(s, "\\\\.\\"):
+        raise _valerr("device path")
+    cwd = _replace(_getcwd(), "/", "\\")
+    if _starts(s, "\\\\"):
+        pass
+    elif s[1:2] == ":":
+        if s[2:3] != "\\":
+            if _upper(s[:2]) != _upper(cwd[:2]):
+                raise _valerr("drive-relative path on another drive")
+            s = cwd + "\\" + s[2:]
+    elif _starts(s, "\\"):
+        if cwd[1:2] == ":":
+            s = cwd[:2] + s
+        else:
+            c = _split(cwd[2:], "\\")
+            s = "\\\\" + c[0] + "\\" + c[1] + s
+    else:
+        s = cwd + "\\" + s
+    if _starts(s, "\\\\"):
+        parts = _split(s[2:], "\\")
+        if _len(parts) < 2 or parts[0] == "" or parts[1] == "":
+            raise _valerr("bad UNC path")
+        drive, rest = "\\\\" + parts[0] + "\\" + parts[1], parts[2:]
+    else:
+        drive, rest = _upper(s[:2]), _split(s[3:], "\\")
+    out = []
+    for name in rest:
+        if (name == "." or name == "..") and verbatim:
+            raise _valerr("relative component in a \\\\?\\ path")
+        if name == "" or name == ".":
+            continue
+        if name == "..":
+            if out:
+                out.pop()
+            continue
+        if _ends(name, ".") or _ends(name, " "):
+            raise _valerr("component Win32 would trim")
+        out.append(name)
+    i = _len(out)
+    while _final is not None and i >= 0:
+        try:
+            f = _final(drive + "\\" + _join("\\", out[:i]))
+        except _oserr:
+            i -= 1
+            continue
+        if _starts(f, "\\\\?\\UNC\\"):
+            f = "\\\\" + f[8:]
+        elif _starts(f, "\\\\?\\"):
+            f = f[4:]
+        tail = _join("\\", out[i:])
+        if tail == "":
+            return f
+        return (f if _ends(f, "\\") else f + "\\") + tail
+    return drive + "\\" + _join("\\", out)
+
+
+_real = _real_nt if os.name == "nt" else _real_posix
 
 
 def _make_audit(read_roots=_READ_ROOTS, scratch=SCRATCH, block_exact=frozenset(_BLOCK_EXACT),
-                block_prefix=_BLOCK_PREFIX + ("gc.",), write_events=frozenset(_WRITE_EVENTS), within=_within):
+                block_prefix=_BLOCK_PREFIX + ("gc.",), write_events=frozenset(_WRITE_EVENTS)):
     """Build the audit hook with every rule bound NOW. The first version looked its rules up in
     module globals at call time, so model-written code could rebind them from
     sys.modules["__main__"] (an external review set _READ_ROOTS to "/" and read outside the vault,
-    2026-09-30). Rebinding the module does nothing to this closure; gc.* is blocked because
-    gc.get_objects is how code would find the installed hook to edit its cells. Still defence in
-    depth: the boundary is the OS sandbox rlm.py wraps this process in, where one exists."""
-    _READ_ROOTS, SCRATCH, _BLOCK_EXACT, _BLOCK_PREFIX, _WRITE_EVENTS, _within = (
-        read_roots, scratch, block_exact, block_prefix, write_events, within)
+    2026-09-30). The second bound the rules but still called a module-level _within that looked
+    up Path and os there, so rebinding sys.modules["__main__"].Path passed every check (review,
+    2026-09-30). The third bound its own primitives but resolved paths with os.path.realpath,
+    Python code that looks up os and isinstance in posixpath's globals, so setting posixpath.os
+    passed every check again (review, 2026-09-30). Now every rule and primitive is a default
+    argument of a nested function, paths are resolved by _real_posix/_real_nt (C functions and
+    str methods only), and nothing is looked up in any module or in builtins at call time. No
+    closure cells either (a traceback through this hook hands out its frame, and in 3.13
+    frame.f_locals writes through to cells; a default is a per-call local). gc.* is blocked
+    because gc.get_objects is how code would find the hook itself, and reading or replacing the
+    __defaults__/__code__ of within or the resolver is refused. Still defence in depth, not a
+    boundary: the hook sees the path an open() names, not a dir_fd it is relative to, and it runs
+    in the interpreter it polices. The boundary is the OS sandbox rlm.py wraps this process in,
+    where one exists."""
+    sep = os.sep
+    guarded = (_real,)
 
-    def _audit(event: str, args):
-        if event in _BLOCK_EXACT or event.startswith(_BLOCK_PREFIX):
-            raise PermissionError(
+    def within(path, roots, _fspath=os.fspath, _real=_real, _isinstance=isinstance,
+               _str=str, _bytes=bytes, _enc=sys.getfilesystemencoding(), _sep=sep, _exc=Exception) -> bool:
+        try:
+            s = _fspath(path)
+            # str.__str__ copies a str subclass to a plain str, so overridden methods never run here
+            s = _bytes.decode(s, _enc, "surrogateescape") if _isinstance(s, _bytes) else _str.__str__(s)
+            p = _real(s)
+        except _exc:
+            return False
+        for r in roots:
+            if p == r or p.startswith(r if r.endswith(_sep) else r + _sep):
+                return True
+        return False
+
+    guarded += (within,)
+    reads = tuple(dict.fromkeys(_real(str(r)) for r in read_roots))
+    scr = (_real(str(scratch)),)
+
+    def _audit(event, args, _reads=reads, _scratch=scr,
+               _shown=str(scratch), _exact=block_exact, _prefix=block_prefix, _writes=write_events,
+               _within=within, _guarded=guarded, _perm=PermissionError, _isinstance=isinstance,
+               _len=len, _any=any, _str=str, _int=int,
+               _wmask=os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC):
+        if event in _exact or event.startswith(_prefix):
+            raise _perm(
                 f"blocked by the RLM sandbox: {event}. This REPL has no network and no child "
                 f"processes — use rlm()/rlm_map() for model calls, and don't shell out.")
         if event == "open":
-            path, mode, flags = (list(args) + [None, None, None])[:3]
-            if path is None or isinstance(path, int):
+            n = _len(args)
+            path = args[0] if n > 0 else None
+            mode = args[1] if n > 1 else None
+            flags = args[2] if n > 2 else None
+            if path is None or _isinstance(path, _int):
                 return  # already-open fd; the originating open() was audited
-            writing = any(c in mode for c in "wax+") if isinstance(mode, str) else bool(
-                (flags or 0) & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC))
+            writing = _any(c in mode for c in "wax+") if _isinstance(mode, _str) else (
+                (flags or 0) & _wmask) != 0
             if writing:
-                if not _within(path, (SCRATCH,)):
-                    raise PermissionError(f"blocked by the RLM sandbox: write to {path!r}. "
-                                          f"Writes are confined to {SCRATCH}.")
-            elif not _within(path, _READ_ROOTS):
-                raise PermissionError(f"blocked by the RLM sandbox: read of {path!r}. "
-                                      f"Reads are confined to the vault — the corpus is already "
-                                      f"in `docs`, and anything outside it is not yours to send.")
-        elif event in _WRITE_EVENTS:
+                if not _within(path, _scratch):
+                    raise _perm(f"blocked by the RLM sandbox: write to {path!r}. "
+                                f"Writes are confined to {_shown}.")
+            elif not _within(path, _reads):
+                raise _perm(f"blocked by the RLM sandbox: read of {path!r}. "
+                            f"Reads are confined to the vault — the corpus is already "
+                            f"in `docs`, and anything outside it is not yours to send.")
+        elif event in _writes:
             for a in args:
-                if isinstance(a, (str, bytes, os.PathLike)) and not _within(a, (SCRATCH,)):
-                    raise PermissionError(f"blocked by the RLM sandbox: {event} on {a!r}.")
+                # CPython hands these events already-converted str/bytes paths plus int fds, modes
+                # and ids; anything else is checked as a path too, so it fails closed.
+                if a is None or _isinstance(a, _int):
+                    continue
+                if not _within(a, _scratch):
+                    raise _perm(f"blocked by the RLM sandbox: {event} on {a!r}.")
+        elif (event in ("object.__getattr__", "object.__setattr__") and args
+              and (args[0] is _guarded[0] or args[0] is _guarded[1])):
+            raise _perm(f"blocked by the RLM sandbox: {event} on the sandbox's own check.")
 
     return _audit
 
@@ -358,6 +557,13 @@ def main() -> None:
         except Exception:
             import traceback
             err = traceback.format_exc(limit=6)
+        except BaseException as e:
+            # exit()/quit()/sys.exit()/KeyboardInterrupt from model code used to end this process
+            # and with it the namespace holding every paid sub-agent result. It ends the step
+            # instead; the protocol pipes are private (_claim_pipes), so exit() closing
+            # sys.stdin on its way out no longer cuts the worker off from the parent.
+            err = (f"{type(e).__name__}{e.args!r}: exit() ends this step, not the REPL; "
+                   f"reply FINAL when you are done")
         _send({"t": "result", "out": buf.getvalue(), "err": err})
 
 
