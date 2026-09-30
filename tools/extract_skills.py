@@ -134,20 +134,26 @@ def chunk_transcript(transcript: str, max_chars: int = MAX_CHARS) -> list[str]:
 
 
 def parse_skills(raw: str) -> list[dict]:
+    """Pull a JSON array out of the model output, tolerating stray prose or a code fence.
+    A genuine [] means "nothing worth keeping". Anything unparseable RAISES: returning [] made a
+    truncated or malformed reply look like an empty answer, and the caller checkpointed the
+    conversation as done, so it never retried (external review, 2026-09-30)."""
     if not raw:
-        return []
+        raise ValueError("empty model output")
     fence = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw, re.DOTALL)
     candidate = fence.group(1) if fence else None
     if candidate is None:
         start, end = raw.find("["), raw.rfind("]")
         candidate = raw[start:end + 1] if start != -1 and end > start else None
     if candidate is None:
-        return []
+        raise ValueError(f"no JSON array in model output: {raw[:120]!r}")
     try:
         data = json.loads(candidate)
-        return data if isinstance(data, list) else []
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as e:
+        raise ValueError(f"model output is not valid JSON ({e.msg} at char {e.pos})") from None
+    if not isinstance(data, list):
+        raise ValueError(f"model output is JSON but not an array ({type(data).__name__})")
+    return data
 
 
 def extract_skills_from(transcript: str, model: str) -> list[dict]:
