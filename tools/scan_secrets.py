@@ -52,9 +52,11 @@ HIGH = [
     ("CoinGecko API key",   re.compile(r"CG-[A-Za-z0-9]{20,}")),
     # Current keys (sk-proj-, sk-svcacct-, sk-admin-) have a base64url body with '_' and '-', so
     # the alphanumeric-only class missed about half of them and cut the rest short, leaving the
-    # tail in the note (review, 2026-09-30). The lookbehind keeps prose like "risk-admin-..." out.
-    ("OpenAI key",          re.compile(r"(?<![A-Za-z0-9])sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"
-                                       r"|sk-[A-Za-z0-9]{20,}")),
+    # tail in the note (review, 2026-09-30). The lookbehind keeps prose like "risk-admin-..." out,
+    # but lets a key follow a JSON escape ("\nsk-proj-..." in tool output), which it had rejected.
+    ("OpenAI key",          re.compile(r"(?:(?<![A-Za-z0-9])|(?<=\\[nrtbf])|(?<=\\u[0-9A-Fa-f]{4}))"
+                                       r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"
+                                       r"|sk-(?:proj-)?[A-Za-z0-9]{20,}")),
     ("Anthropic key",       re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
     ("GitHub token",        re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}")),
     ("Google API key",      re.compile(r"AIza[A-Za-z0-9_-]{30,}")),
@@ -62,8 +64,10 @@ HIGH = [
     ("AWS access key id",   re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")),
     # The secret half has no prefix, only its label. Without this rule redaction masked the id and
     # left a working secret key, which also removed the one thing the guard would have blocked on.
+    # The separator admits '\' for the JSON-escaped form ({\"SecretAccessKey\": \"...\"}); group "v"
+    # is the value, which redact.py masks without eating the label.
     ("AWS secret access key", re.compile(
-        r"(?i)(?:aws_secret_access_key|secretaccesskey)['\"\s:=]+[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])")),
+        r"(?i)(?:aws_secret_access_key|secretaccesskey)['\"\\\s:=]+(?P<v>[A-Za-z0-9/+=]{40})(?![A-Za-z0-9/+=])")),
     # Lookarounds, not \b: in a Bot API URL (.../bot<token>/getMe) "bot" runs straight into the
     # digits, and a secret may end in '-'; \b missed both.
     ("Telegram bot token",  re.compile(r"(?<![0-9])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])")),
@@ -150,7 +154,22 @@ def decode(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace").replace("\x00", "")
 
 
+MAX_BYTES = 5_000_000     # larger files are listed as NOT scanned, in every mode
+
+
+def staged_size(path: str) -> int | None:
+    r = subprocess.run(["git", "cat-file", "-s", f":{path}"], cwd=VAULT, capture_output=True, text=True)
+    return int(r.stdout) if r.returncode == 0 and r.stdout.strip().isdigit() else None
+
+
 def staged_content(path: str) -> str | None:
+    """None: not scanned (over MAX_BYTES, or not readable from the index). Staged _media is scanned
+    now, and reading, decoding and running every rule over a 60MB video took ~15x its size in RAM
+    in the pre-commit hook (review of fix/scanners, 2026-09-30); the size comes from the index
+    first, so an oversize blob is never read."""
+    size = staged_size(path)
+    if size is None or size > MAX_BYTES:
+        return None
     r = subprocess.run(["git", "show", f":{path}"], cwd=VAULT, capture_output=True)
     return decode(r.stdout) if r.returncode == 0 else None
 
@@ -166,7 +185,7 @@ def read_file(p: Path) -> str | None:
     """None means NOT scanned (over 5MB, or unreadable); the caller must report it, since a file
     dropped silently let an audit print 'clean' over it."""
     try:
-        if p.stat().st_size > 5_000_000:
+        if p.stat().st_size > MAX_BYTES:
             return None
         return decode(p.read_bytes())
     except OSError:
@@ -233,6 +252,8 @@ def main() -> int:
             c = staged_content(rel)
             if c is not None:
                 sources.append((rel, c))
+            else:
+                skipped.append(rel)     # listed below; a staged video is not a failure
         mode = "staged changes"
 
     high, warn = [], []

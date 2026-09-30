@@ -16,6 +16,11 @@ Two tiers, matching the secret scanner's block/warn split:
          collide with legitimate vault content — the vault is full of numbers — so they report
          and let the commit through rather than wedging the automated sync on a coincidence.
 
+The deny list is read line by line in whatever Windows saved or appended it as (UTF-8, UTF-16,
+cp1251/cp1252). A line that is not clean UTF-8 or UTF-16 is checked in every likely reading, AND
+the commit is blocked until the file is re-saved as UTF-8: which codepage it is cannot be known,
+so a clean result over it would be a guess.
+
 Values are never printed. The Stop hook records this session into the vault, so echoing an
 address while removing it just recreates the leak in a new file; masked forms only.
 
@@ -27,7 +32,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redact import _load_deny, is_phone, term_pattern   # the one parser/matcher for .redact_terms.txt
+from redact import DENY_FILE, load_deny_report, is_phone, term_pattern   # the one parser/matcher
 from scan_secrets import staged_files, staged_content
 
 
@@ -76,25 +81,44 @@ def _scan(rel: str, content: str, hard, soft, regexes, blocking: list, warning: 
 
 
 def main() -> int:
-    literals, regexes = _load_deny()
-    if not literals and not regexes:
+    literals, regexes, problems = load_deny_report()
+    if not literals and not regexes and not problems:
         return 0
     hard = [t for t in literals if is_hard(t)]
     soft = [t for t in literals if not is_hard(t)]
 
     blocking: list[tuple[str, str, int]] = []
     warning: list[tuple[str, str, int]] = []
+    unscanned: list[str] = []
     for rel in staged_files():
         # Scan the path as well as the content: a note named after a person or a conversation
         # title carries the term in its filename, where a contents-only scan never looks.
-        for label, content in ((f"{rel} [path]", rel), (rel, staged_content(rel) or "")):
-            _scan(_safe_path(label, literals, regexes), content, hard, soft, regexes, blocking, warning)
+        content = staged_content(rel)
+        if content is None:
+            unscanned.append(_safe_path(rel, literals, regexes))
+        for label, text in ((f"{rel} [path]", rel), (rel, content or "")):
+            _scan(_safe_path(label, literals, regexes), text, hard, soft, regexes, blocking, warning)
 
+    for rel in unscanned:
+        print(f"pii-scan: NOT scanned (over 5MB or unreadable): {rel}")
 
     for rel, m, n in warning:
         print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m} (numeric/short; not blocking)")
 
+    if problems:
+        # Fail closed, as the strict read did before (with a traceback): a line in a codepage that
+        # is neither cp1251 nor cp1252 is a term this scan cannot match, and a one-line stderr
+        # warning in an unattended push surfaces nowhere. Line numbers only, never the values.
+        print("")
+        print(f"Commit blocked by pii-scan — tools/{DENY_FILE.name} is not clean UTF-8:")
+        for i, what in problems:
+            print(f"  line {i}: {what}")
+        print("Every term was still checked in each likely reading" + (" (findings below)." if blocking else "."))
+        print("Open it, check that the lines listed read correctly, save it as UTF-8 (Notepad:")
+        print("Save As, Encoding UTF-8) and commit again.")
     if not blocking:
+        if problems:
+            return 1
         print("pii-scan: clean (staged changes).")
         return 0
 
