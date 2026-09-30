@@ -39,9 +39,9 @@ Omit --since for "now": a date-only --since means midnight UTC, which loses the 
 same-day timestamped fact (add prints a WARNING when that happens).
 
 Probes. Two are built in and need no configuration: `sync` (this machine's last sync run, from
-tools/.sync_status.json) and `git` (ahead / behind / diverged against the upstream as of the last
-fetch, plus uncommitted code). Anything machine-specific is a COMMAND probe declared in
-palimpsest.json, so no host, service or path is baked into this file:
+tools/.sync_status.json) and `git` (ahead / behind / diverged against push_remote, else the branch
+upstream, as of the last fetch, plus uncommitted code). Anything machine-specific is a COMMAND
+probe declared in palimpsest.json, so no host, service or path is baked into this file:
 
   "probes": [
     {"name": "api", "entity": "my-api", "attr": "status",
@@ -683,10 +683,10 @@ def probe_sync() -> tuple[list[tuple[str, str, str]], dict]:
 
 
 def probe_git() -> tuple[list[tuple[str, str, str]], dict]:
-    """Where this checkout stands against its upstream as of the last fetch (the sync's pull step
-    fetches first), plus code the auto-commit never takes (vault_push.CODE). Looking only for
-    "behind" made an unpushed or dirty tree read "level": in the source vault a ledger fix sat
-    uncommitted for three days behind a green ledger."""
+    """Where this checkout stands against push_remote (else the branch upstream) as of the last
+    fetch (the sync's pull step fetches first), plus code the auto-commit never takes
+    (vault_push.CODE). Looking only for "behind" made an unpushed or dirty tree read "level": in
+    the source vault a ledger fix sat uncommitted for three days behind a green ledger."""
     eid = f"sync.{MACHINE}"
     ensure_entity(eid, "timer", f"the sync pipeline on {MACHINE}")
     try:
@@ -702,18 +702,31 @@ def probe_git() -> tuple[list[tuple[str, str, str]], dict]:
             return [(eid, "remote", "not a git repo")], {}
         lines = (p.stdout or "").splitlines()
         head = lines[0] if lines else ""
-        ahead = re.search(r"ahead (\d+)", head)
-        behind = re.search(r"behind (\d+)", head)
-        if "..." not in head:
-            value = "no upstream"
-        elif "[gone]" in head:
-            # the fetch pruned the upstream branch (renamed or deleted on the host): no counts,
-            # and nothing upstream holds this machine's commits, which is not "level"
-            value = "upstream gone"
+        m_a, m_b = re.search(r"ahead (\d+)", head), re.search(r"behind (\d+)", head)
+        ahead, behind = m_a and m_a.group(1), m_b and m_b.group(1)
+        # "[gone]": the fetch pruned the upstream branch (renamed or deleted on the host). No
+        # counts, and nothing upstream holds this machine's commits, which is not "level".
+        missing = "no upstream" if "..." not in head else "upstream gone" if "[gone]" in head else ""
+        remote = str(CFG.get("push_remote") or "").strip()
+        if remote:
+            # vault_push pushes to push_remote and never sets an upstream. In a clone used as the
+            # vault the upstream is the harness's origin, so the header counted every backed-up
+            # commit as unpushed, one more each night. Measure against what is actually pushed to.
+            git_ = lambda *a: subprocess.run(["git", *a], cwd=str(VAULT), capture_output=True, text=True,
+                                             encoding="utf-8", errors="replace", timeout=20, creationflags=NO_WINDOW)
+            br = git_("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+            q = git_("rev-list", "--left-right", "--count", f"refs/remotes/{remote}/{br}...HEAD")
+            if q.returncode == 0 and len(q.stdout.split()) == 2:
+                behind, ahead = (n if n != "0" else None for n in q.stdout.split())
+                missing = ""
+            else:
+                missing = f"not on {remote}/{br} yet (unpushed)"
+        if missing:
+            value = missing
         elif ahead and behind:
-            value = f"diverged (ahead {ahead.group(1)}, behind {behind.group(1)})"
+            value = f"diverged (ahead {ahead}, behind {behind})"
         elif ahead:
-            value = f"ahead {ahead.group(1)} (unpushed)"
+            value = f"ahead {ahead} (unpushed)"
         elif behind:
             value = "behind (pull needed)"
         else:
