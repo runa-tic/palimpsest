@@ -34,7 +34,9 @@ TOOLS = Path(__file__).resolve().parent     # was VAULT / "_tools": the allow li
 VAULT = TOOLS.parent
 ALLOW_FILE = TOOLS / ".secret_scan_allow.txt"
 
-# Directories never scanned (protected, binary-heavy, or would self-flag).
+# Directories the --all / directory walk never enters (protected, binary-heavy, or slow). Staged
+# files are scanned wherever they are: Obsidian AI plugins keep API keys in
+# .obsidian/plugins/<p>/data.json, and a text file in _media is still text (review, 2026-09-30).
 SKIP_DIRS = {".git", "_media", "node_modules", ".obsidian", "__pycache__"}
 # Specific repo-relative paths never scanned, matched exactly. A prefix match exempted anything
 # starting "tools/.secrets" (.secrets.env, .secrets_backup), and nothing gitignores those, so a
@@ -153,11 +155,11 @@ def staged_content(path: str) -> str | None:
     return decode(r.stdout) if r.returncode == 0 else None
 
 
-def is_skipped(rel: str) -> bool:
-    parts = rel.replace("\\", "/").split("/")
-    if any(d in SKIP_DIRS for d in parts):
+def is_skipped(rel: str, walk: bool = True) -> bool:
+    rel = rel.replace("\\", "/")
+    if walk and any(d in SKIP_DIRS for d in rel.split("/")):
         return True
-    return rel.replace("\\", "/") in SKIP_PATHS
+    return rel in SKIP_PATHS
 
 
 def read_file(p: Path) -> str | None:
@@ -224,7 +226,7 @@ def main() -> int:
         mode = f"{len(sources)} path(s)"
     else:
         for rel in staged_files():
-            if is_skipped(rel):
+            if is_skipped(rel, walk=False):
                 continue
             # The name is content too: import_claude.py names files after the conversation.
             sources.append((f"{rel} [path]", rel))
