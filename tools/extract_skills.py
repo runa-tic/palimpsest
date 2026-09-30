@@ -24,6 +24,13 @@ import sys, os, re, json, argparse, subprocess
 from pathlib import Path
 from datetime import datetime
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The checkpoint, lock, model call, chunking and field hygiene are extract_notes.py's. Two copies
+# of each meant every defect in them was found twice and, as often, fixed once.
+from extract_notes import (sanitize, read_state, write_state, open_state, hold_lock, content_sig,
+                           is_extracted, source_index, captured_block, as_text, clean_tags,
+                           run_claude, chunk_transcript, WORD, file_sizes, Ledger)
+
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -43,8 +50,6 @@ try:
 except Exception:
     DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
-INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-MAX_CHARS = 350_000
 
 PROMPT = """You are mining a saved Claude Code session to grow a self-improving SKILL memory
 (reusable procedures an agent consults to ACT — distinct from facts it recalls to answer).
@@ -77,60 +82,16 @@ The conversation transcript follows after the line "===CONVERSATION===".
 """
 
 
-def sanitize(name: str, maxlen: int = 90) -> str:
-    name = INVALID.sub(" ", name or "").strip()
-    name = re.sub(r"\s+", " ", name)
-    return (name[:maxlen].rstrip() or "Untitled")
-
-
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+    return read_state(STATE_FILE)
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    write_state(STATE_FILE, state)
 
 
-def call_claude(transcript: str, model: str) -> str:
-    full = PROMPT + "\n===CONVERSATION===\n" + transcript
-    # On Windows, suppress the console window the `claude` CLI would otherwise spawn when this
-    # runs under a windowless parent (pythonw at logon). Without this the sync pipeline pops up
-    # stray, hard-to-close terminal windows. CREATE_NO_WINDOW exists only on Windows.
-    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    proc = subprocess.run(
-        ["claude", "-p", "--model", model],
-        input=full, capture_output=True, text=True, encoding="utf-8",
-        env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"},  # don't trigger vault hooks
-        creationflags=creationflags,
-    )
-    if proc.returncode != 0:
-        # See extract_notes.call_claude — `claude -p` reports API / model / usage failures on
-        # STDOUT with an empty stderr, so stderr-only reporting invented "input too large" for
-        # every one of the 70 conversations that failed in the 2026-07-28 run.
-        err = proc.stderr.strip() or proc.stdout.strip() or "(no output on either stream)"
-        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {err[:500]}")
-    return proc.stdout.strip()
-
-
-def chunk_transcript(transcript: str, max_chars: int = MAX_CHARS) -> list[str]:
-    if len(transcript) <= max_chars:
-        return [transcript]
-    turns = transcript.split("\n---\n")
-    chunks, cur = [], ""
-    for turn in turns:
-        if cur and len(cur) + len(turn) > max_chars:
-            chunks.append(cur)
-            cur = turn
-        else:
-            cur = f"{cur}\n---\n{turn}" if cur else turn
-    if cur:
-        chunks.append(cur)
-    return chunks
+def call_claude(transcript: str, model: str, captured=()) -> str:
+    return run_claude(PROMPT + captured_block(captured) + "\n===CONVERSATION===\n" + transcript, model)
 
 
 def parse_skills(raw: str) -> list[dict]:
@@ -163,13 +124,13 @@ def parse_skills(raw: str) -> list[dict]:
     return data
 
 
-def extract_skills_from(transcript: str, model: str) -> list[dict]:
+def extract_skills_from(transcript: str, model: str, captured=()) -> list[dict]:
     seen, out = set(), []
     chunks = chunk_transcript(transcript)
     for i, ch in enumerate(chunks):
         if len(chunks) > 1:
             print(f"  · chunk {i + 1}/{len(chunks)} ({len(ch):,} chars)")
-        raw = call_claude(ch, model)
+        raw = call_claude(ch, model, [*captured, *(s["name"] for s in out)])
         for s in parse_skills(raw):
             key = (s.get("name") or "").strip().lower()
             if key and key not in seen:
@@ -195,8 +156,15 @@ _INDEX: list[tuple[str, set]] | None = None
 
 
 def _words(s: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower())
+    # Any script, not [a-z0-9]: that reduced a Russian skill to the tool names it mentions, so two
+    # different procedures about pm2 and ecosystem.config.js scored 0.75 and the second was dropped.
+    return {w for w in WORD.findall((s or "").lower())
             if len(w) > 3 and w not in _STOP}
+
+
+# Below this many content words Jaccard is noise (3 shared words of 4 is "75% the same"), and a
+# false match here silently drops a skill for good, so a short candidate is never blocked.
+MIN_DUP_WORDS = 6
 
 
 def _proposal_index() -> list[tuple[str, set]]:
@@ -216,8 +184,8 @@ def _proposal_index() -> list[tuple[str, set]]:
 
 def near_duplicate_of(skill: dict, threshold: float) -> str | None:
     """Title of an existing proposal saying the same thing, or None."""
-    cand = _words(f"{skill.get('name', '')} {skill.get('steps', '')} {skill.get('why', '')}")
-    if not cand:
+    cand = _words(f"{skill.get('name', '')} {skill.get('steps', '')} {as_text(skill.get('why'))}")
+    if len(cand) < MIN_DUP_WORDS:
         return None
     for title, w in _proposal_index():
         if w and len(cand & w) / len(cand | w) >= threshold:
@@ -228,20 +196,38 @@ def near_duplicate_of(skill: dict, threshold: float) -> str | None:
 def remember_proposal(skill: dict, title: str):
     """Add a just-written proposal to the index so the NEXT chunk can't re-propose it."""
     _proposal_index().append(
-        (title, _words(f"{skill.get('name', '')} {skill.get('steps', '')} {skill.get('why', '')}")))
+        (title, _words(f"{skill.get('name', '')} {skill.get('steps', '')} {as_text(skill.get('why'))}")))
+
+
+def split_steps(steps: str) -> list[str]:
+    """One bullet per step: split on newlines and on "; ", but never inside a `code span`. Every
+    ';' used to split, which cut `for f in *.log; do gzip "$f"; done` into three bullets with
+    unbalanced backticks and PATH=C:\\bin;%PATH% into two."""
+    out = []
+    for line in steps.split("\n"):
+        cur = ""
+        for part in re.split(r"(`[^`\n]*`)", line):
+            if len(part) > 1 and part.startswith("`") and part.endswith("`"):
+                cur += part
+                continue
+            pieces = re.split(r";\s+", part)
+            for piece in pieces[:-1]:
+                out.append(cur + piece)
+                cur = ""
+            cur += pieces[-1]
+        out.append(cur)
+    return [s.strip() for s in out if s.strip()]
 
 
 def write_proposed_skill(skill: dict, src: Path, date: str, dry: bool,
-                         dup_threshold: float = 0.45) -> str | None:
-    name = (skill.get("name") or "").strip()
-    steps = (skill.get("steps") or "").strip()
+                         dup_threshold: float = 0.45, sig: str = "") -> str | None:
+    name = as_text(skill.get("name"))
+    steps = as_text(skill.get("steps"))
     if not name or not steps:
         return None
-    when = (skill.get("when_to_use") or "").strip()
-    why = (skill.get("why") or "").strip()
-    tags = skill.get("tags") or []
-    if not isinstance(tags, list):
-        tags = [str(tags)]
+    when = re.sub(r"\s+", " ", as_text(skill.get("when_to_use")))
+    why = as_text(skill.get("why"))
+    tags = clean_tags(skill.get("tags") or [])
     fname = sanitize(name) + ".md"
     dest = PROPOSED_DIR / fname
     if dest.exists():
@@ -251,15 +237,18 @@ def write_proposed_skill(skill: dict, src: Path, date: str, dry: bool,
         print(f"  ~ skip (says the same as an existing proposal): {name[:56]}")
         print(f"      existing: {dup[:70]}")
         return None
-    tag_lines = "\n".join(f"  - {t}" for t in (["skill/proposed"] + [str(t) for t in tags]))
-    steps_md = "\n".join(f"- {part.strip()}" for part in re.split(r"\n|;\s*", steps) if part.strip())
+    tag_lines = "\n".join(f"  - {t}" for t in (["skill/proposed"] + tags))
+    steps_md = "\n".join(f"- {part}" for part in split_steps(steps))
     content = (
         "---\n"
         "type: skill\n"
         "status: proposed\n"
         f"created: {date}\n"
         f"source: \"[[{conversation_link(src)}]]\"\n"
-        f"trigger: \"{when}\"\n"
+        + (f"source_hash: {sig}\n" if sig else "")
+        # A JSON string is a valid YAML double-quoted scalar: a quote or a C:\\Users path in the
+        # trigger, written raw, made the whole frontmatter unparseable.
+        + f"trigger: {json.dumps(when, ensure_ascii=False)}\n"
         "tags:\n"
         f"{tag_lines}\n"
         "---\n\n"
@@ -300,37 +289,61 @@ def main():
         print(f"No conversation notes in {CONV_DIR}. Run import_claude.py first.")
         return
 
-    state = load_state()
+    if not hold_lock("extract_skills.lock"):
+        print("extract_skills: another extraction run holds the lock — skipping this one")
+        return
+    state = open_state(load_state, STATE_FILE, args.force)
+    # Promoted skills are moved up into Skills/ and keep their source: they count as taken too.
+    by_source = source_index(PROPOSED_DIR, PROPOSED_DIR.parent)
+    ledger = Ledger("skills")
     processed = 0
     failed: list[str] = []
     total = 0
+    adopted = False
     for src in sources:
         key = str(src.relative_to(VAULT))
-        sig = f"{src.stat().st_mtime_ns}:{src.stat().st_size}"
-        if not args.force and state.get(key, {}).get("sig") == sig:
+        st = src.stat()
+        stat_sig = f"{st.st_mtime_ns}:{st.st_size}"
+        prev = state.get(key, {})
+        if not args.force and prev.get("stat") == stat_sig:
+            continue
+        raw = src.read_bytes()
+        transcript = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
+        sig = content_sig(transcript)
+        from_here = by_source.get(src.stem, [])
+        if not args.force and is_extracted(prev, file_sizes(raw), sig,
+                                           {h for _, h in from_here} | ledger.hashes(src.stem)):
+            if not args.dry_run:
+                state[key] = {**prev, "sig": sig, "stat": stat_sig}
+                adopted = True
             continue
         if args.limit and processed >= args.limit:
             break
         print(f"• {src.name}")
-        transcript = src.read_text(encoding="utf-8")
-        transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
         m = re.search(r"\d{4}-\d{2}-\d{2}", src.name)
         date = m.group(0) if m else datetime.now().strftime("%Y-%m-%d")
         try:
-            skills = extract_skills_from(transcript, args.model)
+            skills = extract_skills_from(transcript, args.model, [n for n, _ in from_here])
+            # Inside the try, as in extract_notes: one bad item fails this conversation only.
+            written = [w for s in skills
+                       if (w := write_proposed_skill(s, src, date, args.dry_run, args.dup_threshold, sig))]
         except Exception as e:
             print(f"  ! skipped ({e})")
             failed.append(src.name)      # not recorded in state, so the next run retries it
             continue
-        written = [w for s in skills
-                   if (w := write_proposed_skill(s, src, date, args.dry_run, args.dup_threshold))]
         total += len(written)
         processed += 1
         if not args.dry_run:
-            state[key] = {"sig": sig, "proposed": written}
+            by_source.setdefault(src.stem, []).extend((Path(w).stem, sig) for w in written)
+            state[key] = {"sig": sig, "stat": stat_sig,
+                          "proposed": list(dict.fromkeys([*prev.get("proposed", []), *written]))}
             save_state(state)
+            ledger.record(src.stem, sig)
         if not skills:
             print("  (no reusable procedures)")
+    if adopted:
+        save_state(state)
 
     print(f"\nDone. Processed {processed} conversation(s), proposed {total} skill(s) into Skills/_proposed/.")
     if total and not args.dry_run:
