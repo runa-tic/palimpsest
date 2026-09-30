@@ -269,11 +269,16 @@ def main():
             reranked = ranked is not fused      # rerank hands back its input object when it falls back
     top = ranked[: args.top]
     label = f"{args.mode}{'+rerank' if reranked else ''}"
-    if not top:
+    if not top and not state_ctx:
+        # Stop only when BOTH sources are empty: a question the ledger answers ("where does X
+        # run") in a vault with no matching prose used to be dropped here (review, 2026-09-30).
         print("No relevant notes found. Try different words, or import/extract more first.")
         return
     if args.retrieve_only:
-        print(f"sources ({label}):\n" + "\n".join(f"  {i}. {f.stem}" for i, f in enumerate(top, 1)))
+        if state_ctx:
+            print(state_ctx)
+        print(f"sources ({label}):\n" + ("\n".join(f"  {i}. {f.stem}" for i, f in enumerate(top, 1))
+                                          or "  (none; the STATE block above is the evidence)"))
         return
 
     ctx, used, budget = [], 0, 300_000
