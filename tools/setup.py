@@ -98,7 +98,13 @@ def plan(cfg: dict) -> str:
 
 
 def main() -> int:
-    cfg = cfgmod.load()
+    try:
+        cfg = cfgmod.load()
+    except cfgmod.ConfigError as e:
+        # Never interview over it: save() would replace the user's push_remote, machine and
+        # probes with defaults plus five answers.
+        print(f"setup: {e}\nNothing was written.", file=sys.stderr)
+        return 1
     print("\nPalimpsest setup\n" + "=" * 60)
     print(f"vault: {cfgmod.VAULT}\n")
     try:
