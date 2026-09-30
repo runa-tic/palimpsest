@@ -147,8 +147,12 @@ def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
     The worker's audit hook runs inside the same interpreter as the model-written code, so it is
     defence in depth, not a boundary: an external review (2026-09-30) rebound the hook's allowed
     roots from generated code and read a file outside the vault, which rlm() could then send out.
-    On macOS the kernel enforces it instead (sandbox-exec): no network, no reads under /Users or
-    /Volumes except the vault, the scratch dir and the Python install, no writes outside scratch.
+    On macOS the kernel enforces it instead (sandbox-exec): no network, no writes outside scratch,
+    and reads confined to the vault, the scratch dir, the Python install and the system files an
+    interpreter needs. That is an allow-list: the first profile only denied /Users and /Volumes,
+    which left /private/tmp and $TMPDIR (other sessions' scratch and task output), /etc and /opt
+    readable once the hook was bypassed (review, 2026-09-30). Outside home, stat() metadata stays
+    allowed (as before) so path resolution works; contents do not.
     Elsewhere the worker runs with the in-process hook only, and says so. RLM_OS_SANDBOX=0 opts out."""
     if os.environ.get("RLM_OS_SANDBOX") == "0":
         return cmd, "OS sandbox disabled (RLM_OS_SANDBOX=0): in-process read/write checks only"
@@ -166,17 +170,25 @@ def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
             pass
     q = lambda x: '"' + str(x).replace("\\", "\\\\").replace('"', '\\"') + '"'
     ancestors = {a for r in roots for a in r.parents}
+    # What dyld, libSystem and the interpreter read outside the Python install: the root listing,
+    # system libraries and frameworks, devices, and the local timezone. Nothing user-writable.
+    system = ['(literal "/")', '(subpath "/System")', '(subpath "/usr/lib")', '(subpath "/usr/share")',
+              '(subpath "/dev")', '(literal "/private/etc/localtime")', '(subpath "/private/var/db/timezone")',
+              '(subpath "/private/var/db/dyld")']
     profile = "\n".join([
         "(version 1)", "(allow default)", "(deny network*)",
-        '(deny file-read* (subpath "/Users") (subpath "/Volumes"))',
-        "(allow file-read* " + " ".join(f"(subpath {q(r)})" for r in sorted(roots)) + ")",
+        '(deny file-read* (subpath "/"))',
+        '(allow file-read-metadata (subpath "/"))',
+        '(deny file-read-metadata (subpath "/Users") (subpath "/Volumes"))',
+        "(allow file-read* " + " ".join(system + [f"(subpath {q(r)})" for r in sorted(roots)]) + ")",
         # path resolution stats every parent; allow that metadata, never their contents
         "(allow file-read-metadata " + " ".join(f"(literal {q(a)})" for a in sorted(ancestors)) + ")",
         '(deny file-write* (subpath "/"))',
         f'(allow file-write* (subpath {q(scratch.resolve())}) (literal "/dev/null") (literal "/dev/tty") '
         r'(regex #"^/dev/fd/"))',
     ])
-    return [exe, "-p", profile, *cmd], "OS sandbox: sandbox-exec (no network; reads confined to the vault)"
+    return [exe, "-p", profile, *cmd], ("OS sandbox: sandbox-exec (no network; reads confined to the vault, "
+                                        "the Python install and system libraries; writes to scratch)")
 
 
 def main() -> int:
