@@ -10,7 +10,7 @@ Usage (from vault root):  python tools/weekly_review.py
 from __future__ import annotations
 import sys, re, time, subprocess
 from pathlib import Path
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -157,7 +157,9 @@ def main():
     front = f"---\ntype: review\nweek: {tag}\ntags:\n  - review\n---\n"
     L = [START,
          f"# 🗓️ Weekly Review — {tag}",
-         f"*Generated {datetime.now():%Y-%m-%d %H:%M}. Health snapshot: [[Vault Health]].*\n"]
+         # The date only: this file is committed and both machines render it, so a minute here
+         # made every two-machine sync conflict on this one line.
+         f"*Generated {date.today():%Y-%m-%d}. Health snapshot: [[Vault Health]].*\n"]
 
     L.append(f"## 🌱 New notes this week ({len(new_notes)})")
     L += [f"- [[{n}]]" for n in new_notes] or ["- *(none)*"]
