@@ -12,7 +12,7 @@ Checks:
 Usage (from vault root):  python tools/maintenance.py
 """
 from __future__ import annotations
-import sys, os, re, time
+import sys, os, re, time, subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -50,18 +50,63 @@ def quoted(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
 # FULL copy of the vault (agentcost-beta alone was 1,631 .md). Scanning them made every health
 # number measure two vaults at once — a shadow twin's copy of a note counts as an inbound link,
 # so real orphans vanished, and notes deleted in main but alive in a worktree resolved links
-# that should have read as broken.
+# that should have read as broken. Every dot-folder is skipped, as Obsidian itself does: .trash/
+# (Obsidian's "move to trash") is the same shadow-copy problem — a deleted note there resolved
+# links to it and its own links un-orphaned real notes.
 SKIP_DIRS = {"tools", "_tools", ".obsidian", ".claude", ".git", "node_modules", "_scratch"}
 
-def all_md() -> list[Path]:
-    return [p for p in VAULT.rglob("*.md") if not SKIP_DIRS.intersection(p.parts)]
+def rel_parts(p: Path) -> tuple[str, ...]:
+    """Path parts INSIDE the vault. Testing p.parts also tested the folders above the vault, so a
+    vault living under a folder called tools, node_modules or .claude (a worktree) scanned nothing
+    and reported all-green."""
+    return p.relative_to(VAULT).parts
+
+def all_files() -> list[Path]:
+    out = []
+    for root, dirs, names in os.walk(VAULT):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        out += [Path(root) / n for n in names]
+    return sorted(out)
 
 def stem_of(target: str) -> str:
     return target.strip().split("/")[-1]
 
+def git_touched(paths: list[Path]) -> dict[Path, float]:
+    """Last-commit time per path, for files that are committed and unchanged since.
+
+    mtime is when THIS checkout wrote the file: a clone, or a pull that rewrites it, resets it to
+    now, so the second machine never saw an abandoned project as stale and the two machines
+    committed different reports. A file that is untracked or edited since its last commit was
+    touched here, and keeps its mtime. Empty outside a git repo.
+    """
+    def git(*a):
+        try:
+            r = subprocess.run(["git", "-c", "core.quotePath=false", *a], cwd=VAULT,
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        return r.stdout if r.returncode == 0 else ""
+    rels = [str(p.relative_to(VAULT)).replace(os.sep, "/") for p in paths]
+    if not rels:
+        return {}
+    # Both relative to the vault, like log --relative below (status --porcelain would be relative
+    # to the repository root, which differs when the vault is a subfolder of a repo).
+    dirty = set(git("diff", "--name-only", "--relative", "HEAD", "--", *rels).splitlines())
+    dirty |= set(git("ls-files", "--others", "--", *rels).splitlines())
+    out, ts = {}, None
+    for line in git("log", "--format=@%ct", "--name-only", "--relative", "--", *rels).splitlines():
+        if line.startswith("@"):
+            ts = float(line[1:])
+        elif line and ts is not None and line not in out:
+            out[line] = ts
+    return {VAULT / r: out[r] for r in rels if r in out and r not in dirty}
+
 def main():
-    files = all_md()
+    every = all_files()
+    files = [p for p in every if p.suffix == ".md"]
     by_stem = {p.stem: p for p in files}
+    # Attachments: ![[diagram.png]] and [[paper.pdf]] point at real files, not at missing notes.
+    attachments = {p.name for p in every if p.suffix != ".md"}
     inbound = {p.stem: 0 for p in files}
     broken = []
 
@@ -84,8 +129,9 @@ def main():
     # that no reader could ever fix, because the targets were never meant to be notes.
     skip_src = {"Home", "START HERE", "CLAUDE", "AGENTS", "Vault Health"}
     def scannable(p):
-        return ("Templates" not in p.parts and "Claude Conversations" not in p.parts
-                and "Reviews" not in p.parts and p.stem not in skip_src)
+        parts = rel_parts(p)
+        return ("Templates" not in parts and "Claude Conversations" not in parts
+                and "Reviews" not in parts and p.stem not in skip_src)
 
     # The vault is only half the brain: durable facts also live in Claude's memory directory,
     # and extracted notes legitimately cite them by title ("Deterministic safety backstops" is
@@ -186,7 +232,7 @@ def main():
         return [unq(a) for a in out if a.strip()]
     alias_to_stem = {}
     for p in files:
-        m = FM.match(p.read_text(encoding="utf-8", errors="ignore"))
+        m = FM.match(p.read_text(encoding="utf-8", errors="ignore").lstrip("\ufeff"))
         if not m:
             continue
         for a in parse_aliases(m.group(1)):
@@ -208,25 +254,32 @@ def main():
                 continue
             s = stem_of(m.group(1))
             canon = s if s in inbound else alias_to_stem.get(s)
+            if not canon and s.lower().endswith(".md"):
+                # [[Note.md]] is a valid Obsidian link to Note — and an inbound one.
+                canon = s[:-3] if s[:-3] in inbound else alias_to_stem.get(s[:-3])
             if canon:
                 if canon != p.stem:
                     inbound[canon] += 1
             elif s in external:
                 pass          # resolvable, but it lives in the memory dir, not the vault
+            elif s in attachments:
+                pass          # an existing attachment: resolvable, not a note
             elif s.strip():
                 broken.append((p.stem, s))
 
     def in_dir(p, d):
-        return d in [part for part in p.parts]
+        return d in rel_parts(p)
 
     atomic = [p for p in files if in_dir(p, "10 Notes") and not p.name.startswith("_")]
     no_related, untagged, orphans = [], [], []
     for p in atomic:
         txt = p.read_text(encoding="utf-8", errors="ignore")
-        rel = re.search(r"## Related\n(.*?)(?=\n## Source|\Z)", txt, re.DOTALL)
+        # The Related list only, as link_notes reads it: a "[[ ]]" in a later section is not a
+        # placeholder link_notes would ever fill.
+        rel = re.search(r"## Related\n((?:[ \t]*\n)*(?:[ \t]*- .*(?:\n|\Z))*)", txt)
         if rel and "[[ ]]" in rel.group(1):
             no_related.append(p.stem)
-        fm = re.match(r"---\n(.*?)\n---", txt, re.DOTALL)
+        fm = re.match(r"---\n(.*?)\n---", txt.lstrip("\ufeff"), re.DOTALL)
         fm_text = fm.group(1) if fm else ""
         # Tags come in two YAML forms: a block list (`tags:\n  - x`) or an inline
         # array (`tags: [x, y]`). Read both so inline-tagged notes aren't false-flagged.
@@ -243,11 +296,12 @@ def main():
 
     stale = []
     cutoff = time.time() - 30 * 86400
-    for p in files:
-        if in_dir(p, "20 Projects") and not p.name.startswith("_"):
-            txt = p.read_text(encoding="utf-8", errors="ignore")
-            if re.search(r"^status:\s*active", txt, re.M) and p.stat().st_mtime < cutoff:
-                stale.append(p.stem)
+    projects = [p for p in files if in_dir(p, "20 Projects") and not p.name.startswith("_")]
+    touched = git_touched(projects)
+    for p in projects:
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+        if re.search(r"^status:\s*active", txt, re.M) and touched.get(p, p.stat().st_mtime) < cutoff:
+            stale.append(p.stem)
 
     # Aging claims. A note marked volatility: dated was true when written and says nothing
     # about whether it still is — which is how a stale deployment claim survived as a confident

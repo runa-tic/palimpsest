@@ -2,14 +2,15 @@
 """Generate this week's review note: what landed, what's open, where projects stand.
 
 Writes Reviews/Weekly/YYYY-Www.md (per ISO week). Safe to run daily — it refreshes the
-current week's file in place. Wired into sync.py.
+generated block of the current week's file in place; your Reflection, and any loop you ticked,
+are kept. Wired into sync.py.
 
 Usage (from vault root):  python tools/weekly_review.py
 """
 from __future__ import annotations
-import sys, re, time
+import sys, re, time, subprocess
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -21,11 +22,63 @@ NOTES = VAULT / "10 Notes"
 PROJECTS = VAULT / "20 Projects"
 DAILY = VAULT / "Daily"
 CONVS = VAULT / "40 Resources" / "Claude Conversations"
+START, END = "<!-- weekly:start -->", "<!-- weekly:end -->"
+# One well-formed pair: a START with no other START before its END (see briefing.py).
+PAIR = re.compile(re.escape(START) + r"(?:(?!" + re.escape(START) + r").)*?" + re.escape(END), re.DOTALL)
+REFLECTION = "## ✍️ Reflection\n- What did I learn? What's the one thing to push next week?\n"
 
-def recent(folder: Path, days=7, recurse=False):
+def git_times(folder: Path, first: bool) -> dict[Path, float]:
+    """Commit time per file under folder: when it was first added, or last changed."""
+    try:
+        r = subprocess.run(["git", "-c", "core.quotePath=false", "log", "--format=@%ct", "--name-only",
+                            "--relative", *(["--diff-filter=A"] if first else []), "--",
+                            str(folder.relative_to(VAULT))], cwd=VAULT, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out, ts = {}, None
+    for line in r.stdout.splitlines() if r.returncode == 0 else []:
+        if line.startswith("@"):
+            ts = float(line[1:])
+        elif line and ts is not None and (first or VAULT / line not in out):
+            out[VAULT / line] = ts          # log is newest first: first=True keeps the oldest
+    return out
+
+def recent(folder: Path, days=7, recurse=False, keys=("created",), first=True):
+    """Files dated within the last `days`.
+
+    Not by mtime: a clone, or a pull that rewrites a file, sets it to the checkout time, so on the
+    second machine every old note was "new this week" and the two machines committed different
+    reviews. The date is the frontmatter's (`keys`, in order), else the filename's leading date,
+    else git history (first add, or last commit), and mtime only for a file git has never seen.
+    """
+    since = date.today() - timedelta(days=days)
     cutoff = time.time() - days * 86400
     it = folder.rglob("*.md") if recurse else folder.glob("*.md")
-    return [p for p in it if not p.name.startswith("_") and p.stat().st_mtime >= cutoff]
+    out, gt = [], None
+    for p in it:
+        if p.name.startswith("_"):
+            continue
+        with p.open(encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(1500).lstrip("\ufeff")          # transcripts are large; the header is enough
+        fm = re.match(r"---\n(.*?)\n---", head, re.DOTALL)
+        found = [re.search(rf"^{k}:\s*[\"']?(\d{{4}}-\d{{2}}-\d{{2}})", fm.group(1), re.M)
+                 for k in keys] if fm else []
+        found.append(re.match(r"(\d{4}-\d{2}-\d{2})", p.stem))
+        d = next((m.group(1) for m in found if m), None)
+        try:
+            day = date.fromisoformat(d) if d else None
+        except ValueError:
+            day = None
+        if day:
+            if day >= since:
+                out.append(p)
+            continue
+        if gt is None:
+            gt = git_times(folder, first)
+        if gt.get(p, p.stat().st_mtime) >= cutoff:
+            out.append(p)
+    return out
 
 TASK = re.compile(r"^\s*- \[ \] (.+)$", re.M)
 
@@ -67,7 +120,9 @@ def main():
     out = VAULT / "Reviews" / "Weekly" / f"{tag}.md"
 
     new_notes = sorted(p.stem for p in recent(NOTES))
-    new_convs = sorted((p.stem for p in recent(CONVS, recurse=True)), reverse=True)
+    # A conversation counts in the week it was last active, not only the week it started.
+    new_convs = sorted((p.stem for p in recent(CONVS, recurse=True, keys=("ended", "date"), first=False)),
+                       reverse=True)
 
     projects = []
     for p in PROJECTS.glob("*.md"):
@@ -80,7 +135,27 @@ def main():
 
     tasks = dedupe_tasks(open_tasks_today() + open_tasks_in(PROJECTS))
 
-    L = [f"---\ntype: review\nweek: {tag}\ntags:\n  - review\n---\n",
+    # The file invites writing (Reflection) and ticking (Open loops), and this runs every day. It
+    # used to rebuild the whole file, so each night's sync erased what was written that week.
+    # Only the marked block is regenerated now, and a loop ticked in it stays ticked.
+    old = out.read_text(encoding="utf-8") if out.exists() else None
+    pair = PAIR.search(old) if old is not None else None
+    if old is not None and not pair:
+        if START in old or END in old:
+            print(f"{out.relative_to(VAULT)}: unbalanced weekly markers — left untouched; restore "
+                  f"the {START} / {END} pair to refresh it.", file=sys.stderr)
+            return 1
+        # Written before the markers existed: everything above Reflection was generated.
+        r = re.search(r"(?m)^## ✍️ Reflection", old)
+        if not r:
+            print(f"{out.relative_to(VAULT)}: no generated block and no Reflection heading — left "
+                  f"untouched.", file=sys.stderr)
+            return 1
+    generated = pair.group(0) if pair else (old[:r.start()] if old is not None else "")
+    ticked = {m.group(1).strip() for m in re.finditer(r"^- \[[xX]\] (.+?)  <sub>", generated, re.M)}
+
+    front = f"---\ntype: review\nweek: {tag}\ntags:\n  - review\n---\n"
+    L = [START,
          f"# 🗓️ Weekly Review — {tag}",
          f"*Generated {datetime.now():%Y-%m-%d %H:%M}. Health snapshot: [[Vault Health]].*\n"]
 
@@ -94,14 +169,20 @@ def main():
     L += [f"- {'🟢' if s=='active' else '⚪'} [[{n}]] — `{s}`" for n, s in projects] or ["- *(none)*"]
 
     L.append(f"\n## 🔓 Open loops ({len(tasks)})")
-    L += [f"- [ ] {t}  <sub>([[{src}]])</sub>" for src, t in tasks] or ["- *(none)*"]
+    L += [f"- [{'x' if t.strip() in ticked else ' '}] {t}  <sub>([[{src}]])</sub>" for src, t in tasks] \
+        or ["- *(none)*"]
+    L.append(END)
+    block = "\n".join(L)
 
-    L.append("\n## ✍️ Reflection")
-    L.append("- What did I learn? What's the one thing to push next week?\n")
-
+    if pair:
+        text = old[:pair.start()] + block + old[pair.end():]
+    elif old is not None:
+        text = front + block + "\n\n" + old[r.start():]
+    else:
+        text = front + block + "\n\n" + REFLECTION
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(L), encoding="utf-8")
+    out.write_text(text, encoding="utf-8")
     print(f"Wrote {out.relative_to(VAULT)} — {len(new_notes)} notes, {len(new_convs)} convs, {len(tasks)} open tasks.")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
