@@ -2,9 +2,9 @@
 audit of the vault it came from — shared last-seen, a git probe that sees unpushed and dirty
 work, and a failed probe that records nothing when THIS machine is the one offline.
 """
-import json, subprocess, sys, tempfile
+import json, subprocess, sys
 from pathlib import Path
-from _util import Checks, make_vault, git, run, write
+from _util import Checks, make_vault, git, run, tempdir, write
 
 
 def st(v, *args, env=None):
@@ -41,7 +41,7 @@ def main() -> int:
 
     r = st(v, "probe", "--only", "git")
     c.ok("sync.alpha.remote = no upstream" in r.stdout, "git probe without upstream says so", r.stdout)
-    remote = Path(tempfile.mkdtemp()) / "r.git"
+    remote = tempdir("palimpsest-remote-") / "r.git"
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
     git(v, "remote", "add", "origin", str(remote)); git(v, "push", "-q", "-u", "origin", "main")
     write(v, "10 Notes/y.md", "y\n"); git(v, "add", "10 Notes/y.md"); git(v, "commit", "-q", "-m", "local")

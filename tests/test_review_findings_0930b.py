@@ -9,7 +9,7 @@
 """
 import json, os, subprocess, sys
 from pathlib import Path
-from _util import Checks, git, make_vault, run, write
+from _util import Checks, git, make_vault, run, tempdir, write
 
 
 def load(v, name):
@@ -70,7 +70,7 @@ def main() -> int:
 
     # 3. a deleted content directory's deletions are committed
     v = make_vault()
-    remote = Path(v.parent) / (v.name + "-remote.git")
+    remote = tempdir("palimpsest-remote-") / "remote.git"
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
     write(v, "10 Notes/a.md", "a\n"); write(v, "Daily/d.md", "d\n")
     write(v, ".gitignore", "tools/__pycache__/\n")

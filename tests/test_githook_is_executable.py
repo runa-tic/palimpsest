@@ -8,9 +8,9 @@ credential committed straight through. Found by a clean-install test, 2026-09.
 This clones the COMMITTED repo (so file modes are what a user gets) and commits a synthetic key.
 Set PALIMPSEST_REF to test another ref (e.g. main, to see it fail).
 """
-import os, subprocess, sys, tempfile
+import os, subprocess, sys
 from pathlib import Path
-from _util import Checks, REPO
+from _util import Checks, REPO, tempdir
 
 FAKE_KEY = "AKIA" + "QZXW" * 4
 
@@ -25,7 +25,7 @@ def main() -> int:
     if os.name == "nt":
         print("  (Windows ignores the executable bit; the clone check below is for macOS/Linux)")
         return c.done()
-    d = Path(tempfile.mkdtemp(prefix="palimpsest-clone-"))
+    d = tempdir("palimpsest-clone-")
     subprocess.run(["git", "clone", "-q", "-b", ref, str(REPO), str(d)], check=True)
     for k, v in (("user.name", "t"), ("user.email", "t@example.invalid"), ("core.hooksPath", "tools/githooks")):
         subprocess.run(["git", "config", k, v], cwd=d, check=True)
