@@ -14,7 +14,7 @@ Usage (run from the vault root):
 Re-running is safe: a note is only rewritten if its source changed (tracked by id).
 """
 from __future__ import annotations
-import sys, os, re, json, argparse, tempfile
+import sys, os, re, json, argparse, glob, hashlib, tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -117,7 +117,7 @@ def existing_note(folder: Path, sid: str) -> str | None:
     recorded (the first message, later an AI title), so building it afresh left one note per title
     for the same session; 23 sessions in the source vault had two (review, 2026-09-30). The first
     name is kept rather than renamed: atomic notes link to conversations by filename."""
-    hits = sorted(folder.glob(f"* ({sid}).md"), key=lambda q: q.stat().st_mtime, reverse=True) if folder.exists() else []
+    hits = sorted(folder.glob(f"* ({glob.escape(sid)}).md"), key=lambda q: q.stat().st_mtime, reverse=True) if folder.exists() else []
     return hits[0].name if hits else None
 
 def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
@@ -306,7 +306,16 @@ def import_web(args):
         name = redact_title(conv.get("name") or "Untitled")
         created = conv.get("created_at")
         updated = conv.get("updated_at")
-        uuid = conv.get("uuid", "")
+        uuid = conv.get("uuid") or conv.get("id") or ""
+        if not uuid:
+            # The note is found again by its "(id).md" suffix, so an empty id made every
+            # uuid-less conversation match the first one's note and overwrite it. Derive a
+            # stable one from what identifies the conversation instead.
+            first = next((str(m.get("text") or m.get("content") or "") for m in
+                          (conv.get("chat_messages") or conv.get("messages") or []) if isinstance(m, dict)), "")
+            uuid = hashlib.sha1(json.dumps([created, conv.get("name"), first], default=str)
+                                .encode("utf-8", "replace")).hexdigest()
+        uuid = str(uuid)
         msgs = conv.get("chat_messages") or conv.get("messages") or []
         turns = []
         for m in msgs:
