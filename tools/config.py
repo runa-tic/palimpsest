@@ -83,14 +83,25 @@ DEFAULTS = {
 }
 
 
+class ConfigError(ValueError):
+    """palimpsest.json exists but cannot be read as a JSON object."""
+
+
 def load() -> dict:
-    """Config merged over defaults. A missing or unreadable file yields pure defaults."""
+    """Config merged over defaults. A missing file yields pure defaults; an unreadable one raises
+    ConfigError. Falling back to defaults there looked harmless and was not: pull, push and state
+    all default OFF, so one trailing comma quietly ended the nightly backup while every status
+    line still said clean — and setup.py then saved the defaults over the user's file."""
     cfg = json.loads(json.dumps(DEFAULTS))
     if CONFIG.exists():
         try:
-            user = json.loads(CONFIG.read_text(encoding="utf-8"))
-        except Exception:
-            return cfg
+            # utf-8-sig: Windows Notepad saves with a BOM, which plain utf-8 json.loads rejects.
+            user = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as e:
+            raise ConfigError(f"{CONFIG.name} is unreadable ({e}); fix it or move it aside and "
+                              f"re-run tools/setup.py") from e
+        if not isinstance(user, dict):
+            raise ConfigError(f"{CONFIG.name} must hold a JSON object, not {type(user).__name__}")
         for k, v in user.items():
             if isinstance(v, dict) and isinstance(cfg.get(k), dict):
                 cfg[k].update(v)
