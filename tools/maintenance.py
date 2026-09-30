@@ -186,7 +186,7 @@ def main():
         return [unq(a) for a in out if a.strip()]
     alias_to_stem = {}
     for p in files:
-        m = FM.match(p.read_text(encoding="utf-8", errors="ignore"))
+        m = FM.match(p.read_text(encoding="utf-8", errors="ignore").lstrip("\ufeff"))
         if not m:
             continue
         for a in parse_aliases(m.group(1)):
@@ -228,7 +228,7 @@ def main():
         rel = re.search(r"## Related\n((?:[ \t]*\n)*(?:[ \t]*- .*(?:\n|\Z))*)", txt)
         if rel and "[[ ]]" in rel.group(1):
             no_related.append(p.stem)
-        fm = re.match(r"---\n(.*?)\n---", txt, re.DOTALL)
+        fm = re.match(r"---\n(.*?)\n---", txt.lstrip("\ufeff"), re.DOTALL)
         fm_text = fm.group(1) if fm else ""
         # Tags come in two YAML forms: a block list (`tags:\n  - x`) or an inline
         # array (`tags: [x, y]`). Read both so inline-tagged notes aren't false-flagged.

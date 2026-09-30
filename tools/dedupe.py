@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys, re, argparse
 from pathlib import Path
 from itertools import combinations
+from link_notes import frontmatter_tags, read_note
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -43,10 +44,12 @@ def load():
     for f in NOTES.glob("*.md"):
         if f.name.startswith("_"):
             continue
-        txt = f.read_text(encoding="utf-8")
-        fm = re.match(r"---\n(.*?)\n---", txt, re.DOTALL)
-        tags = set(re.findall(r"^\s+- (.+)$", fm.group(1), re.M)) if fm else set()
-        tags.discard("claude/extracted")
+        txt = read_note(f)           # a non-UTF-8 note is skipped with a warning, not a crash
+        if txt is None:
+            continue
+        txt = txt.lstrip("\ufeff")
+        # link_notes' parser: both YAML forms (the template writes `tags: []`), scoped to tags:
+        tags = set(frontmatter_tags(txt))
         body = txt.split("---", 2)[-1]
         notes[f.stem] = {
             "title_w": words(f.stem),
