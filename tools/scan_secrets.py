@@ -56,7 +56,11 @@ HIGH = [
     ("GitHub token",        re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}")),
     ("Google API key",      re.compile(r"AIza[A-Za-z0-9_-]{30,}")),
     ("Slack token",         re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
-    ("AWS access key id",   re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("AWS access key id",   re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")),
+    # The secret half has no prefix, only its label. Without this rule redaction masked the id and
+    # left a working secret key, which also removed the one thing the guard would have blocked on.
+    ("AWS secret access key", re.compile(
+        r"(?i)(?:aws_secret_access_key|secretaccesskey)['\"\s:=]+[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])")),
     # Lookarounds, not \b: in a Bot API URL (.../bot<token>/getMe) "bot" runs straight into the
     # digits, and a secret may end in '-'; \b missed both.
     ("Telegram bot token",  re.compile(r"(?<![0-9])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])")),
