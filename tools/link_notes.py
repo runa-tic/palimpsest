@@ -121,6 +121,9 @@ def needs_linking(text: str) -> bool:
     m = REL_PAT.search(text)
     return bool(m) and "[[ ]]" in m.group(0)
 
+# A MOC's generated "## Notes" list: every "- [[x]]..." line under the heading, annotated or not.
+NOTES_LIST = re.compile(r"\n## Notes[ \t]*\n((?:- \[\[[^\]]+\]\][^\n]*(?:\n|\Z))*)")
+
 INDEX = MOCS / "_MOC Index.md"
 IDX_START, IDX_END = "<!-- moc-index:start -->", "<!-- moc-index:end -->"
 
@@ -194,12 +197,20 @@ def main():
             # human work — never duplicate it into the flat block below. Anything already linked
             # OUTSIDE the "## Notes" section is left exactly where the author put it and dropped
             # from the generated part.
-            without = re.sub(r"\n## Notes\n(?:- \[\[[^\]]+\]\]\n?)*", "\n", txt)
-            curated = set(re.findall(r"- \[\[([^\]|#]+)", without))
+            #
+            # An annotated entry in the list itself ("- [[A]] — why it matters") is the same kind
+            # of work. The list pattern used to match bare "- [[A]]" only, so it stopped at the
+            # annotation: the text was split off onto a line of its own and every entry after it
+            # was frozen as "curated". Whole lines now; annotated ones are kept verbatim.
+            sec = NOTES_LIST.search(txt)
+            kept = [l for l in (sec.group(1).splitlines() if sec else [])
+                    if not re.fullmatch(r"- \[\[[^\]|#]+\]\]\s*", l)]
+            without = (txt[:sec.start()] + "\n" + txt[sec.end():]) if sec else txt
+            curated = set(re.findall(r"- \[\[([^\]|#]+)", "\n".join([without, *kept])))
             fresh = [m for m in sorted(members) if m not in curated]
-            block = "## Notes\n" + "\n".join(f"- [[{m}]]" for m in fresh) + "\n"
-            if re.search(r"\n## Notes\n", txt):
-                txt = re.sub(r"\n## Notes\n(?:- \[\[[^\]]+\]\]\n?)*", "\n" + block, txt, count=1)
+            block = "## Notes\n" + "".join(l + "\n" for l in kept + [f"- [[{m}]]" for m in fresh])
+            if sec:
+                txt = txt[:sec.start()] + "\n" + block + txt[sec.end():]
             else:
                 # keep the generated list ABOVE a trailing "*Part of [[_MOC Index]].*" footer
                 foot = re.search(r"\n---\n\*Part of .*?\*\s*$", txt, re.DOTALL)
