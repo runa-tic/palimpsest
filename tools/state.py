@@ -20,6 +20,9 @@ Files (State/ at the vault root):
   entities.json        registry: kinds, ids, aliases, hot, stale_after_h (committed)
   proposed.jsonl       facts awaiting `accept`                          (committed)
   seen/<machine>.json  hourly last-seen per machine, merged by readers  (committed; one writer each)
+  extracted/<kind>-<machine>.json   not the ledger: extract_notes / extract_skills' checkpoint,
+                       {conversation: content hash} per kind (notes, skills), so one machine
+                       does not re-pay model calls the other already made (committed; one writer each)
   Register.md · current.json · .observed.json   regenerated at every fold (gitignore them)
 
 Usage:
