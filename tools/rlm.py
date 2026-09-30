@@ -119,6 +119,44 @@ def _code_of(reply: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
+    """Wrap the REPL worker in an OS-enforced sandbox where one is available.
+
+    The worker's audit hook runs inside the same interpreter as the model-written code, so it is
+    defence in depth, not a boundary: an external review (2026-09-30) rebound the hook's allowed
+    roots from generated code and read a file outside the vault, which rlm() could then send out.
+    On macOS the kernel enforces it instead (sandbox-exec): no network, no reads under /Users or
+    /Volumes except the vault, the scratch dir and the Python install, no writes outside scratch.
+    Elsewhere the worker runs with the in-process hook only, and says so. RLM_OS_SANDBOX=0 opts out."""
+    if os.environ.get("RLM_OS_SANDBOX") == "0":
+        return cmd, "OS sandbox disabled (RLM_OS_SANDBOX=0): in-process read/write checks only"
+    exe = shutil.which("sandbox-exec") if sys.platform == "darwin" else None
+    if not exe:
+        return cmd, (f"no OS sandbox on {sys.platform}: read confinement is the in-process hook only, "
+                     f"which model-written code in the same interpreter could defeat")
+    import sysconfig
+    roots = {VAULT.resolve(), scratch.resolve(), Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(),
+             Path(sys.executable).resolve().parent}
+    for key in ("stdlib", "platstdlib", "purelib", "platlib", "data"):
+        try:
+            roots.add(Path(sysconfig.get_path(key)).resolve())
+        except Exception:
+            pass
+    q = lambda x: '"' + str(x).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    ancestors = {a for r in roots for a in r.parents}
+    profile = "\n".join([
+        "(version 1)", "(allow default)", "(deny network*)",
+        '(deny file-read* (subpath "/Users") (subpath "/Volumes"))',
+        "(allow file-read* " + " ".join(f"(subpath {q(r)})" for r in sorted(roots)) + ")",
+        # path resolution stats every parent; allow that metadata, never their contents
+        "(allow file-read-metadata " + " ".join(f"(literal {q(a)})" for a in sorted(ancestors)) + ")",
+        '(deny file-write* (subpath "/"))',
+        f'(allow file-write* (subpath {q(scratch.resolve())}) (literal "/dev/null") (literal "/dev/tty") '
+        r'(regex #"^/dev/fd/"))',
+    ])
+    return [exe, "-p", profile, *cmd], "OS sandbox: sandbox-exec (no network; reads confined to the vault)"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Recursive-LM query over the vault.")
     ap.add_argument("question", nargs="+")
@@ -141,12 +179,14 @@ def main() -> None:
         with trace.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+    wcmd, sandbox_note = _os_sandbox([sys.executable, "-u", str(TOOLS / "rlm_worker.py"), str(VAULT),
+                                      str(SCRATCH), str(args.subagents)], SCRATCH)
+    print(f"rlm: {sandbox_note}", file=sys.stderr)
     worker = subprocess.Popen(
-        [sys.executable, "-u", str(TOOLS / "rlm_worker.py"), str(VAULT), str(SCRATCH),
-         str(args.subagents)],
+        wcmd,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
         text=True, encoding="utf-8", errors="replace", bufsize=1,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"})
 
     def w_send(obj) -> None:
         worker.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
