@@ -23,7 +23,7 @@ Files (State/ at the vault root):
   Register.md · current.json · .observed.json   regenerated at every fold (gitignore them)
 
 Usage:
-  state.py add <entity> <attr> <value> [--kind decided|asserted] [--since WHEN] [--source S ...] [--by WHO] [--note N]
+  state.py add <entity> <attr> <value> [--kind decided|asserted] [--since WHEN [--future]] [--source S ...] [--by WHO] [--note N]
   state.py show [<entity-or-alias>] [--history] [--json]
   state.py show --hot [--opener]            # what the session opener prints
   state.py fold                             # regenerate Register.md + current.json
@@ -36,12 +36,13 @@ Usage:
   state.py lint                             # unknown entities, open conflicts, stale, duplicates
 WHEN accepts 2026-09-01, 2026-09-08T15:01Z, 2026-09-08T23:01+08:00, "2026-09-08 23:01 UTC".
 Omit --since for "now": a date-only --since means midnight UTC, which loses the fold to any
-same-day timestamped fact (add prints a WARNING when that happens).
+same-day timestamped fact (add prints a WARNING when that happens). A time without a zone is UTC
+too, and one more than a few minutes ahead is refused unless --future is given.
 
 Probes. Two are built in and need no configuration: `sync` (this machine's last sync run, from
-tools/.sync_status.json) and `git` (ahead / behind / diverged against the upstream as of the last
-fetch, plus uncommitted code). Anything machine-specific is a COMMAND probe declared in
-palimpsest.json, so no host, service or path is baked into this file:
+tools/.sync_status.json) and `git` (ahead / behind / diverged against push_remote, else the branch
+upstream, as of the last fetch, plus uncommitted code). Anything machine-specific is a COMMAND
+probe declared in palimpsest.json, so no host, service or path is baked into this file:
 
   "probes": [
     {"name": "api", "entity": "my-api", "attr": "status",
@@ -79,6 +80,7 @@ IS_WIN = os.name == "nt"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WIN else 0
 KINDS = ("decided", "asserted", "observed", "retracted", "contradicts")
 LEASE_STALE_H = 4        # a station lease older than this may be taken without --force
+FUTURE_SLACK_MIN = 5     # a --since later than now by more than this needs --future (clock skew aside)
 DEFAULT_KINDS = {"host": {"stale_after_h": None}, "service": {"stale_after_h": 24},
                  "timer": {"stale_after_h": 26}, "flag": {"stale_after_h": 24},
                  "workflow": {"stale_after_h": None}}
@@ -96,7 +98,11 @@ def _machine() -> str:
     else the short hostname. Two machines must not share a name — seen/<machine>.json has one
     writer by construction, and the station lease compares names."""
     name = CFG.get("machine") or os.environ.get("PALIMPSEST_MACHINE") or socket.gethostname().split(".")[0]
-    return re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "machine"
+    # Unicode letters and digits are kept: an ASCII-only class turned every Cyrillic name ("бокс",
+    # "мак") into the same fallback, so two machines shared one lease identity and one seen file.
+    # "_" still becomes "-" as before, so an ASCII name keeps the identity it already has.
+    clean = re.sub(r"(?:[^\w-]|_)+", "-", name.lower()).strip("-")
+    return clean or "machine-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
 
 
 MACHINE = _machine()
@@ -152,7 +158,7 @@ def load_entities() -> tuple[dict, dict, dict]:
     kinds, ents = reg.get("kinds", {}), reg.get("entities", {})
     alias = {}
     for eid, e in ents.items():
-        alias[eid.lower()] = eid
+        alias[eid.lower().lstrip("@")] = eid   # resolve() strips '@' from input, so an '@id' must be keyed without it
         for a in e.get("aliases", []):
             alias[a.lower().lstrip("@")] = eid
     return kinds, ents, alias
@@ -220,8 +226,15 @@ def append(fact: dict, path: Path = FACTS) -> bool:
         if fact.get("kind") == "contradicts" or not fact.get("seq"):
             return False
         fact["id"] = fact_id(fact["entity"], fact["attr"], fact.get("value"), fact["valid_from"], fact["seq"])
+    # A last line without its newline (a hand edit in an editor that adds none, a cut-short write)
+    # would absorb this fact into one malformed line, and load_facts drops both.
+    lead = ""
+    if path.exists() and path.stat().st_size:
+        with path.open("rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            lead = "" if fh.read(1) == b"\n" else "\n"
     with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(fact, ensure_ascii=False) + "\n")
+        fh.write(lead + json.dumps(fact, ensure_ascii=False) + "\n")
     return True
 
 
@@ -345,15 +358,23 @@ def render_value(rec: dict) -> str:
     return "∅ (retracted)" if v is None else str(v)
 
 
+def day(iso_s: str | None) -> str:
+    # A date-only --since is stored as midnight UTC; converted to local time it showed the day
+    # before anywhere west of UTC. Midnight UTC renders as the date it was given.
+    if iso_s and iso_s.endswith("T00:00:00Z"):
+        return iso_s[:10]
+    return local(iso_s, "%Y-%m-%d")
+
+
 def when_str(rec: dict, eid: str, attr: str, obs: dict) -> str:
     k = rec.get("kind")
     if k == "observed":
         return f"seen {local(last_seen(rec, eid, attr, obs), '%m-%d %H:%M')}"
     if k == "decided":
-        return f"decided {local(rec.get('valid_from'), '%Y-%m-%d')}"
+        return f"decided {day(rec.get('valid_from'))}"
     if k == "retracted":
-        return f"retracted {local(rec.get('valid_from'), '%Y-%m-%d')}"
-    return f"since {local(rec.get('valid_from'), '%Y-%m-%d')}"
+        return f"retracted {day(rec.get('valid_from'))}"
+    return f"since {day(rec.get('valid_from'))}"
 
 
 ATTR_ORDER = ["host", "role", "decision", "status", "active", "gate", "ref", "enabled", "armed",
@@ -523,13 +544,29 @@ def default_by() -> str:
     return f"session:{sid[:8]}" if sid else f"manual@{MACHINE}"
 
 
+def since_arg(args) -> str | None:
+    """--since as ISO UTC, refused when it lies in the future without --future. A naive time is read
+    as UTC, so a local wall time east of UTC landed hours ahead; the fold's latest valid_from then
+    outranked every probe observation until that hour came, while probe printed each as a change."""
+    if not args.since:
+        return None
+    vf = parse_when(args.since)
+    ahead_min = -hours_since(vf) * 60
+    if ahead_min > FUTURE_SLACK_MIN and not args.future:
+        print(f"refused: --since {args.since!r} is {vf} UTC, {ahead_min / 60:.1f} h in the future; until then it "
+              f"outranks every newer fact and observation on the key. A time without a zone is read as UTC: "
+              f"give the offset (…T15:00+03:00), omit --since for now, or pass --future if it is meant.")
+        sys.exit(2)
+    return vf
+
+
 def cmd_add(args):
     _, ents, alias = load_entities()
     eid = resolve(args.entity, alias)
     if not eid:
         print(f"unknown entity {args.entity!r} — register it first: state.py register <id> --kind <kind> --alias …")
         sys.exit(2)
-    vf = parse_when(args.since) if args.since else None
+    vf = since_arg(args)
     f = make_fact(eid, args.attr, args.value, args.kind, args.by or default_by(), args.source or [], vf, args.note or "")
     # The fold keeps the latest valid_from, so a fact dated earlier than one already on file is
     # recorded as history, not as the current value. A date-only --since (midnight UTC) does this
@@ -557,7 +594,7 @@ def cmd_retract(args):
         print(f"unknown entity {args.entity!r}")
         sys.exit(2)
     f = make_fact(eid, args.attr, None, "retracted", args.by or default_by(), args.source or [],
-                  parse_when(args.since) if args.since else None, args.note or "")
+                  since_arg(args), args.note or "")
     print(("retracted " if append(f) else "no-op: already retracted ") + f"{eid}.{args.attr} ({f['id']})")
     refold()
 
@@ -636,6 +673,12 @@ def local_network_up(hosts: list[str] | None = None) -> bool:
             with socket.create_connection((host, 443), timeout=5) as sock:
                 with ctx.wrap_socket(sock, server_hostname=host):
                     return True
+        except ssl.SSLCertVerificationError:
+            # A peer answered with a certificate chain, which a local TUN proxy with nothing
+            # upstream cannot do; only this machine cannot verify it (a python.org build with
+            # no CA store, a TLS-inspecting proxy). Reading that as "network down" meant no
+            # failed probe was ever recorded on such a machine.
+            return True
         except (OSError, ssl.SSLError):
             continue
     return False
@@ -658,10 +701,10 @@ def probe_sync() -> tuple[list[tuple[str, str, str]], dict]:
 
 
 def probe_git() -> tuple[list[tuple[str, str, str]], dict]:
-    """Where this checkout stands against its upstream as of the last fetch (the sync's pull step
-    fetches first), plus code the auto-commit never takes (vault_push.CODE). Looking only for
-    "behind" made an unpushed or dirty tree read "level": in the source vault a ledger fix sat
-    uncommitted for three days behind a green ledger."""
+    """Where this checkout stands against push_remote (else the branch upstream) as of the last
+    fetch (the sync's pull step fetches first), plus code the auto-commit never takes
+    (vault_push.CODE). Looking only for "behind" made an unpushed or dirty tree read "level": in
+    the source vault a ledger fix sat uncommitted for three days behind a green ledger."""
     eid = f"sync.{MACHINE}"
     ensure_entity(eid, "timer", f"the sync pipeline on {MACHINE}")
     try:
@@ -669,21 +712,39 @@ def probe_git() -> tuple[list[tuple[str, str, str]], dict]:
     except Exception:
         CODE = ["tools", ".claude", "CLAUDE.md", ".gitignore", ".gitattributes"]
     try:
-        p = subprocess.run(["git", "status", "-sb", "--porcelain", "--", *CODE], cwd=str(VAULT),
+        # quotePath off: the default wrote a non-ASCII path into the shared ledger as octal escapes.
+        p = subprocess.run(["git", "-c", "core.quotePath=false", "status", "-sb", "--porcelain", "--", *CODE], cwd=str(VAULT),
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=20, creationflags=NO_WINDOW)
         if p.returncode != 0:
             return [(eid, "remote", "not a git repo")], {}
         lines = (p.stdout or "").splitlines()
         head = lines[0] if lines else ""
-        ahead = re.search(r"ahead (\d+)", head)
-        behind = re.search(r"behind (\d+)", head)
-        if "..." not in head:
-            value = "no upstream"
+        m_a, m_b = re.search(r"ahead (\d+)", head), re.search(r"behind (\d+)", head)
+        ahead, behind = m_a and m_a.group(1), m_b and m_b.group(1)
+        # "[gone]": the fetch pruned the upstream branch (renamed or deleted on the host). No
+        # counts, and nothing upstream holds this machine's commits, which is not "level".
+        missing = "no upstream" if "..." not in head else "upstream gone" if "[gone]" in head else ""
+        remote = str(CFG.get("push_remote") or "").strip()
+        if remote:
+            # vault_push pushes to push_remote and never sets an upstream. In a clone used as the
+            # vault the upstream is the harness's origin, so the header counted every backed-up
+            # commit as unpushed, one more each night. Measure against what is actually pushed to.
+            git_ = lambda *a: subprocess.run(["git", *a], cwd=str(VAULT), capture_output=True, text=True,
+                                             encoding="utf-8", errors="replace", timeout=20, creationflags=NO_WINDOW)
+            br = git_("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+            q = git_("rev-list", "--left-right", "--count", f"refs/remotes/{remote}/{br}...HEAD")
+            if q.returncode == 0 and len(q.stdout.split()) == 2:
+                behind, ahead = (n if n != "0" else None for n in q.stdout.split())
+                missing = ""
+            else:
+                missing = f"not on {remote}/{br} yet (unpushed)"
+        if missing:
+            value = missing
         elif ahead and behind:
-            value = f"diverged (ahead {ahead.group(1)}, behind {behind.group(1)})"
+            value = f"diverged (ahead {ahead}, behind {behind})"
         elif ahead:
-            value = f"ahead {ahead.group(1)} (unpushed)"
+            value = f"ahead {ahead} (unpushed)"
         elif behind:
             value = "behind (pull needed)"
         else:
@@ -748,6 +809,15 @@ def cmd_probe(args):
                 print(f"  probe {name}: {eid} is not registered — `state.py register {eid} --kind service`")
                 continue
             rec = cur.get(eid, {}).get(attr)
+            if rec and (rec.get("valid_from") or "") > now:
+                # A later-dated fact outranks anything observed now: appending would not move the
+                # current value, yet it printed "(was X)" and appended another superseded copy on
+                # every run. Say what holds the key instead; nothing is recorded or marked seen.
+                if rec.get("value") != value:
+                    print(f"  {name}: observed {eid}.{attr} = {value}, but {rec.get('id')} (valid from "
+                          f"{rec.get('valid_from')}) outranks it; the current value stays {render_value(rec)}. "
+                          f"If that date is wrong, re-add the current value without --since.")
+                continue
             if rec and rec.get("value") == value and rec.get("kind") == "observed":
                 obs[f"{eid}.{attr}"] = now
                 seen += 1
@@ -787,12 +857,14 @@ def _vault_push(*extra: str) -> int:
     return p.returncode
 
 
+STATION_DESC = "which machine holds the vault for hand-written work"
+
+
 def cmd_station(args):
     """One writer at a time for hand-written content when a vault is worked from two machines.
     The lease is a ledger fact, so every take, takeover and release is dated and sourced. `take`
     pulls first and pushes the lease; `release` pushes everything, then frees the lease. It is a
     convention the ledger records, not a lock git enforces: vault_push does not refuse commits."""
-    ensure_entity("station", "flag", "which machine holds the vault for hand-written work")
     facts, _ = load_facts()
     holder, since = _lease(fold(facts))
     if args.action == "show":
@@ -809,6 +881,9 @@ def cmd_station(args):
                 sys.exit(1)
             facts, _ = load_facts()
             holder, since = _lease(fold(facts))
+        # Registered only after the pull: written before it, an untracked State/entities.json on a
+        # machine that had not yet pulled the registry made the pull refuse to overwrite it.
+        ensure_entity("station", "flag", STATION_DESC)
         if holder == MACHINE:
             print(f"station: already held by this machine since {local(since)}")
         else:
@@ -825,7 +900,15 @@ def cmd_station(args):
             refold()
             print(f"station: lease taken by {MACHINE}" + (f" — {note}" if note else ""))
         print("push:")
-        sys.exit(_vault_push(*(["--code"] if args.code else [])))
+        rc = _vault_push(*(["--code"] if args.code else []))
+        # The push rebased onto the remote first; a take from another machine that arrived there
+        # and is dated later wins the fold, and this take would otherwise report success.
+        now_holder, _ = _lease(fold(load_facts()[0]))
+        if rc == 0 and now_holder != MACHINE:
+            print(f"station: {now_holder} took the lease after this take (its take arrived in the push's rebase "
+                  f"and is dated later) — {now_holder} holds it now; do not hand-edit here")
+            sys.exit(1)
+        sys.exit(rc)
     if args.action == "release":
         if holder not in (MACHINE, "free"):
             print(f"station: the lease is held by {holder}, not this machine — nothing to release")
@@ -835,6 +918,14 @@ def cmd_station(args):
         if rc != 0:
             print("station release: the push did not complete — NOT releasing; fix the message above and rerun")
             sys.exit(rc)
+        # Re-check after that push's rebase: the holder above came from this machine's ledger
+        # before any pull, so a forced takeover from another machine was freed silently.
+        holder, _ = _lease(fold(load_facts()[0]))
+        if holder not in (MACHINE, "free"):
+            print(f"station: {holder} took the lease over since this machine last pulled — NOT releasing "
+                  f"(your work is pushed; the lease stays with {holder})")
+            sys.exit(1)
+        ensure_entity("station", "flag", STATION_DESC)
         append(make_fact("station", "active", "free", "asserted", f"station:release@{MACHINE}",
                          [f"station release on {MACHINE}"], None, f"released by {MACHINE}"))
         refold()
@@ -855,12 +946,16 @@ def cmd_lint(args):
     ids = [f.get("id") for f in facts]
     dups = len(ids) - len(set(ids))
     badkind = [f.get("id") for f in facts if f.get("kind") not in KINDS]
+    future = [(e, a, r) for e, recs in cur.items() for a, r in recs.items() if (r.get("valid_from") or "") > iso(utcnow())]
     for u in unknown:
         print(f"unknown entity in ledger: {u}")
     for e, a in conflicts:
         print(f"open contradiction: {e}.{a}")
     for e, a in stale:
         print(f"stale observation: {e}.{a} (last seen {local(last_seen(cur[e][a], e, a, obs))})")
+    for e, a, r in future:
+        print(f"future-dated: {e}.{a} = {render_value(r)} valid from {r.get('valid_from')} ({r.get('id')}) "
+              f"outranks every observation until then")
     if bad:
         print(f"malformed lines: {bad}")
     if dups:
@@ -885,6 +980,7 @@ def main():
     a.add_argument("entity"); a.add_argument("attr"); a.add_argument("value")
     a.add_argument("--kind", choices=["decided", "asserted"], default="asserted")
     a.add_argument("--since", help="when it became true (valid_from); default now")
+    a.add_argument("--future", action="store_true", help="allow a --since more than a few minutes ahead")
     a.add_argument("--source", action="append", help="[[Note]] or transcript/log ref; repeatable")
     a.add_argument("--by"); a.add_argument("--note")
     a.set_defaults(fn=cmd_add)
@@ -905,6 +1001,7 @@ def main():
 
     r = sub.add_parser("retract", help="mark an attribute as no longer holding any value")
     r.add_argument("entity"); r.add_argument("attr"); r.add_argument("--since"); r.add_argument("--source", action="append")
+    r.add_argument("--future", action="store_true", help="allow a --since more than a few minutes ahead")
     r.add_argument("--by"); r.add_argument("--note"); r.set_defaults(fn=cmd_retract)
 
     c = sub.add_parser("contradict", help="record an unordered conflict between two facts")
