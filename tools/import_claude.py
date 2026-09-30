@@ -73,11 +73,14 @@ def redact_title(title: str) -> str:
     except Exception:
         return title
 
+# Transcripts stamp UTC ("...Z"); the vault's dates are local (daily notes, briefing, weekly
+# review), so convert before formatting. Unconverted, a UTC+8 session at 07:30 on the 1st was
+# filed under the 30th. A naive timestamp is already local and astimezone() leaves it alone.
 def iso_to_date(ts: str | None) -> str:
     if not ts:
         return ""
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d")
     except Exception:
         return ts[:10]
 
@@ -85,7 +88,7 @@ def iso_to_dt(ts: str | None) -> str:
     if not ts:
         return ""
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
     except Exception:
         return ts[:16]
 
