@@ -24,7 +24,29 @@ TOOLS = Path(__file__).resolve().parent   # this file's own dir, where ask.py li
 sys.path.insert(0, str(TOOLS))
 import ask  # reuse the vault's proven keyword scorer rather than inventing a second one
 
-REAL_OUT = sys.stdout  # exec() redirects sys.stdout; protocol frames must bypass that
+def _claim_pipes():
+    """Take the protocol pipes onto private descriptors before any model code runs.
+
+    exec() redirects sys.stdout, so frames went through a saved REAL_OUT, but frames were read
+    from sys.stdin itself: the builtin exit()/quit() (site.Quitter) closes sys.stdin before it
+    raises SystemExit, so the step error was survived and the next read raised "I/O operation on
+    closed file", killing the worker and the run with it (review, 2026-09-30). The pipes now live
+    on dup()ed descriptors; fd 0 becomes the null device (sys.stdin/sys.__stdin__ read EOF, and
+    closing them closes nothing of ours) and fd 1 goes to stderr, so a stray write to
+    sys.__stdout__ lands on the terminal instead of in the frame stream."""
+    rin = os.fdopen(os.dup(0), "r", encoding="utf-8")
+    rout = os.fdopen(os.dup(1), "w", encoding="utf-8", newline="\n")
+    try:
+        nul = os.open(os.devnull, os.O_RDWR)
+        os.dup2(nul, 0)
+        os.close(nul)
+        os.dup2(2, 1)
+    except OSError:
+        pass
+    return rin, rout
+
+
+REAL_IN, REAL_OUT = _claim_pipes()
 
 CORPUS_DIRS = ["10 Notes", "Skills", "20 Projects", "30 Areas", "40 Resources",
                "60 Maps of Content", "Daily", "Reviews"]
@@ -36,9 +58,9 @@ def _send(obj) -> None:
 
 
 def _recv():
-    line = sys.stdin.readline()
+    line = REAL_IN.readline()
     if not line:
-        sys.exit(0)
+        raise SystemExit(0)
     return json.loads(line)
 
 
@@ -397,8 +419,10 @@ def main() -> None:
             import traceback
             err = traceback.format_exc(limit=6)
         except BaseException as e:
-            # exit()/sys.exit()/KeyboardInterrupt from model code used to end this process and
-            # with it the namespace holding every paid sub-agent result. It ends the step instead.
+            # exit()/quit()/sys.exit()/KeyboardInterrupt from model code used to end this process
+            # and with it the namespace holding every paid sub-agent result. It ends the step
+            # instead; the protocol pipes are private (_claim_pipes), so exit() closing
+            # sys.stdin on its way out no longer cuts the worker off from the parent.
             err = (f"{type(e).__name__}{e.args!r}: exit() ends this step, not the REPL; "
                    f"reply FINAL when you are done")
         _send({"t": "result", "out": buf.getvalue(), "err": err})
