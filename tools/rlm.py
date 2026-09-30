@@ -128,17 +128,25 @@ def _clip(s: str, n: int) -> str:
 
 
 _FINAL = re.compile(r"\A\s*FINAL[ \t]*(?:\n|\Z)", re.I)
-_CODE = re.compile(r"```[ \t]*(?:python|py)[\d.]*[ \t]*\n(.*?)```", re.I | re.S)
+_FENCE = re.compile(r"```[ \t]*([\w.+-]*)[ \t]*\n(.*?)```", re.S)   # fences paired left to right
+_PYTAG = re.compile(r"(?:python|py)[\d.]*", re.I)
 
 
 def _code_of(reply: str) -> str | None:
-    """The step's code, or None when the reply is the answer. FINAL is checked first and only a
-    fence tagged python/py counts: the tag used to be optional, so a FINAL quoting a command in a
-    plain ``` block was executed as REPL code and the answer thrown away (review, 2026-09-30)."""
+    """The step's code, or None when the reply is the answer. FINAL is checked first: the fence
+    used to be matched before it, so a FINAL quoting a command in a plain ``` block was executed as
+    REPL code and the answer thrown away (review, 2026-09-30). Without FINAL a python/py-tagged
+    fence is the code, and failing that an untagged one, as before: a code step whose fence
+    lacked the tag was otherwise taken for the answer and, with --log, appended to the Q&A log
+    (review, 2026-09-30). A fence tagged with another language is not code."""
     if _FINAL.match(reply):
         return None
-    m = _CODE.search(reply)
-    return m.group(1) if m else None
+    fences = [(m.group(1), m.group(2)) for m in _FENCE.finditer(reply)]
+    for want in (lambda t: _PYTAG.fullmatch(t), lambda t: t == ""):
+        for tag, body in fences:
+            if want(tag):
+                return body
+    return None
 
 
 _LC_DYLIB = {0xC, 0x20, 0x80000018, 0x8000001F, 0x80000023}   # load, lazy, weak, reexport, upward
@@ -376,10 +384,27 @@ def main() -> int:
             rec({"t": "root_failed", "step": step, "error": err})
             break
         code = _code_of(reply)
+        if code is None and not _FINAL.match(reply) and "```" in reply:
+            # Neither FINAL nor a python block, but fenced: a step in the wrong language (```bash),
+            # not an answer to log. Without a fence, prose with no FINAL is still the answer.
+            rec({"t": "no_code", "step": step, "reply": reply[:2000]})
+            print(f"── step {step} ──\n  (no ```python block and no FINAL; nothing run)\n")
+            transcript.append(f"=== STEP {step} ===\nYour reply had no ```python block and no FINAL, so "
+                              f"nothing ran. Only python runs here; reply FINAL when you have the answer.")
+            continue
         if code is None:
-            answer = _FINAL.sub("", reply.strip(), count=1).strip()
-            rec({"t": "final", "step": step, "answer": answer})
-            break
+            text = _FINAL.sub("", reply.strip(), count=1).strip()
+            if text:
+                answer = text
+                rec({"t": "final", "step": step, "answer": answer})
+                break
+            # A bare FINAL used to be recorded as a final answer of "" and print "(no answer)".
+            # It is a step with nothing in it: say so and let the next step carry the answer.
+            rec({"t": "empty_final", "step": step})
+            print(f"── step {step} ──\n  (FINAL with no answer text)\n")
+            transcript.append(f"=== STEP {step} ===\nYou replied FINAL with no answer after it. "
+                              f"Reply FINAL on its own line followed by the answer.")
+            continue
         if step == args.steps:
             # The last step was told not to write code; running it anyway only spends time and
             # sub-agents on output nobody will read.
