@@ -92,6 +92,16 @@ def mask(s: str) -> str:
     return s[:6] + "…" + s[-3:]
 
 
+def safe_label(rel: str) -> str:
+    """A path as printed: every credential shape in it masked. The path is content (notes are named
+    after conversations), and this output is recorded into the vault and copied into vault_push's
+    log, so no line may carry a name raw, a content finding's label included."""
+    for rules in (HIGH, WARN):
+        for _, rx in rules:
+            rel = rx.sub(lambda m: mask(m.group(0)), rel)
+    return rel
+
+
 def scan_text(text: str, allow: list[str]) -> list[tuple]:
     """Return list of (severity, label, lineno, masked) findings."""
     findings = []
@@ -224,18 +234,14 @@ def main() -> int:
 
     high, warn = [], []
     for rel, text in sources:
-        if rel.endswith(" [path]"):
-            # The path is being scanned as content, so it must not be printed raw either.
-            for _, rules in (("HIGH", HIGH), ("WARN", WARN)):
-                for _, rx in rules:
-                    rel = rx.sub(lambda m: mask(m.group(0)), rel)
+        rel = safe_label(rel)
         for sev, label, lineno, masked in scan_text(text, allow):
             (high if sev == "HIGH" else warn).append((rel, label, lineno, masked))
 
     if skipped:
         print(f"secret-scan: {len(skipped)} file(s) NOT scanned (over 5MB, missing or unreadable):")
         for rel in skipped:
-            print(f"  [skip] {rel}")
+            print(f"  [skip] {safe_label(rel)}")
     if not high and not warn:
         print(f"secret-scan: clean ({mode}{'; see NOT scanned above' if skipped else ''}).")
         return 1 if unread_named else 0
