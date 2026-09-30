@@ -8,12 +8,13 @@ into the vault the moment someone types it. Found exactly that on 2026-08-08: a 
 address, deny-listed since 07-23, sitting in an atomic note written 08-04.
 
 Two tiers, matching the secret scanner's block/warn split:
-  BLOCK  terms that are unambiguously an identifier — anything containing "@", or an
-         alphabetic term of 5+ characters (surnames, full names, handles, reference codes);
-         spaces, hyphens, apostrophes and dots do not count against "alphabetic".
-  WARN   short or numeric literals (amounts, ids). These collide with legitimate vault
-         content — the vault is full of numbers — so they report and let the commit through
-         rather than wedging the automated sync on a coincidence.
+  BLOCK  terms that are unambiguously an identifier — anything containing "@", a phone number
+         or other run of 7+ digits (matched in any separator spelling), or an alphabetic term of
+         5+ characters (surnames, full names, handles, reference codes); spaces, hyphens,
+         apostrophes and dots do not count against "alphabetic".
+  WARN   short numeric literals and short words (amounts, small ids, 2-4 letter names). These
+         collide with legitimate vault content — the vault is full of numbers — so they report
+         and let the commit through rather than wedging the automated sync on a coincidence.
 
 Values are never printed. The Stop hook records this session into the vault, so echoing an
 address while removing it just recreates the leak in a new file; masked forms only.
@@ -22,11 +23,11 @@ Usage:
   python tools/scan_pii.py        # scan staged changes (used by pre-commit)
 """
 from __future__ import annotations
-import sys, re
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redact import _load_deny          # the one parser for .redact_terms.txt
+from redact import _load_deny, is_phone, term_pattern   # the one parser/matcher for .redact_terms.txt
 from scan_secrets import staged_files, staged_content
 
 
@@ -37,7 +38,9 @@ def mask(term: str) -> str:
 
 
 def is_hard(term: str) -> bool:
-    if "@" in term:
+    # A phone number is what SETUP asks for first and promises is blocked at commit time; it only
+    # warned, which in the unattended nightly push surfaces nowhere (review, 2026-09-30).
+    if "@" in term or is_phone(term):
         return True
     # Name punctuation is not "numeric": counting each space as a non-letter made every full name
     # of three words ("Mary Ann Lee") a soft term that only warned (review, 2026-09-30).
@@ -49,7 +52,7 @@ def _safe_path(rel: str, literals, regexes) -> str:
     """The path as printed: every deny-listed term in it masked, since the path itself may be
     what carries the term (and this output is recorded into the vault)."""
     for t in sorted(literals, key=len, reverse=True):
-        rel = re.sub(re.escape(t), lambda m: mask(m.group(0)), rel, flags=re.I)
+        rel = term_pattern(t).sub(lambda m: mask(m.group(0)), rel)
     for rx in regexes:
         rel = rx.sub(lambda m: mask(m.group(0)), rel)
     return rel
@@ -59,11 +62,11 @@ def _scan(rel: str, content: str, hard, soft, regexes, blocking: list, warning: 
     if not content:
         return
     for term in hard:
-        n = len(re.findall(re.escape(term), content, re.I))
+        n = len(term_pattern(term).findall(content))
         if n:
             blocking.append((rel, mask(term), n))
     for term in soft:
-        n = len(re.findall(re.escape(term), content, re.I))
+        n = len(term_pattern(term).findall(content))
         if n:
             warning.append((rel, mask(term), n))
     for rx in regexes:
