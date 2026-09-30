@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # of each meant every defect in them was found twice and, as often, fixed once.
 from extract_notes import (sanitize, read_state, write_state, open_state, hold_lock, content_sig,
                            is_extracted, source_index, captured_block, as_text, clean_tags,
-                           run_claude, chunk_transcript, WORD)
+                           run_claude, chunk_transcript, WORD, file_sizes, Ledger)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -295,6 +295,7 @@ def main():
     state = open_state(load_state, STATE_FILE, args.force)
     # Promoted skills are moved up into Skills/ and keep their source: they count as taken too.
     by_source = source_index(PROPOSED_DIR, PROPOSED_DIR.parent)
+    ledger = Ledger("skills")
     processed = 0
     failed: list[str] = []
     total = 0
@@ -306,11 +307,13 @@ def main():
         prev = state.get(key, {})
         if not args.force and prev.get("stat") == stat_sig:
             continue
-        transcript = src.read_text(encoding="utf-8")
+        raw = src.read_bytes()
+        transcript = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
         sig = content_sig(transcript)
         from_here = by_source.get(src.stem, [])
-        if not args.force and is_extracted(prev, st, sig, {h for _, h in from_here}):
+        if not args.force and is_extracted(prev, file_sizes(raw), sig,
+                                           {h for _, h in from_here} | ledger.hashes(src.stem)):
             if not args.dry_run:
                 state[key] = {**prev, "sig": sig, "stat": stat_sig}
                 adopted = True
@@ -336,6 +339,7 @@ def main():
             state[key] = {"sig": sig, "stat": stat_sig,
                           "proposed": list(dict.fromkeys([*prev.get("proposed", []), *written]))}
             save_state(state)
+            ledger.record(src.stem, sig)
         if not skills:
             print("  (no reusable procedures)")
     if adopted:

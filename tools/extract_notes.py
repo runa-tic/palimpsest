@@ -14,7 +14,7 @@ Usage (from vault root):
 Requires the `claude` CLI on PATH and an active login. No API key needed.
 """
 from __future__ import annotations
-import sys, os, re, json, argparse, subprocess, hashlib, shutil, tempfile
+import sys, os, re, json, argparse, subprocess, hashlib, shutil, tempfile, socket, stat
 from pathlib import Path
 from datetime import datetime
 
@@ -30,6 +30,9 @@ NOTES_DIR = VAULT / "10 Notes"
 STATE_FILE = Path(__file__).resolve().parent / ".extract_state.json"
 # Locks and temp files live in tools/logs/, which is gitignored: per machine, never committed.
 LOCK_DIR = Path(__file__).resolve().parent / "logs"
+# What each machine has extracted, by conversation and content hash: committed (State/ is vault
+# content), one file per machine and kind so the two machines never edit the same file.
+EXTRACTED_DIR = VAULT / "State" / "extracted"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -69,8 +72,14 @@ Return ONLY a JSON array (no prose, no code fence) of objects with these fields:
 The conversation transcript follows after the line "===CONVERSATION===".
 """
 
+def no_surrogates(s: str) -> str:
+    """A lone surrogate (a model's "\\ud83d", an emoji cut in half) cannot be encoded to UTF-8:
+    it made the file name, then the note's text, raise UnicodeEncodeError on every run."""
+    return s.encode("utf-8", "replace").decode("utf-8")
+
+
 def sanitize(name: str, maxlen: int = 90, maxbytes: int = 200) -> str:
-    name = INVALID.sub(" ", name or "").strip()
+    name = INVALID.sub(" ", no_surrogates(name or "")).strip()
     # A leading "." makes a dotfile Obsidian hides, and a leading "_" is how every reader here
     # (ask.gather, _note_index, dedupe) marks a file to skip: "__slots__ ..." was written but
     # never retrieved or deduped.
@@ -102,7 +111,18 @@ def read_state(path: Path) -> dict:
     return data
 
 
-def write_state(path: Path, state: dict):
+def default_mode(path: Path) -> int:
+    """The mode a plain write would give `path`: its current one, or 0o666 less the umask.
+    mkstemp creates 0600, which os.replace would carry onto a shared, committed file."""
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mask = os.umask(0)
+        os.umask(mask)
+        return 0o666 & ~mask
+
+
+def write_state(path: Path, state: dict, mode: int | None = None):
     # Atomic: write a temp file, then rename over. Rewriting in place left a truncated file
     # whenever sync.py's timeout killed the step mid-write. The temp file sits in the gitignored
     # logs dir (same filesystem), so one orphaned by a kill is never committed.
@@ -113,6 +133,8 @@ def write_state(path: Path, state: dict):
             fh.write(json.dumps(state, indent=2))
             fh.flush()
             os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -178,15 +200,73 @@ def content_sig(transcript: str) -> str:
     return "sha1:" + hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def is_extracted(prev: dict, st: os.stat_result, sig: str, done_elsewhere: set) -> bool:
+def file_sizes(raw: bytes) -> set[int]:
+    """The sizes this file has had with the same text: as it is, all-LF, and all-CRLF. The box
+    wrote conversation notes with CRLF (write_text on Windows); a checkout that renormalises line
+    endings changes the size of a note whose text did not change."""
+    lf = raw.replace(b"\r\n", b"\n")
+    return {len(raw), len(lf), len(lf) + lf.count(b"\n")}
+
+
+def is_extracted(prev: dict, sizes: set, sig: str, done_elsewhere: set) -> bool:
     """Whether this content was already extracted, here or on another machine."""
     if prev.get("sig") == sig or sig in done_elsewhere:
         return True
     # An entry from before content hashing holds "mtime_ns:size". The same size means only the
     # mtime moved (a rebase, or a frontmatter-only re-import): adopt it instead of re-sending every
-    # conversation in the vault once on upgrade. Growth always changes the size.
+    # conversation in the vault once on upgrade. Growth changes the size; a note whose only
+    # change is CRLF <-> LF counts as the same size.
     old = str(prev.get("sig") or "")
-    return bool(re.fullmatch(r"\d+:\d+", old)) and old.split(":")[1] == str(st.st_size)
+    return bool(re.fullmatch(r"\d+:\d+", old)) and int(old.split(":")[1]) in sizes
+
+
+def machine_name() -> str:
+    """This machine's name, as state.py names it: palimpsest.json "machine", else
+    $PALIMPSEST_MACHINE, else the short hostname."""
+    name = None
+    try:
+        import config as _cfg
+        name = _cfg.load().get("machine")
+    except Exception:
+        pass
+    name = name or os.environ.get("PALIMPSEST_MACHINE") or socket.gethostname().split(".")[0]
+    return re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-") or "machine"
+
+
+class Ledger:
+    """{conversation stem: content hash} of what each machine has extracted, committed as
+    State/extracted/<kind>-<machine>.json. The notes' source_hash covers a pass that wrote
+    something; a pass that returned nothing (the usual outcome once a grown conversation is sent
+    with its ALREADY CAPTURED list) left no trace in git, so the other machine paid one model call
+    for every growth increment this one had already handled. One writer per file: no merge."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.path = EXTRACTED_DIR / f"{kind}-{machine_name()}.json"
+        self.mine: dict = {}
+        self.all: dict = {}
+        for p in sorted(EXTRACTED_DIR.glob(f"{kind}-*.json")) if EXTRACTED_DIR.exists() else []:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (ValueError, OSError) as e:
+                # Only an optimisation: a bad file costs model calls, never correctness.
+                print(f"  ! ignoring {p.name} ({e})")
+                continue
+            if not isinstance(data, dict):
+                continue
+            if p == self.path:
+                self.mine = dict(data)
+            for stem, h in data.items():
+                self.all.setdefault(stem, set()).add(str(h))
+
+    def hashes(self, stem: str) -> set:
+        return self.all.get(stem, set())
+
+    def record(self, stem: str, sig: str):
+        self.mine[stem] = sig
+        self.all.setdefault(stem, set()).add(sig)
+        EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
+        write_state(self.path, dict(sorted(self.mine.items())), default_mode(self.path))
 
 
 def source_index(*dirs: Path) -> dict:
@@ -222,12 +302,12 @@ def captured_block(titles) -> str:
 
 def as_text(v) -> str:
     """A model field as one line of text; a list or number where a string was asked for is
-    common, and .strip() on it crashed the whole run."""
+    common, and .strip() on it crashed the whole run. Lone surrogates are replaced."""
     if v is None:
         return ""
     if isinstance(v, (list, tuple)):
         return " ".join(as_text(x) for x in v).strip()
-    return str(v).strip()
+    return no_surrogates(str(v)).strip()
 
 
 def clean_tags(tags) -> list[str]:
@@ -246,28 +326,65 @@ def clean_tags(tags) -> list[str]:
 # Extraction needs no tools, and the transcript it reads is untrusted text (a pasted email, a web
 # page). Run in the vault, `claude -p` loaded the vault's CLAUDE.md and project allowlist, whose
 # protocol is "Grep/Read the vault, run the tools" — so mined text could steer it into reading
-# gitignored local files into a note, or running an allowlisted tool.
+# gitignored local files into a note, or running an allowlisted tool. The boundary is an empty
+# allowlist, not a denylist: `--tools ""` turns off every built-in tool, --strict-mcp-config loads
+# no MCP server from any settings file, and ENABLE_CLAUDEAI_MCP_SERVERS=false keeps claude.ai
+# connectors out. --no-session-persistence writes no transcript: hundreds of calls a night used to
+# land in ~/.claude/projects/ (and, run from the vault, in the folder import_claude reads).
 DENIED_TOOLS = ["Bash", "Read", "Grep", "Glob", "LS", "Edit", "MultiEdit", "Write", "NotebookEdit",
                 "WebFetch", "WebSearch", "Task", "Agent", "Skill", "TodoWrite"]
+STRICT_FLAGS = ["--strict-mcp-config", "--no-session-persistence"]
+_LEGACY_CLI = False   # set once an older CLI rejects the strict flags
+
+
+def claude_argv(exe: str, model: str, legacy: bool = False) -> list[str]:
+    # --tools takes a variadic list, so it goes last with its one (empty) value.
+    base = [exe, "-p", "--model", model, "--disallowedTools", ",".join(DENIED_TOOLS)]
+    return base if legacy else base[:4] + STRICT_FLAGS + base[4:] + ["--tools", ""]
+
+
+def extract_cwd() -> Path:
+    """One fixed, empty, per-user directory outside the vault to run `claude` in, so it finds no
+    project CLAUDE.md or settings. Fixed rather than a fresh mkdtemp per call: each temp path was a
+    new project to Claude Code, and a run killed mid-call (sync.py's timeout) leaked its dir. The
+    temp dir is per user on macOS and Windows; on a shared /tmp the name carries the uid and the
+    directory must be this user's own and private, or another user could plant a CLAUDE.md in it."""
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    d = Path(tempfile.gettempdir()) / ("palimpsest-extract" + (f"-{uid}" if uid is not None else ""))
+    d.mkdir(mode=0o700, exist_ok=True)
+    if uid is not None:
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid or st.st_mode & 0o022:
+            raise RuntimeError(f"{d} is not a private directory owned by this user; remove it")
+    vault, dr = VAULT.resolve(), d.resolve()
+    if vault == dr or vault in dr.parents:
+        raise RuntimeError(f"extraction cwd {d} is inside the vault; point TMPDIR elsewhere")
+    return d
 
 
 def run_claude(prompt: str, model: str) -> str:
+    global _LEGACY_CLI
     # shutil.which honours PATHEXT: a bare "claude" argv does not find npm's claude.cmd on Windows.
     exe = shutil.which("claude") or "claude"
     # On Windows, suppress the console window the `claude` CLI would otherwise spawn when this
     # runs under a windowless parent (pythonw at logon). Without this the sync pipeline pops up
     # stray, hard-to-close terminal windows. CREATE_NO_WINDOW exists only on Windows.
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    cwd = tempfile.mkdtemp(prefix="palimpsest-extract-")   # no project CLAUDE.md or settings
-    try:
+    env = {**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1",   # don't trigger vault hooks
+           "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
+    cwd = extract_cwd()
+    for legacy in ([True] if _LEGACY_CLI else [False, True]):
         proc = subprocess.run(
-            [exe, "-p", "--model", model, "--disallowedTools", ",".join(DENIED_TOOLS)],
-            input=prompt, capture_output=True, text=True, encoding="utf-8", cwd=cwd,
-            env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"},  # don't trigger vault hooks
+            claude_argv(exe, model, legacy),
+            input=prompt, capture_output=True, text=True, encoding="utf-8", cwd=str(cwd), env=env,
             creationflags=creationflags,
         )
-    finally:
-        shutil.rmtree(cwd, ignore_errors=True)
+        if legacy or proc.returncode == 0 or "unknown option" not in proc.stderr:
+            break
+        # A CLI older than --tools / --no-session-persistence: fall back to the denylist, and say so.
+        _LEGACY_CLI = True
+        print(f"  ! this claude CLI rejects the strict flags ({proc.stderr.strip()[:120]}); "
+              f"falling back to --disallowedTools only — update the CLI")
     if proc.returncode != 0:
         # `claude -p` puts API / model / usage errors on STDOUT with rc=1 and an EMPTY stderr;
         # only argv parsing errors go to stderr (verified 2026-07-31: an invalid --model gives
@@ -524,6 +641,7 @@ def main():
         return
     state = open_state(load_state, STATE_FILE, args.force)
     by_source = source_index(NOTES_DIR)
+    ledger = Ledger("notes")
     processed = 0
     failed: list[str] = []
     total_notes = 0
@@ -535,12 +653,14 @@ def main():
         prev = state.get(key, {})
         if not args.force and prev.get("stat") == stat_sig:
             continue                     # untouched since it was checked: skip without reading it
-        transcript = src.read_text(encoding="utf-8")
+        raw = src.read_bytes()
+        transcript = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         # strip the frontmatter of the conversation note before sending
         transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
         sig = content_sig(transcript)
         from_here = by_source.get(src.stem, [])
-        if not args.force and is_extracted(prev, st, sig, {h for _, h in from_here}):
+        if not args.force and is_extracted(prev, file_sizes(raw), sig,
+                                           {h for _, h in from_here} | ledger.hashes(src.stem)):
             if not args.dry_run:
                 state[key] = {**prev, "sig": sig, "stat": stat_sig}
                 adopted = True
@@ -566,6 +686,7 @@ def main():
             state[key] = {"sig": sig, "stat": stat_sig,
                           "notes": list(dict.fromkeys([*prev.get("notes", []), *written]))}
             save_state(state)
+            ledger.record(src.stem, sig)
         if not notes:
             print("  (no durable insights)")
     if adopted:
