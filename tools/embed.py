@@ -70,7 +70,10 @@ class _WriterLock:
     consistent, but the last writer dropped the other's new rows until the next open re-embedded
     them. The lock is a file created with O_EXCL, which is portable and crash-tolerant: a lock
     older than LOCK_STALE is treated as abandoned, and a waiter gives up after LOCK_WAIT and
-    proceeds anyway, which is only the old behaviour and never a hang."""
+    proceeds anyway, which is only the old behaviour and never a hang. The holder refreshes the
+    lock's mtime at every checkpoint (refresh), so an hours-long first build never reads as
+    abandoned; mtime is the liveness signal because a pid check is not portable (os.kill on
+    Windows terminates the process)."""
 
     def __init__(self, cache_dir: Path):
         self.path = cache_dir / ".lock"
@@ -93,8 +96,12 @@ class _WriterLock:
                     try:
                         self.path.unlink()
                     except OSError:
+                        # Not removable (Windows refuses while a live holder keeps it open): wait it
+                        # out like a live lock. Retrying at once skipped LOCK_WAIT and the sleep, and
+                        # spun a core forever.
                         pass
-                    continue
+                    else:
+                        continue
                 if time.time() - t0 > LOCK_WAIT:
                     print(f"embed: another writer has held the index for {age:.0f}s; proceeding without the lock",
                           file=sys.stderr)
@@ -104,13 +111,26 @@ class _WriterLock:
                     told = True
                 time.sleep(1)
 
-    def __exit__(self, *_):
-        if self.fd is not None:                   # never remove a lock we did not take
-            os.close(self.fd)
-            try:
-                self.path.unlink()
+    def refresh(self):
+        if self.fd is not None:
+            try:                                  # by fd where possible: the path may not be ours
+                os.utime(self.fd if os.utime in os.supports_fd else self.path)
             except OSError:
                 pass
+
+    def __exit__(self, *_):
+        if self.fd is not None:                   # never remove a lock we did not take...
+            try:                                  # ...nor one another writer took over since
+                mine = os.path.samestat(os.fstat(self.fd), os.stat(self.path))
+            except OSError:
+                mine = False
+            os.close(self.fd)
+            self.fd = None
+            if mine:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
 FRONTMATTER = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.S)
 
 
@@ -219,6 +239,7 @@ class Index:
         self.files: dict[str, dict] = {}              # relpath -> {"sha", "spans": [[s,e],...]}
         self.rows: list[tuple[str, int, int]] = []    # per vector row: (relpath, start, end)
         self.vec = np.zeros((0, 0), dtype=np.float32)
+        self._lock: _WriterLock | None = None         # held while _sync writes
 
     # ---- persistence
     @classmethod
@@ -246,6 +267,8 @@ class Index:
             print(f"embed: cache unreadable ({type(e).__name__}: {e}); rebuilding", file=sys.stderr)
 
     def _save(self):
+        if self._lock:
+            self._lock.refresh()                      # a checkpoint is proof of life
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         tmp_v = self.cache_dir / "vectors.npy.tmp"
         tmp_m = self.cache_dir / "manifest.json.tmp"
@@ -283,7 +306,7 @@ class Index:
 
         if not any(self._delta(wanted)):
             return
-        with _WriterLock(self.cache_dir):
+        with _WriterLock(self.cache_dir) as self._lock:
             # Another writer may have saved while we waited: reload and recompute against the
             # files on disk so its rows are kept rather than overwritten.
             self._load()
