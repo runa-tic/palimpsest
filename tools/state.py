@@ -220,8 +220,15 @@ def append(fact: dict, path: Path = FACTS) -> bool:
         if fact.get("kind") == "contradicts" or not fact.get("seq"):
             return False
         fact["id"] = fact_id(fact["entity"], fact["attr"], fact.get("value"), fact["valid_from"], fact["seq"])
+    # A last line without its newline (a hand edit in an editor that adds none, a cut-short write)
+    # would absorb this fact into one malformed line, and load_facts drops both.
+    lead = ""
+    if path.exists() and path.stat().st_size:
+        with path.open("rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            lead = "" if fh.read(1) == b"\n" else "\n"
     with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(fact, ensure_ascii=False) + "\n")
+        fh.write(lead + json.dumps(fact, ensure_ascii=False) + "\n")
     return True
 
 
