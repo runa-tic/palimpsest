@@ -24,6 +24,10 @@ import sys, os, re, json, argparse, subprocess
 from pathlib import Path
 from datetime import datetime
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The model call is extract_notes.py's, so both extractors run it the same guarded way.
+from extract_notes import run_claude
+
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -97,24 +101,7 @@ def save_state(state: dict):
 
 
 def call_claude(transcript: str, model: str) -> str:
-    full = PROMPT + "\n===CONVERSATION===\n" + transcript
-    # On Windows, suppress the console window the `claude` CLI would otherwise spawn when this
-    # runs under a windowless parent (pythonw at logon). Without this the sync pipeline pops up
-    # stray, hard-to-close terminal windows. CREATE_NO_WINDOW exists only on Windows.
-    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    proc = subprocess.run(
-        ["claude", "-p", "--model", model],
-        input=full, capture_output=True, text=True, encoding="utf-8",
-        env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"},  # don't trigger vault hooks
-        creationflags=creationflags,
-    )
-    if proc.returncode != 0:
-        # See extract_notes.call_claude — `claude -p` reports API / model / usage failures on
-        # STDOUT with an empty stderr, so stderr-only reporting invented "input too large" for
-        # every one of the 70 conversations that failed in the 2026-07-28 run.
-        err = proc.stderr.strip() or proc.stdout.strip() or "(no output on either stream)"
-        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {err[:500]}")
-    return proc.stdout.strip()
+    return run_claude(PROMPT + "\n===CONVERSATION===\n" + transcript, model)
 
 
 def chunk_transcript(transcript: str, max_chars: int = MAX_CHARS) -> list[str]:
