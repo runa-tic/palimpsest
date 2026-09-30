@@ -155,8 +155,13 @@ def push_target() -> tuple[str, str]:
     try:
         import config as cfgmod
         remote = (cfgmod.load().get("push_remote") or "").strip()
-    except Exception:
-        remote = ""
+        broken = cfgmod.problem()
+    except Exception as e:
+        remote, broken = "", f"palimpsest.json could not be loaded ({type(e).__name__}: {e})"
+    if broken:
+        # load() fell back to DEFAULTS, which have no push_remote: "not set" would send the user
+        # to add a key the file may already hold.
+        return "", f"{broken} — so push_remote cannot be read"
     if not remote:
         return "", ("`push_remote` is not set in palimpsest.json. Set it to YOUR vault's remote. If "
                     "you cloned Palimpsest and use the clone as your vault, `origin` still points at "
