@@ -21,7 +21,7 @@ Allowlist: tools/.secret_scan_allow.txt  (substrings of known-public values;
 Bypass one commit (use sparingly): git commit --no-verify
 """
 from __future__ import annotations
-import re, sys, subprocess
+import codecs, re, sys, subprocess
 from pathlib import Path
 
 try:
@@ -121,10 +121,25 @@ def staged_files() -> list[str]:
     return [p for p in out.split("\0") if p]
 
 
+_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),   # before UTF-16: same lead
+          (codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
+
+
+def decode(raw: bytes) -> str:
+    """File bytes as scannable text; never fails. Windows PowerShell 5 writes UTF-16 (`>`,
+    Out-File), which read as UTF-8 put a NUL between every character so no pattern matched, and
+    a strict UTF-8 read dropped cp1251/latin-1 files from --all without a word (review, 2026-09-30)."""
+    for bom, enc in _BOMS:
+        if raw.startswith(bom):
+            return raw.decode(enc, errors="replace")
+    # NULs left in a UTF-8 read are UTF-16 without a BOM (or appended to a UTF-8 file by `>>`):
+    # dropping them joins the characters back up.
+    return raw.decode("utf-8", errors="replace").replace("\x00", "")
+
+
 def staged_content(path: str) -> str | None:
-    r = subprocess.run(["git", "show", f":{path}"], cwd=VAULT,
-                        capture_output=True, encoding="utf-8", errors="replace")
-    return r.stdout if r.returncode == 0 else None
+    r = subprocess.run(["git", "show", f":{path}"], cwd=VAULT, capture_output=True)
+    return decode(r.stdout) if r.returncode == 0 else None
 
 
 def is_skipped(rel: str) -> bool:
@@ -135,15 +150,17 @@ def is_skipped(rel: str) -> bool:
 
 
 def read_file(p: Path) -> str | None:
+    """None means NOT scanned (over 5MB, or unreadable); the caller must report it, since a file
+    dropped silently let an audit print 'clean' over it."""
     try:
         if p.stat().st_size > 5_000_000:
             return None
-        return p.read_text(encoding="utf-8")
-    except Exception:
+        return decode(p.read_bytes())
+    except OSError:
         return None
 
 
-def walk_all() -> list[tuple[str, str]]:
+def walk_all(skipped: list[str]) -> list[tuple[str, str]]:
     items = []
     for p in VAULT.rglob("*"):
         if not p.is_file():
@@ -154,6 +171,8 @@ def walk_all() -> list[tuple[str, str]]:
         txt = read_file(p)
         if txt is not None:
             items.append((rel, txt))
+        else:
+            skipped.append(rel)
     return items
 
 
@@ -164,9 +183,11 @@ def main() -> int:
 
     allow = load_allow()
     sources: list[tuple[str, str]] = []
+    skipped: list[str] = []        # files not scanned: listed in the output, never counted as clean
+    unread_named = False           # a file named on the command line that was not scanned fails
 
     if "--all" in args:
-        sources = walk_all()
+        sources = walk_all(skipped)
         mode = "whole vault"
     elif args:
         for a in args:
@@ -180,10 +201,15 @@ def main() -> int:
                             t = read_file(f)
                             if t is not None:
                                 sources.append((rel, t))
-            elif p.is_file():
-                t = read_file(p)
+                            else:
+                                skipped.append(rel)
+            else:
+                t = read_file(p) if p.is_file() else None
                 if t is not None:
                     sources.append((str(p), t))
+                else:
+                    skipped.append(str(p))
+                    unread_named = True
         mode = f"{len(sources)} path(s)"
     else:
         for rel in staged_files():
@@ -206,9 +232,13 @@ def main() -> int:
         for sev, label, lineno, masked in scan_text(text, allow):
             (high if sev == "HIGH" else warn).append((rel, label, lineno, masked))
 
+    if skipped:
+        print(f"secret-scan: {len(skipped)} file(s) NOT scanned (over 5MB, missing or unreadable):")
+        for rel in skipped:
+            print(f"  [skip] {rel}")
     if not high and not warn:
-        print(f"secret-scan: clean ({mode}).")
-        return 0
+        print(f"secret-scan: clean ({mode}{'; see NOT scanned above' if skipped else ''}).")
+        return 1 if unread_named else 0
 
     if high:
         print(f"\nsecret-scan: {len(high)} HIGH finding(s) — likely real credentials:")
@@ -224,7 +254,7 @@ def main() -> int:
         print("\nRedact the value, or if it is known-public add a substring to "
               f"{ALLOW_FILE.relative_to(VAULT)} .")
         return 1
-    return 0
+    return 1 if unread_named else 0
 
 
 if __name__ == "__main__":
