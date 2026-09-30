@@ -274,20 +274,26 @@ def main():
         print("embed: sentence-transformers is not installed, so this is keyword search only. "
               "Opt in with `pip install sentence-transformers`.", file=sys.stderr)
         args.mode = "lexical"
+    if args.mode != "lexical":
+        try:
+            from embed import Index, strip_frontmatter, pick_model
+            hint = pick_model([f for f, _ in corpus])
+            if hint:
+                print(hint, file=sys.stderr)
+            idx = Index.open([f for f, _ in corpus])
+            spans = {(VAULT / r).resolve().as_posix().lower(): (s, e) for r, (_, s, e) in idx.doc_scores(q).items()}
+            ranked = embed_rank(q, idx) if args.mode == "embed" else hybrid_rank(q, corpus, idx)
+        except Exception as e:
+            # Installed but unusable (model not downloaded and offline, cache cleared): the same
+            # answer-anyway fallback as the package missing, and as rerank() below.
+            print(f"embed: skipped ({type(e).__name__}: {str(e)[:120]}); keyword search only", file=sys.stderr)
+            args.mode, spans = "lexical", {}
     if args.mode == "lexical":
         ranked = lexical_rank(q, corpus)
-    else:
-        from embed import Index, strip_frontmatter, pick_model
-        hint = pick_model([f for f, _ in corpus])
-        if hint:
-            print(hint, file=sys.stderr)
-        idx = Index.open([f for f, _ in corpus])
-        spans = {(VAULT / r).resolve().as_posix().lower(): (s, e) for r, (_, s, e) in idx.doc_scores(q).items()}
-        ranked = embed_rank(q, idx) if args.mode == "embed" else hybrid_rank(q, corpus, idx)
-        if args.rerank:
-            fused = ranked
-            ranked = rerank(q, fused, text_of, spans)
-            reranked = ranked is not fused      # rerank hands back its input object when it falls back
+    elif args.rerank:
+        fused = ranked
+        ranked = rerank(q, fused, text_of, spans)
+        reranked = ranked is not fused      # rerank hands back its input object when it falls back
     top = ranked[: args.top]
     label = f"{args.mode}{'+rerank' if reranked else ''}"
     if not top and not state_ctx:
