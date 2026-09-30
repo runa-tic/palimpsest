@@ -171,6 +171,11 @@ def decode(raw: bytes) -> str:
 MAX_BYTES = 5_000_000
 TEXT_MAX = 64_000_000
 HEAD = 8192
+# Extensions a large binary may carry and still be skipped (see text_blocks). Deliberately media and
+# archives only: a large .bin/.db/.log with a binary-looking head is scanned (or fails), not skipped.
+MEDIA_SUFFIXES = frozenset(".png .jpg .jpeg .gif .webp .heic .heif .tif .tiff .bmp .ico .pdf .mp4 .mov .m4v "
+                           ".mkv .webm .avi .mp3 .m4a .wav .flac .ogg .opus .aac .zip .7z .rar .gz .tgz .bz2 "
+                           ".xz .dmg .iso .psd .ai .sketch .fig .epub .docx .xlsx .pptx .key .pages .numbers".split())
 CHUNK = 1 << 20
 
 # Leading bytes of media and archive formats. A match marks a large file binary whatever its bytes.
@@ -224,12 +229,16 @@ def _read_n(read, n: int) -> bytes:
     return out
 
 
-def text_blocks(read, size: int):
+def text_blocks(read, size: int, path: str = ""):
     """(first line number, text of whole lines) runs of a file of `size` bytes that `read(n)`
     returns in order. Raises NotScanned (before yielding) for a large binary or oversize text."""
     head = _read_n(read, min(size, HEAD))
     if size > MAX_BYTES:
-        if is_binary(head):
+        # Skipped only when the NAME and the BYTES agree it is media: a head that merely looks
+        # binary (a NUL-padded log, a control-heavy typescript) used to be skipped and pushed
+        # unscanned by the nightly run, which shows guard output only on a failed commit
+        # (review, 2026-09-30). Anything else is scanned as text, or fails over TEXT_MAX.
+        if is_binary(head) and Path(path).suffix.lower() in MEDIA_SUFFIXES:
             raise NotScanned("binary over 5MB", fails=False)
         if size > TEXT_MAX:
             raise NotScanned(f"text over {TEXT_MAX // 1_000_000}MB, too large to scan", fails=True)
@@ -261,7 +270,7 @@ def file_blocks(p: Path):
     """text_blocks of a file on disk; NotScanned if it cannot be read."""
     try:
         with open(p, "rb") as f:
-            yield from text_blocks(f.read, p.stat().st_size)
+            yield from text_blocks(f.read, p.stat().st_size, str(p))
     except OSError as e:
         raise NotScanned(f"unreadable ({type(e).__name__})", fails=True) from None
 
@@ -306,7 +315,7 @@ def staged_blobs(paths: list[str]):
                 b = cat.stdout.read(min(n, left[0]))
                 left[0] -= len(b)
                 return b
-            yield path, text_blocks(read, left[0])
+            yield path, text_blocks(read, left[0], path)
             while left[0] and read(CHUNK):          # the rest of a file not (fully) consumed
                 pass
             cat.stdout.read(1)                        # the newline after each object

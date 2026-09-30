@@ -135,10 +135,10 @@ def main() -> int:
     (v6 / "notes").mkdir()
     (v6 / "notes" / "latin1.txt").write_bytes(b"caf\xe9 " + AKIA.encode() + b"\n")
     ra, rp = run(v6, "scan_secrets.py", "--all"), run(v6, "scan_secrets.py", "notes")
-    big = v6 / "big.bin"             # binary over 5MB: not scanned, and named, so a failure
-    big.write_bytes(os.urandom(5_100_000))
-    rb = run(v6, "scan_secrets.py", "big.bin")
-    c.ok(ra.returncode == 1 and rp.returncode == 1 and rb.returncode == 1 and "big.bin" in rb.stdout,
+    big = v6 / "big.mp4"             # media over 5MB: not scanned, and named, so a failure
+    big.write_bytes(b"\x00\x00\x00\x18ftypmp42" + os.urandom(5_100_000))   # (a .bin is now scanned)
+    rb = run(v6, "scan_secrets.py", "big.mp4")
+    c.ok(ra.returncode == 1 and rp.returncode == 1 and rb.returncode == 1 and "big.mp4" in rb.stdout,
          "--all and PATH scan a non-UTF-8 file; a named file that is not scanned is a failure",
          f"{ra.returncode} {rp.returncode} {rb.returncode}\n{ra.stdout[-200:]}\n{rb.stdout[-200:]}")
 
@@ -353,6 +353,19 @@ def main() -> int:
 
     for d in VAULTS:
         shutil.rmtree(d, ignore_errors=True)
+    # 22. A large file whose head merely LOOKS binary is scanned unless its name is media too:
+    # a NUL-padded log over 5MB holding a key used to be skipped and pushed unscanned.
+    v = make_vault()
+    big = v / "40 Resources" / "big.log"
+    big.parent.mkdir(parents=True, exist_ok=True)
+    big.write_bytes(b"\x00" * 8192 + b"\x01\x02" * 2000 + b"ordinary log line\n" * 350000
+                    + f"key {AKIA}\n".encode())
+    git(v, "add", "-A")
+    r = run(v, "scan_secrets.py")
+    c.ok(r.returncode == 1 and "AWS access key id" in r.stdout,
+         "a >5MB file with a binary-looking head but no media extension is scanned and blocks",
+         r.stdout[-300:])
+
     return c.done()
 
 
