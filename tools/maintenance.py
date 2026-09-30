@@ -50,17 +50,29 @@ def quoted(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
 # FULL copy of the vault (agentcost-beta alone was 1,631 .md). Scanning them made every health
 # number measure two vaults at once — a shadow twin's copy of a note counts as an inbound link,
 # so real orphans vanished, and notes deleted in main but alive in a worktree resolved links
-# that should have read as broken.
+# that should have read as broken. Every dot-folder is skipped, as Obsidian itself does: .trash/
+# (Obsidian's "move to trash") is the same shadow-copy problem — a deleted note there resolved
+# links to it and its own links un-orphaned real notes.
 SKIP_DIRS = {"tools", "_tools", ".obsidian", ".claude", ".git", "node_modules", "_scratch"}
 
-def all_md() -> list[Path]:
-    return [p for p in VAULT.rglob("*.md") if not SKIP_DIRS.intersection(p.parts)]
+def rel_parts(p: Path) -> tuple[str, ...]:
+    """Path parts INSIDE the vault. Testing p.parts also tested the folders above the vault, so a
+    vault living under a folder called tools, node_modules or .claude (a worktree) scanned nothing
+    and reported all-green."""
+    return p.relative_to(VAULT).parts
+
+def all_files() -> list[Path]:
+    out = []
+    for root, dirs, names in os.walk(VAULT):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        out += [Path(root) / n for n in names]
+    return sorted(out)
 
 def stem_of(target: str) -> str:
     return target.strip().split("/")[-1]
 
 def main():
-    files = all_md()
+    files = [p for p in all_files() if p.suffix == ".md"]
     by_stem = {p.stem: p for p in files}
     inbound = {p.stem: 0 for p in files}
     broken = []
@@ -84,8 +96,9 @@ def main():
     # that no reader could ever fix, because the targets were never meant to be notes.
     skip_src = {"Home", "START HERE", "CLAUDE", "AGENTS", "Vault Health"}
     def scannable(p):
-        return ("Templates" not in p.parts and "Claude Conversations" not in p.parts
-                and "Reviews" not in p.parts and p.stem not in skip_src)
+        parts = rel_parts(p)
+        return ("Templates" not in parts and "Claude Conversations" not in parts
+                and "Reviews" not in parts and p.stem not in skip_src)
 
     # The vault is only half the brain: durable facts also live in Claude's memory directory,
     # and extracted notes legitimately cite them by title ("Deterministic safety backstops" is
@@ -217,7 +230,7 @@ def main():
                 broken.append((p.stem, s))
 
     def in_dir(p, d):
-        return d in [part for part in p.parts]
+        return d in rel_parts(p)
 
     atomic = [p for p in files if in_dir(p, "10 Notes") and not p.name.startswith("_")]
     no_related, untagged, orphans = [], [], []
