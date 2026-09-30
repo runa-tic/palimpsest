@@ -96,7 +96,11 @@ def _machine() -> str:
     else the short hostname. Two machines must not share a name — seen/<machine>.json has one
     writer by construction, and the station lease compares names."""
     name = CFG.get("machine") or os.environ.get("PALIMPSEST_MACHINE") or socket.gethostname().split(".")[0]
-    return re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "machine"
+    # Unicode letters and digits are kept: an ASCII-only class turned every Cyrillic name ("бокс",
+    # "мак") into the same fallback, so two machines shared one lease identity and one seen file.
+    # "_" still becomes "-" as before, so an ASCII name keeps the identity it already has.
+    clean = re.sub(r"(?:[^\w-]|_)+", "-", name.lower()).strip("-")
+    return clean or "machine-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
 
 
 MACHINE = _machine()
