@@ -11,7 +11,8 @@ Two redaction sources:
   1. Built-in credential shapes, reused from scan_secrets HIGH (API keys, tokens,
      private keys). Unambiguously must never sync, so they are always masked.
   2. A local, git-ignored deny list: tools/.redact_terms.txt — one term per line.
-         plain line   -> literal, case-insensitive substring match
+         plain line   -> literal, case-insensitive substring match; a phone number
+                         (7+ digits, only separators besides) in any separator spelling
          re: PATTERN  -> Python regex (case-insensitive)
          # comment
      This is where personal identifiers go (EMPLIDs, application numbers, emails,
@@ -97,6 +98,19 @@ def _load_deny() -> tuple[list[str], list[re.Pattern]]:
     return literals, regexes
 
 
+def is_phone(term: str) -> bool:
+    return sum(c.isdigit() for c in term) >= 7 and all(c.isdigit() or c in " +-.()" for c in term)
+
+
+def term_pattern(term: str) -> re.Pattern:
+    """How a literal deny-list term matches, here and in scan_pii. A phone number is listed once but
+    written many ways ('+1 555-0100' / '+1 (555) 0100' / '15550100'), and a literal match caught
+    only the spelling on the list, so its digits match with any separators between them."""
+    if is_phone(term):
+        return re.compile(r"[\s().+-]*".join(c for c in term if c.isdigit()))
+    return re.compile(re.escape(term), re.I)
+
+
 # A private key is a BLOCK: the header alone matched before (the scanner's pattern is only the
 # BEGIN line), so redaction replaced the header and left the base64 body, which the commit guard
 # then passed because no header remained; restoring the header gave a working key (review,
@@ -133,7 +147,7 @@ def redact_text(s: str) -> tuple[str, int]:
     for term in sorted(set(literals), key=len, reverse=True):
         if not term:
             continue
-        s, k = re.compile(re.escape(term), re.I).subn(MARK, s)
+        s, k = term_pattern(term).subn(MARK, s)
         n += k
     return s, n
 
