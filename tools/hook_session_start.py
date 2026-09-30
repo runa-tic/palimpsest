@@ -70,7 +70,10 @@ def pull_line() -> str:
     today's note on a tree the other machine has moved past. Reports what happened; a conflict
     is left for a human and said out loud."""
     try:
-        p = subprocess.run([PY, str(TOOLS / "vault_push.py"), "--pull-only"], cwd=str(VAULT),
+        # 15 s lock wait + 35 s pull < this 60 s timeout, so vault_push always reaches its own
+        # cleanup (rebase --abort, lock release) instead of being killed inside it.
+        env = {**os.environ, "VAULT_PUSH_LOCK_WAIT": "15", "VAULT_PUSH_NET_TIMEOUT": "35"}
+        p = subprocess.run([PY, str(TOOLS / "vault_push.py"), "--pull-only"], cwd=str(VAULT), env=env,
                            capture_output=True, text=True, encoding="utf-8", timeout=60)
         out = (p.stdout or "").strip().splitlines()
         msg = out[-1].replace("vault-push: ", "") if out else f"exit {p.returncode}, no output"

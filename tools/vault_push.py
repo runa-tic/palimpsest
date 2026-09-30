@@ -52,13 +52,15 @@ CONTENT = ["00 Inbox", "10 Notes", "20 Projects", "30 Areas", "40 Resources", "5
 CODE_HINT = "tools"
 # Committed only with --code (the commit guards still run): tools and the root config files.
 CODE = ["tools", ".claude", "CLAUDE.md", ".gitignore", ".gitattributes"]
-NET_TIMEOUT = 120  # seconds for anything that talks to the remote
+NET_TIMEOUT = int(os.environ.get("VAULT_PUSH_NET_TIMEOUT", "120"))  # seconds for anything that talks to the remote
+# A caller that kills this process loses the rebase-abort and lock release in its finally block,
+# so every caller must allow LOCK_WAIT_S + NET_TIMEOUT (+ a push) or pass tighter budgets here.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 # One vault-push at a time per machine. Two pulls at once — a session-start hook racing the
 # scheduled run, or two sessions opening together — made git die with "Cannot fast-forward your
 # working tree" in the source vault: the first pull moved HEAD while the second was fetching.
 LOCK = TOOLS / ".vault_push.lock"
-LOCK_WAIT_S = 45          # how long a run waits for the other one before giving up this cycle
+LOCK_WAIT_S = int(os.environ.get("VAULT_PUSH_LOCK_WAIT", "45"))  # wait for the other run, then skip this cycle
 LOCK_STALE_S = 15 * 60    # a lock older than this belongs to a dead run
 
 # Unattended: never sit on a credential or editor prompt.

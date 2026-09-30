@@ -60,9 +60,11 @@ DEFAULTS = {
         # commit guards are what stand between an unattended commit and a published secret.
         "push": False,
     },
-    "timeouts": {"pull": 150, "state": 120, "import": 180, "extract": 2400, "skills": 2400, "link": 120,
+    "timeouts": {"pull": 200, "state": 120, "import": 180, "extract": 2400, "skills": 2400, "link": 120,
                  "maintenance": 120, "dedupe": 120, "triage": 120, "weekly": 120, "embed": 1800,
-                 "briefing": 120, "push": 180},
+                 "briefing": 120, "push": 330},
+    # pull/push run vault_push.py, whose worst case is LOCK_WAIT_S 45 + NET_TIMEOUT 120 per network
+    # call (pull; push adds a second): a step timeout below that kills it inside its own cleanup.
     "sync": {"cadence": "daily", "at": "06:00"},
     # Where the nightly backup pushes. MUST be set explicitly, and the reason is sharp: if you
     # cloned Palimpsest and are using the clone as your vault, `origin` points at the HARNESS
