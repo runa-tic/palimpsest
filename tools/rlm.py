@@ -141,6 +141,95 @@ def _code_of(reply: str) -> str | None:
     return m.group(1) if m else None
 
 
+_LC_DYLIB = {0xC, 0x20, 0x80000018, 0x8000001F, 0x80000023}   # load, lazy, weak, reexport, upward
+_LC_RPATH = 0x8000001C
+
+
+def _macho_links(path: Path) -> tuple[list[str], list[str]]:
+    """(dylib install names, rpaths) from a Mach-O file's load commands, thin or universal.
+    Header parsing only; anything that is not Mach-O gives two empty lists."""
+    names, rpaths = [], []
+    le = lambda b: int.from_bytes(b, "little")
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+            magic = int.from_bytes(head[:4], "big") if len(head) == 8 else 0
+            offsets = [0]
+            if magic in (0xCAFEBABE, 0xCAFEBABF):
+                n = int.from_bytes(head[4:8], "big")
+                if n > 16:           # a Java class file shares the magic; its "count" is a version
+                    return names, rpaths
+                size = 20 if magic == 0xCAFEBABE else 32
+                tbl = fh.read(n * size)
+                offsets = [int.from_bytes(tbl[i * size + 8: i * size + (12 if size == 20 else 16)], "big")
+                           for i in range(n)]
+            for off in offsets:
+                fh.seek(off)
+                h = fh.read(32)
+                hsz = {0xFEEDFACF: 32, 0xFEEDFACE: 28}.get(le(h[:4]) if len(h) == 32 else 0)
+                if not hsz:
+                    continue
+                ncmds, sizeofcmds = le(h[16:20]), le(h[20:24])
+                fh.seek(off + hsz)
+                cmds = fh.read(min(sizeofcmds, 1 << 20))
+                pos = 0
+                for _ in range(ncmds):
+                    if pos + 12 > len(cmds):
+                        break
+                    cmd, cs = le(cmds[pos:pos + 4]), le(cmds[pos + 4:pos + 8])
+                    if cs < 12:
+                        break
+                    if cmd in _LC_DYLIB or cmd == _LC_RPATH:
+                        s = cmds[pos + le(cmds[pos + 8:pos + 12]):pos + cs].split(b"\0", 1)[0]
+                        (names if cmd != _LC_RPATH else rpaths).append(s.decode("utf-8", "replace"))
+                    pos += cs
+    except OSError:
+        pass
+    return names, rpaths
+
+
+def _linked_lib_dirs() -> set[Path]:
+    """Directories holding the dylibs the interpreter and its stdlib extension modules load, found
+    by walking their Mach-O load commands. A venv or pyenv Python on Homebrew links sqlite, xz,
+    openssl and mpdecimal from /opt/homebrew/opt/*, outside every sysconfig path, so the allow-list
+    profile broke `import sqlite3/lzma/ssl` there (review, 2026-09-30); a plain Homebrew Python
+    only worked because its "data" path is the whole of /opt/homebrew. System libraries
+    (/usr/lib, /System) are allowed already and not followed."""
+    import sysconfig
+    exe = Path(sys.executable).resolve()
+    seeds = [exe]
+    # In a venv sysconfig's platstdlib is the venv's own (empty) lib dir, so take the extension
+    # dir from sys.path and from the build config instead.
+    dyn = {Path(x) for x in sys.path if x and Path(x).name == "lib-dynload"}
+    if sysconfig.get_config_var("DESTSHARED"):
+        dyn.add(Path(sysconfig.get_config_var("DESTSHARED")))
+    for d in sorted(dyn):
+        if d.is_dir():
+            seeds += sorted(d.glob("*.so"))
+    seen, dirs, todo = set(), set(), list(seeds)
+    while todo and len(seen) < 500:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        names, rpaths = _macho_links(f)
+        subst = lambda x: x.replace("@loader_path", str(f.parent)).replace("@executable_path", str(exe.parent))
+        rpaths = [subst(r) for r in rpaths]
+        for name in names:
+            cands = ([r + name[len("@rpath"):] for r in rpaths] if name.startswith("@rpath/")
+                     else [subst(name)])
+            for c in cands:
+                if not c.startswith("/") or c.startswith(("/usr/lib/", "/System/")):
+                    continue
+                p = Path(c)
+                if not p.exists():
+                    continue
+                rp = p.resolve()
+                dirs.update({p.parent, rp.parent})
+                todo.append(rp)
+    return dirs
+
+
 def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
     """Wrap the REPL worker in an OS-enforced sandbox where one is available.
 
@@ -148,11 +237,13 @@ def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
     defence in depth, not a boundary: an external review (2026-09-30) rebound the hook's allowed
     roots from generated code and read a file outside the vault, which rlm() could then send out.
     On macOS the kernel enforces it instead (sandbox-exec): no network, no writes outside scratch,
-    and reads confined to the vault, the scratch dir, the Python install and the system files an
-    interpreter needs. That is an allow-list: the first profile only denied /Users and /Volumes,
-    which left /private/tmp and $TMPDIR (other sessions' scratch and task output), /etc and /opt
-    readable once the hook was bypassed (review, 2026-09-30). Outside home, stat() metadata stays
-    allowed (as before) so path resolution works; contents do not.
+    and reads confined to the vault, the scratch dir, the Python install (prefix, stdlib and
+    site-packages), the directories of the dylibs it links, and the system files an interpreter
+    needs. That is an allow-list: the first profile only denied /Users and /Volumes, which left
+    /private/tmp and $TMPDIR (other sessions' scratch and task output), /etc and /opt readable
+    once the hook was bypassed (review, 2026-09-30). sysconfig's "data" path is not a root: on
+    Homebrew Python it is /opt/homebrew itself, etc/ and var/ included. Outside home, stat()
+    metadata stays allowed (as before) so path resolution works; contents do not.
     Elsewhere the worker runs with the in-process hook only, and says so. RLM_OS_SANDBOX=0 opts out."""
     if os.environ.get("RLM_OS_SANDBOX") == "0":
         return cmd, "OS sandbox disabled (RLM_OS_SANDBOX=0): in-process read/write checks only"
@@ -163,13 +254,14 @@ def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
     import sysconfig
     roots = {VAULT.resolve(), scratch.resolve(), Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(),
              Path(sys.executable).resolve().parent}
-    for key in ("stdlib", "platstdlib", "purelib", "platlib", "data"):
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
         try:
             roots.add(Path(sysconfig.get_path(key)).resolve())
         except Exception:
             pass
+    libdirs = _linked_lib_dirs()
     q = lambda x: '"' + str(x).replace("\\", "\\\\").replace('"', '\\"') + '"'
-    ancestors = {a for r in roots for a in r.parents}
+    ancestors = {a for r in roots | libdirs for a in r.parents}
     # What dyld, libSystem and the interpreter read outside the Python install: the root listing,
     # system libraries and frameworks, devices, and the local timezone. Nothing user-writable.
     system = ['(literal "/")', '(subpath "/System")', '(subpath "/usr/lib")', '(subpath "/usr/share")',
@@ -180,7 +272,7 @@ def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
         '(deny file-read* (subpath "/"))',
         '(allow file-read-metadata (subpath "/"))',
         '(deny file-read-metadata (subpath "/Users") (subpath "/Volumes"))',
-        "(allow file-read* " + " ".join(system + [f"(subpath {q(r)})" for r in sorted(roots)]) + ")",
+        "(allow file-read* " + " ".join(system + [f"(subpath {q(r)})" for r in sorted(roots | libdirs)]) + ")",
         # path resolution stats every parent; allow that metadata, never their contents
         "(allow file-read-metadata " + " ".join(f"(literal {q(a)})" for a in sorted(ancestors)) + ")",
         '(deny file-write* (subpath "/"))',
@@ -188,7 +280,8 @@ def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
         r'(regex #"^/dev/fd/"))',
     ])
     return [exe, "-p", profile, *cmd], ("OS sandbox: sandbox-exec (no network; reads confined to the vault, "
-                                        "the Python install and system libraries; writes to scratch)")
+                                        "the Python install, its linked libraries and system libraries; "
+                                        "writes to scratch)")
 
 
 def main() -> int:
