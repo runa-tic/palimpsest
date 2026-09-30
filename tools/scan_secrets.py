@@ -164,7 +164,8 @@ def main() -> int:
             if p.is_dir():
                 for f in p.rglob("*"):
                     if f.is_file():
-                        rel = str(f.relative_to(VAULT)) if VAULT in f.resolve().parents else str(f)
+                        fr = f.resolve()    # the check and the relative name must use the same path:
+                        rel = str(fr.relative_to(VAULT)) if VAULT in fr.parents else str(fr)  # a relative dir arg crashed
                         if not is_skipped(rel):
                             t = read_file(f)
                             if t is not None:
