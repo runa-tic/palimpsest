@@ -243,10 +243,14 @@ def main():
         if best_moc and stem not in mocs.get(best_moc, []):
             mf = MOCS / f"{best_moc}.md"
             mt = mf.read_text(encoding="utf-8")
-            if "## Notes" in mt:
-                mt = mt.replace("## Notes\n", f"## Notes\n- [[{stem}]]\n", 1)
+            # The exact heading line. A substring test passed on "## Notes & links" while the
+            # replace() below found nothing, so the MOC was rewritten unchanged, the note's
+            # placeholder was already gone, and it was never retried.
+            h = re.search(r"(?m)^## Notes[ \t]*$", mt)
+            if h:
+                mt = mt[:h.end()] + f"\n- [[{stem}]]" + mt[h.end():]
             else:
-                mt += f"\n## Notes\n- [[{stem}]]\n"
+                mt = mt.rstrip("\n") + f"\n\n## Notes\n- [[{stem}]]\n"
             mf.write_text(mt, encoding="utf-8")
             mocs[best_moc].append(stem)
         print(f"  linked: {stem}  ->  {best_moc or '(no MOC match)'}")
