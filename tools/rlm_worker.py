@@ -271,48 +271,69 @@ def _roots() -> tuple[Path, ...]:
 _READ_ROOTS = _roots()
 
 
-def _within(path, roots) -> bool:
-    try:
-        p = Path(os.fspath(path)).resolve()
-    except Exception:
-        return False
-    return any(p == r or r in p.parents for r in roots)
-
-
 def _make_audit(read_roots=_READ_ROOTS, scratch=SCRATCH, block_exact=frozenset(_BLOCK_EXACT),
-                block_prefix=_BLOCK_PREFIX + ("gc.",), write_events=frozenset(_WRITE_EVENTS), within=_within):
+                block_prefix=_BLOCK_PREFIX + ("gc.",), write_events=frozenset(_WRITE_EVENTS)):
     """Build the audit hook with every rule bound NOW. The first version looked its rules up in
     module globals at call time, so model-written code could rebind them from
     sys.modules["__main__"] (an external review set _READ_ROOTS to "/" and read outside the vault,
-    2026-09-30). Rebinding the module does nothing to this closure; gc.* is blocked because
-    gc.get_objects is how code would find the installed hook to edit its cells. Still defence in
-    depth: the boundary is the OS sandbox rlm.py wraps this process in, where one exists."""
-    _READ_ROOTS, SCRATCH, _BLOCK_EXACT, _BLOCK_PREFIX, _WRITE_EVENTS, _within = (
-        read_roots, scratch, block_exact, block_prefix, write_events, within)
+    2026-09-30). The second bound the rules but still called a module-level _within that looked
+    up Path and os there, so rebinding sys.modules["__main__"].Path passed every check (review,
+    2026-09-30). Now every rule and primitive is a default argument of a nested function: plain
+    strings and C functions, no module globals, no builtins looked up at call time, no closure
+    cells (a traceback through this hook hands out its frame, and in 3.13 frame.f_locals writes
+    through to cells; a default is a per-call local). gc.* is blocked because gc.get_objects is
+    how code would find the hook itself, and reading or replacing within's __defaults__/__code__
+    is refused. Still defence in depth, not a boundary: the path functions it calls live in
+    posixpath/ntpath, which code in this interpreter can patch. The boundary is the OS sandbox
+    rlm.py wraps this process in, where one exists."""
+    sep = os.sep
 
-    def _audit(event: str, args):
-        if event in _BLOCK_EXACT or event.startswith(_BLOCK_PREFIX):
-            raise PermissionError(
+    def within(path, roots, _fspath=os.fspath, _realpath=os.path.realpath, _isinstance=isinstance,
+               _str=str, _bytes=bytes, _enc=sys.getfilesystemencoding(), _sep=sep, _exc=Exception) -> bool:
+        try:
+            s = _fspath(path)
+            # str.__str__ copies a str subclass to a plain str, so overridden methods never run here
+            s = _bytes.decode(s, _enc, "surrogateescape") if _isinstance(s, _bytes) else _str.__str__(s)
+            p = _str.__str__(_realpath(s))
+        except _exc:
+            return False
+        for r in roots:
+            if p == r or p.startswith(r if r.endswith(_sep) else r + _sep):
+                return True
+        return False
+
+    def _audit(event, args, _reads=tuple(str(r) for r in read_roots), _scratch=(str(scratch),),
+               _shown=str(scratch), _exact=block_exact, _prefix=block_prefix, _writes=write_events,
+               _within=within, _perm=PermissionError, _isinstance=isinstance, _len=len, _any=any,
+               _str=str, _bytes=bytes, _int=int, _pathlike=os.PathLike,
+               _wmask=os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC):
+        if event in _exact or event.startswith(_prefix):
+            raise _perm(
                 f"blocked by the RLM sandbox: {event}. This REPL has no network and no child "
                 f"processes — use rlm()/rlm_map() for model calls, and don't shell out.")
         if event == "open":
-            path, mode, flags = (list(args) + [None, None, None])[:3]
-            if path is None or isinstance(path, int):
+            n = _len(args)
+            path = args[0] if n > 0 else None
+            mode = args[1] if n > 1 else None
+            flags = args[2] if n > 2 else None
+            if path is None or _isinstance(path, _int):
                 return  # already-open fd; the originating open() was audited
-            writing = any(c in mode for c in "wax+") if isinstance(mode, str) else bool(
-                (flags or 0) & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC))
+            writing = _any(c in mode for c in "wax+") if _isinstance(mode, _str) else (
+                (flags or 0) & _wmask) != 0
             if writing:
-                if not _within(path, (SCRATCH,)):
-                    raise PermissionError(f"blocked by the RLM sandbox: write to {path!r}. "
-                                          f"Writes are confined to {SCRATCH}.")
-            elif not _within(path, _READ_ROOTS):
-                raise PermissionError(f"blocked by the RLM sandbox: read of {path!r}. "
-                                      f"Reads are confined to the vault — the corpus is already "
-                                      f"in `docs`, and anything outside it is not yours to send.")
-        elif event in _WRITE_EVENTS:
+                if not _within(path, _scratch):
+                    raise _perm(f"blocked by the RLM sandbox: write to {path!r}. "
+                                f"Writes are confined to {_shown}.")
+            elif not _within(path, _reads):
+                raise _perm(f"blocked by the RLM sandbox: read of {path!r}. "
+                            f"Reads are confined to the vault — the corpus is already "
+                            f"in `docs`, and anything outside it is not yours to send.")
+        elif event in _writes:
             for a in args:
-                if isinstance(a, (str, bytes, os.PathLike)) and not _within(a, (SCRATCH,)):
-                    raise PermissionError(f"blocked by the RLM sandbox: {event} on {a!r}.")
+                if _isinstance(a, (_str, _bytes, _pathlike)) and not _within(a, _scratch):
+                    raise _perm(f"blocked by the RLM sandbox: {event} on {a!r}.")
+        elif event in ("object.__getattr__", "object.__setattr__") and args and args[0] is _within:
+            raise _perm(f"blocked by the RLM sandbox: {event} on the sandbox's own check.")
 
     return _audit
 
