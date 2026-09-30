@@ -88,6 +88,23 @@ def unmerged() -> list[str]:
     return [l for l in git("diff", "--name-only", "--diff-filter=U").stdout.splitlines() if l.strip()]
 
 
+def status(*paths: str) -> list[tuple[str, list[str]]]:
+    """`git status --porcelain -z` as (XY, paths). A rename or copy carries both paths. -z because
+    the plain form prints a rename as `old -> new` on one line and only the old side was read, so a
+    note moved Inbox -> Notes was committed as a deletion alone (review, 2026-09-30)."""
+    out = git("status", "--porcelain", "-z", "--", *paths).stdout.split("\0")
+    entries, i = [], 0
+    while i < len(out):
+        e, i = out[i], i + 1
+        if len(e) < 4:
+            continue
+        ps = [e[3:]]
+        if ("R" in e[:2] or "C" in e[:2]) and i < len(out):
+            ps.append(out[i]); i += 1          # -z: the destination first, then the source
+        entries.append((e[:2], ps))
+    return entries
+
+
 def push_target() -> tuple[str, str]:
     """(remote, error). The remote is palimpsest.json's push_remote and must exist."""
     sys.path.insert(0, str(TOOLS))
@@ -240,12 +257,10 @@ def _run() -> int:
     if not existing:
         print("vault-push: every content path is gitignored — nothing can be backed up")
         return 1
-    st = git("status", "--porcelain", "--", *existing)
-    changed = [l for l in st.stdout.splitlines() if l.strip()]
+    changed = status(*existing)
 
     code_paths = [c for c in CODE if _present(c)]
-    code_st = git("status", "--porcelain", "--", *code_paths) if code_paths else None
-    code_changed = [l for l in code_st.stdout.splitlines() if l.strip()] if code_st else []
+    code_changed = status(*code_paths) if code_paths else []
     if args.code and code_changed:
         changed += code_changed
         existing += code_paths
@@ -272,10 +287,12 @@ def _run() -> int:
             print(f"vault-push: FAILED to stage — {add.stderr.strip()[:200]}")
             return 1
         # Counts by top-level area, so the message says what the run actually produced.
+        # Both sides of a rename, so a move between areas commits the addition with the deletion;
+        # only areas this run stages, so a note moved out of tools/ cannot take code along.
         areas: dict[str, int] = {}
-        for line in changed:
-            path = line[3:].strip().strip('"')
-            areas[path.split("/")[0]] = areas.get(path.split("/")[0], 0) + 1
+        for _, paths in changed:
+            for top in {p.split("/")[0] for p in paths} & set(existing):
+                areas[top] = areas.get(top, 0) + 1
         summary = ", ".join(f"{v} {k}" for k, v in sorted(areas.items(), key=lambda x: -x[1]))
         with_code = args.code and code_changed
         msg = (f"vault: sync {datetime.now():%Y-%m-%d}{' + code' if with_code else ''}\n\n"
