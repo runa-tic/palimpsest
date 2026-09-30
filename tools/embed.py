@@ -28,7 +28,7 @@ index at the same moment waits for it instead of racing it.
   idx.doc_scores("...")                   # {relpath: (best-chunk cosine, start, end)}
 """
 from __future__ import annotations
-import sys, os, re, json, hashlib, time, math, importlib.util
+import sys, os, re, json, hashlib, time, math, zlib, importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
@@ -258,11 +258,18 @@ class Index:
             m = json.loads(man.read_text(encoding="utf-8"))
             if m.get("model") != MODEL or m.get("chunk_chars") != CHUNK_CHARS:
                 return
-            v = np.load(vec).astype(np.float32)
+            v16 = np.load(vec)
             rows = [(r, s, e) for r, s, e in m["rows"]]
-            if len(rows) != v.shape[0]:
+            # The pair is published by two renames, so writers that raced without the lock (see
+            # _WriterLock) can leave one's vectors beside the other's manifest. The row count alone
+            # let an equal-length pair load misaligned; the checksum catches it (older manifests
+            # have none and keep the count check).
+            crc = m.get("vectors_crc")
+            if len(rows) != v16.shape[0] or (crc is not None and crc != zlib.crc32(np.ascontiguousarray(v16))):
+                print("embed: vectors.npy does not match manifest.json (two writers saved at once); rebuilding",
+                      file=sys.stderr)
                 return
-            self.files, self.rows, self.vec = m["files"], rows, v
+            self.files, self.rows, self.vec = m["files"], rows, v16.astype(np.float32)
         except Exception as e:  # a corrupt cache is a rebuild, never a crash
             print(f"embed: cache unreadable ({type(e).__name__}: {e}); rebuilding", file=sys.stderr)
 
@@ -270,14 +277,18 @@ class Index:
         if self._lock:
             self._lock.refresh()                      # a checkpoint is proof of life
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        tmp_v = self.cache_dir / "vectors.npy.tmp"
-        tmp_m = self.cache_dir / "manifest.json.tmp"
+        # Per-process temp names: a writer that proceeded without the lock shared the fixed ones
+        # with the holder, renamed its half-written file away, and one of them crashed in os.replace.
+        tmp_v = self.cache_dir / f"vectors.npy.{os.getpid()}.tmp"
+        tmp_m = self.cache_dir / f"manifest.json.{os.getpid()}.tmp"
+        v16 = np.ascontiguousarray(self.vec.astype(np.float16))
         # np.save appends .npy to any PATH that lacks it (so 'vectors.npy.tmp' became
         # 'vectors.npy.tmp.npy' and the rename below failed); a file handle is written as-is.
         with open(tmp_v, "wb") as fh:
-            np.save(fh, self.vec.astype(np.float16))
+            np.save(fh, v16)
         tmp_m.write_text(json.dumps({"model": MODEL, "chunk_chars": CHUNK_CHARS,
                                      "built": time.strftime("%Y-%m-%d %H:%M"),
+                                     "vectors_crc": zlib.crc32(v16),
                                      "files": self.files, "rows": self.rows}, ensure_ascii=False),
                          encoding="utf-8")
         os.replace(tmp_v, self.cache_dir / "vectors.npy")
