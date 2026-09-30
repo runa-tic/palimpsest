@@ -11,8 +11,8 @@ run once the other machine had pushed, and silently stayed behind for weeks).
 Rules it will not break:
 
 1. **The commit guards are never bypassed.** No `--no-verify`, ever. scan_secrets.py and
-   scan_pii.py run on every auto-commit exactly as they do on a human one, and a BLOCK aborts
-   the push and reports loudly. An unattended commit is precisely where a credential would
+   scan_pii.py run on every auto-commit exactly as they do on a human one — run directly when
+   this clone has no pre-commit hook — and a BLOCK aborts the push and reports loudly. An unattended commit is precisely where a credential would
    escape unnoticed, so the guard has to be strictest here, not most lenient.
 2. **It never force-pushes and never resolves a conflict.** It does `git pull --rebase
    --autostash`; a rebase that stops on a conflict is aborted (which restores the tree and the
@@ -103,6 +103,42 @@ def status(*paths: str) -> list[tuple[str, list[str]]]:
             ps.append(out[i]); i += 1          # -z: the destination first, then the source
         entries.append((e[:2], ps))
     return entries
+
+
+def guard_installed() -> bool:
+    """True when git will run tools/githooks/pre-commit on a commit here. core.hooksPath is
+    per-clone config that `git clone` does not carry, so the second machine of a vault (or anyone
+    who skipped the setup line) committed and pushed with no scan at all, under a message saying
+    the scans ran (review, 2026-09-30)."""
+    hook = git("rev-parse", "--git-path", "hooks/pre-commit").stdout.strip()
+    if not hook:
+        return False
+    hp = Path(hook) if Path(hook).is_absolute() else VAULT / hook
+    try:
+        if hp.resolve() != (TOOLS / "githooks" / "pre-commit").resolve():
+            return False
+    except OSError:
+        return False
+    return hp.is_file() and (os.name == "nt" or os.access(hp, os.X_OK))
+
+
+def run_guards() -> tuple[bool, str]:
+    """The pre-commit hook's two scans, run directly. (ok, output). They read the whole index —
+    a superset of what `git commit -- <areas>` takes, so stricter than the hook, never looser."""
+    out = []
+    for s in ("scan_secrets.py", "scan_pii.py"):
+        if not (TOOLS / s).is_file():
+            return False, f"{s} is missing — refusing to commit unscanned"
+        try:
+            g = subprocess.run([sys.executable or "python", str(TOOLS / s)], cwd=str(VAULT), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", env=ENV, timeout=300,
+                               creationflags=NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            return False, f"{s} timed out — refusing to commit unscanned"
+        out.append((g.stdout + g.stderr).strip())
+        if g.returncode != 0:
+            return False, "\n".join(out)
+    return True, "\n".join(out)
 
 
 def push_target() -> tuple[str, str]:
@@ -298,6 +334,17 @@ def _run() -> int:
             print(f"vault-push: FAILED to stage — {add.stderr.strip()[:200]}")
             return 1
         # Counts by top-level area, so the message says what the run actually produced.
+        # No hook on this clone means no guard at all, so run its scans here instead: a missing
+        # setup line must cost a warning, never an unscanned push.
+        hooked = guard_installed()
+        if not hooked:
+            print("vault-push: the pre-commit guard is not installed on this clone (core.hooksPath is not "
+                  "tools/githooks) — running its scans directly. Install once: git config core.hooksPath tools/githooks")
+            ok, out = run_guards()
+            if not ok:
+                print("vault-push: BLOCKED by a commit guard — NOT committing or pushing. Staged for review:")
+                print("  " + "\n  ".join(out.splitlines()[-6:]))
+                return 1
         # Both sides of a rename, so a move between areas commits the addition with the deletion;
         # only areas this run stages, so a note moved out of tools/ cannot take code along.
         areas: dict[str, int] = {}
@@ -309,7 +356,8 @@ def _run() -> int:
         msg = (f"vault: sync {datetime.now():%Y-%m-%d}{' + code' if with_code else ''}\n\n"
                f"Automated snapshot of the sync pipeline's output ({summary}).\n"
                f"{'Code/config included (--code).' if with_code else f'Content only — anything under {CODE_HINT}/ is left for a deliberate commit.'}\n"
-               f"Written by tools/vault_push.py; secret-scan and pii-scan ran as normal.")
+               f"Written by tools/vault_push.py; secret-scan and pii-scan ran "
+               f"{'as the pre-commit hook' if hooked else 'directly (no pre-commit hook on this clone)'}.")
         # NO --no-verify. If a guard blocks, that is the system working.
         # Commit ONLY the content areas this run changed. A bare `git commit` takes the whole
         # index, so anything someone had staged by hand (a half-finished tools/ edit) rode along
