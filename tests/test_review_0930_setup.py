@@ -7,6 +7,10 @@
    The first fix raised from load() for every caller, which killed sync.py at import (no status
    file, no log) and left the session opener with no output — so the callers that report status
    get defaults plus a warning and config.problem(), and only setup.py loads strictly.
+   The warning alone still let the night read clean — sync.py printed "all steps clean", wrote
+   ok:true, the opener said "Sync: clean", and cron sent the stderr warning to /dev/null — so a
+   sync that ran on DEFAULTS now has its receipt amended to FAILED (config), says so in sync.log
+   and exits 1; the cron line appends stderr to sync.log; the launchers check before starting.
 3. The printed cron line had an unquoted `cd` (a vault path with a space never synced), and the
    Windows task passed the script path unquoted to python.exe.
 4. A sync time not in HH:MM form was saved and then crashed setup before it printed the hooks
@@ -114,9 +118,68 @@ def main() -> int:
          f"exit={r.returncode}\n{(r.stdout + r.stderr)[-400:]}")
     r = subprocess.run([sys.executable, str(v / "tools" / "sync.py")], cwd=v, capture_output=True,
                        text=True, timeout=300)
-    c.ok((v / "tools" / ".sync_status.json").exists() and (v / "tools" / "sync.log").exists(),
+    status, log = v / "tools" / ".sync_status.json", v / "tools" / "sync.log"
+    c.ok(status.exists() and log.exists(),
          "sync.py still runs and writes .sync_status.json and sync.log with an unparseable config",
          f"exit={r.returncode}\n{(r.stdout + r.stderr)[-400:]}")
+    # ...and does not call that night clean: pull, push and state were silently OFF
+    receipt = json.loads(status.read_text()) if status.exists() else {}
+    logged = log.read_text() if log.exists() else ""
+    c.ok(r.returncode != 0 and receipt.get("ok") is False
+         and any(str(f).startswith("config") for f in receipt.get("failures", []))
+         and "palimpsest.json" in receipt.get("config_problem", "")
+         and "WARNING" in logged and "palimpsest.json" in logged and "FAILED (config)" in r.stdout,
+         "a sync that ran on DEFAULTS is reported FAILED (config) in the receipt, sync.log and exit code",
+         f"exit={r.returncode} receipt={receipt}\nlog tail={logged[-300:]!r}\nstdout={r.stdout[-300:]!r}")
+    before = status.read_bytes() if status.exists() else b""
+    r = subprocess.run([sys.executable, str(v / "tools" / "hook_session_start.py")], cwd=v,
+                       capture_output=True, text=True, env=env, timeout=120)
+    try:
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    except Exception:
+        ctx = ""
+    line = next((l for l in ctx.splitlines() if l.startswith("**Sync:**")), "")
+    c.ok("FAILED" in line and "config" in line and "clean" not in line,
+         "the session opener after that sync says FAILED (config), not 'Sync: clean'", line or ctx[-300:])
+    c.ok(before and status.read_bytes() == before,
+         "a caller that only reads the config (the opener) leaves the sync receipt alone",
+         status.read_text() if status.exists() else "no receipt")
+    # launcher pre-flight: a session started with ./claude-code.sh hears of it before the next sync
+    if os.name != "nt":
+        stub = Path(tempfile.mkdtemp(prefix="palimpsest-stub-"))
+        MADE.append(stub)
+        (stub / "python3").symlink_to(sys.executable)
+        write(stub, "claude", '#!/bin/sh\necho "$@" > "$(dirname "$0")/CLAUDE_RAN"\n').chmod(0o755)
+        shutil.copy2(REPO / "claude-code.sh", v / "claude-code.sh")
+        lenv = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}"}
+        r = subprocess.run(["sh", str(v / "claude-code.sh"), "--continue"], capture_output=True,
+                           text=True, input="", env=lenv, timeout=60)
+        ran = (stub / "CLAUDE_RAN").read_text().strip() if (stub / "CLAUDE_RAN").exists() else None
+        c.ok(r.returncode == 0 and "palimpsest.json" in r.stderr and "DEFAULTS" in r.stderr
+             and ran == "--continue",
+             "claude-code.sh warns about an unreadable palimpsest.json, then still opens claude",
+             f"exit={r.returncode} ran={ran!r} stderr={r.stderr[-300:]!r}")
+        (stub / "CLAUDE_RAN").unlink(missing_ok=True)
+        write(v, "palimpsest.json", json.dumps({"push_remote": "backup"}))
+        r = subprocess.run(["sh", str(v / "claude-code.sh")], capture_output=True, text=True,
+                           input="", env=lenv, timeout=60)
+        c.ok(r.returncode == 0 and not r.stderr.strip() and (stub / "CLAUDE_RAN").exists(),
+             "claude-code.sh is silent with a readable palimpsest.json",
+             f"exit={r.returncode} stderr={r.stderr[-300:]!r}")
+        write(v, "palimpsest.json", bad)
+    # once it is fixed, the next sync is clean again: the amendment belongs to one run
+    w = make_vault()
+    for script in ("briefing.py", "maintenance.py", "import_claude.py", "extract_notes.py",
+                   "link_notes.py", "dedupe.py", "triage_skills.py", "weekly_review.py", "embed.py"):
+        write(w, f"tools/{script}", "print('stub')\n")
+    write(w, "palimpsest.json", bad)
+    subprocess.run([sys.executable, str(w / "tools" / "sync.py")], cwd=w, capture_output=True, timeout=300)
+    write(w, "palimpsest.json", json.dumps({"push_remote": "backup"}))
+    r = subprocess.run([sys.executable, str(w / "tools" / "sync.py")], cwd=w, capture_output=True,
+                       text=True, timeout=300)
+    receipt = json.loads((w / "tools" / ".sync_status.json").read_text())
+    c.ok(r.returncode == 0 and receipt.get("ok") is True and not receipt.get("failures"),
+         "after palimpsest.json is fixed, the next sync's receipt is clean", f"{receipt}\n{r.stdout[-200:]}")
     r = setup(v, ["n", "", "", "", "n"])
     c.ok(r.returncode != 0 and (v / "palimpsest.json").read_text() == bad,
          "setup.py refuses to overwrite an unparseable palimpsest.json", (r.stdout + r.stderr)[-300:])
@@ -128,8 +191,9 @@ def main() -> int:
     # 3. the scheduler command works from a vault path with a space (and a %, special to cron)
     if os.name != "nt":
         v = vault_at("My Vault 50%")
-        write(v, "tools/sync.py", "from pathlib import Path\n"
-                                  "Path(__file__).with_name('RAN').write_text('ok')\n")
+        write(v, "tools/sync.py", "import sys\nfrom pathlib import Path\n"
+                                  "Path(__file__).with_name('RAN').write_text('ok')\n"
+                                  "print('crashed at import', file=sys.stderr)\n")
         line = next((l for l in hint(v, "06:00").splitlines() if "* * *" in l), "")
         cmd = line.split("* * * ", 1)[-1]
         bare_pct = re.search(r"(?<!\\)%", cmd)
@@ -137,6 +201,9 @@ def main() -> int:
         subprocess.run(["sh", "-c", cmd.replace("\\%", "%")], cwd=tempfile.gettempdir(), capture_output=True)
         c.ok(not bare_pct and (v / "tools" / "RAN").exists(),
              "the printed cron line runs sync.py from a vault path with a space and a %", line)
+        slog = v / "tools" / "sync.log"
+        c.ok("crashed at import" in (slog.read_text() if slog.exists() else ""),
+             "the printed cron line appends sync.py's stderr to sync.log instead of discarding it", line)
         shutil.rmtree(v.parent)
     w = vault_at("John Smith's Vault")
     out = hint(w, "06:00", "Windows")
