@@ -27,8 +27,17 @@ Rework after the review of fix/scanners (2026-09-30):
 16. The JSON-escaped AWS secret access key is redacted and blocked, and its label survives.
 17. A private key quoted with "> " on every line (a thinking callout) is redacted whole.
 18. A phone-shaped term does not match inside a longer run of digits (a Telegram id).
+
+Second review of fix/scanners (2026-09-30):
+19. A staged TEXT file over 5MB is still scanned (in chunks) by both guards and blocks the commit,
+    with the right line number, UTF-16 included; a staged binary over 5MB alone commits; text over
+    TEXT_MAX is not scanned and fails.
+20. The staged scan spawns a fixed number of git processes, not one or two per staged file.
+21. A UTF-16 deny list with CJK or emoji lines is clean and does not re-read them as bytes (which
+    over-redacted every transcript), while UTF-8 appended after a UTF-16 section is still read.
 """
-import os, shutil, subprocess, sys
+import os, shutil, subprocess, sys, tempfile
+from pathlib import Path
 import _util
 from _util import Checks, git, run, write
 
@@ -126,10 +135,10 @@ def main() -> int:
     (v6 / "notes").mkdir()
     (v6 / "notes" / "latin1.txt").write_bytes(b"caf\xe9 " + AKIA.encode() + b"\n")
     ra, rp = run(v6, "scan_secrets.py", "--all"), run(v6, "scan_secrets.py", "notes")
-    big = v6 / "big.txt"
-    big.write_bytes(b"x" * 5_100_000)
-    rb = run(v6, "scan_secrets.py", "big.txt")
-    c.ok(ra.returncode == 1 and rp.returncode == 1 and rb.returncode == 1 and "big.txt" in rb.stdout,
+    big = v6 / "big.bin"             # binary over 5MB: not scanned, and named, so a failure
+    big.write_bytes(os.urandom(5_100_000))
+    rb = run(v6, "scan_secrets.py", "big.bin")
+    c.ok(ra.returncode == 1 and rp.returncode == 1 and rb.returncode == 1 and "big.bin" in rb.stdout,
          "--all and PATH scan a non-UTF-8 file; a named file that is not scanned is a failure",
          f"{ra.returncode} {rp.returncode} {rb.returncode}\n{ra.stdout[-200:]}\n{rb.stdout[-200:]}")
 
@@ -276,6 +285,71 @@ def main() -> int:
     c.ok(quiet.returncode == 0 and loud.returncode == 1 and "9555010077123" in out and "0100.77" not in out,
          "a phone-shaped term blocks its own number but not a longer digit run containing it",
          quiet.stdout + loud.stdout + out)
+
+    # 19. large staged TEXT is scanned by both guards and blocks the commit (the size cap skipped it)
+    v19 = pii_vault(b"Quintanilla\n")
+    git(v19, "config", "core.hooksPath", "tools/githooks")
+    filler = "".join(f"filler line {i} of a long session transcript, nothing secret here\n" for i in range(90_000))
+    big = "40 Resources/Claude Conversations/big session.md"
+    write(v19, big, filler + f"key {AKIA}\nmet Quintanilla\n")
+    (v19 / "40 Resources" / "wide.txt").write_bytes((filler + f"key {AKIA}\n").encode("utf-16"))
+    git(v19, "add", "-A")
+    rs, rp = run(v19, "scan_secrets.py"), run(v19, "scan_pii.py")
+    cm = git(v19, "commit", "-qm", "big", check=False)
+    size_ok = (v19 / big).stat().st_size > 5_000_000 and (v19 / "40 Resources" / "wide.txt").stat().st_size > 5_000_000
+    text_ok = (size_ok and rs.returncode == 1 and f"big session.md:{90_001}" in rs.stdout
+               and "wide.txt:90001" in rs.stdout and rp.returncode == 1 and "big session.md: 1x" in rp.stdout
+               and cm.returncode != 0)
+    git(v19, "rm", "-rq", "--cached", "40 Resources")
+    (v19 / "_media").mkdir()
+    (v19 / "_media" / "clip.mp4").write_bytes(b"\x00\x00\x00\x20ftypisom" + os.urandom(6_000_000))
+    (v19 / "_media" / "raw.bin").write_bytes(os.urandom(6_000_000))
+    git(v19, "add", "_media")
+    cb = git(v19, "commit", "-qm", "media", check=False)
+    huge = v19 / "10 Notes" / "huge.log"
+    huge.parent.mkdir(exist_ok=True)
+    with open(huge, "wb") as f:
+        for _ in range(66):
+            f.write(b"y" * 999_999 + b"\n")
+    git(v19, "add", "10 Notes/huge.log")
+    rh = run(v19, "scan_secrets.py")
+    c.ok(text_ok and cb.returncode == 0 and rh.returncode == 1 and "huge.log" in rh.stdout,
+         "a staged text file over 5MB is scanned by both guards and blocks; a large binary commits;"
+         " text over TEXT_MAX fails", f"{rs.stdout[-600:]}\n{rp.stdout[-300:]}\ncommit={cm.returncode}"
+         f" media={cb.returncode} {cb.stderr[-300:]}\n{rh.stdout[-300:]}")
+
+    # 20. a fixed number of git processes for the staged scan, whatever the number of files
+    v20 = pii_vault(b"Quintanilla\n")
+    for i in range(30):
+        write(v20, f"10 Notes/n{i}.md", f"note {i}\n")
+    git(v20, "add", "-A")
+    shim = Path(tempfile.mkdtemp(prefix="palimpsest-shim-"))
+    VAULTS.append(shim)
+    (shim / "git").write_text(f'#!/bin/sh\necho "$1" >> "{shim}/log"\nexec "{shutil.which("git")}" "$@"\n')
+    (shim / "git").chmod(0o755)
+    env = {"PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"}
+    calls = []
+    for script in ("scan_secrets.py", "scan_pii.py"):
+        (shim / "log").write_text("")
+        r = run(v20, script, env=env)
+        calls.append((script, r.returncode, (shim / "log").read_text().split()))
+    c.ok(all(rc == 0 and 0 < len(log) <= 3 for _, rc, log in calls),
+         "the staged scan runs a fixed number of git processes, not one or two per file",
+         repr([(s_, rc, len(log), sorted(set(log))) for s_, rc, log in calls]))
+
+    # 21. UTF-16 deny list with CJK / emoji lines: clean, and no byte re-read of them
+    v21 = pii_vault("Zorbanek\r\n李\r\n🦊fox\r\n".encode("utf-16"))
+    prose = "a long string of things running along"
+    out = redact(v21, f"{prose} / met Zorbanek, 李 and 🦊fox\n")
+    write(v21, "10 Notes/n.md", f"{prose}\n")
+    git(v21, "add", "-A")
+    p21 = run(v21, "scan_pii.py")
+    v21b = pii_vault("Zorbanek\r\n".encode("utf-16") + "Kowalski\nNowakowski\n".encode())
+    out_b = redact(v21b, "met Zorbanek, Kowalski and Nowakowski\n")
+    c.ok(prose in out and not any(t in out for t in ("Zorbanek", "李", "🦊fox")) and p21.returncode == 0
+         and not any(t in out_b for t in ("Zorbanek", "Kowalski", "Nowakowski")),
+         "a UTF-16 deny list with CJK or emoji lines is clean and does not over-redact; appended UTF-8 is read",
+         f"{out}\n{p21.returncode} {p21.stdout[-300:]}\n{out_b}")
 
     for d in VAULTS:
         shutil.rmtree(d, ignore_errors=True)
