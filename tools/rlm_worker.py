@@ -162,7 +162,7 @@ class Corpus:
 
 
 def _gather() -> list[Path]:
-    files = []
+    files, outside = [], 0
     for d in CORPUS_DIRS:
         root = VAULT / d
         if not root.exists():
@@ -171,7 +171,17 @@ def _gather() -> list[Path]:
             parts = f.relative_to(VAULT).parts
             if any(x.startswith("_") and x != "_proposed" for x in parts):
                 continue
+            # A note symlinked to a file outside the vault is a read the sandbox refuses, and
+            # every corpus-wide call (search/grep/chunks/filter) reads every note, so one such
+            # link made all of them fail (review, 2026-09-30). Skip it, and a dangling one.
+            real = f.resolve()
+            if not ((real == VAULT or VAULT in real.parents) and real.is_file()):
+                outside += 1
+                continue
             files.append(f)
+    if outside:
+        print(f"rlm_worker: skipped {outside} note(s) that resolve outside the vault or to nothing",
+              file=sys.stderr)
     return sorted(files)
 
 
