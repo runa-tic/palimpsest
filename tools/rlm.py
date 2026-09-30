@@ -84,6 +84,11 @@ QUESTION: {question}
 """
 
 
+class ClaudeError(RuntimeError):
+    """`claude -p` failed or timed out. Raised, not returned as text: the root loop used to take
+    "[claude CLI failed rc=1: ...]" for a FINAL answer, log it to the Q&A log and exit 0."""
+
+
 def _claude(prompt: str, model: str, timeout: int) -> str:
     exe = shutil.which("claude") or "claude"
     env = {**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1", "PYTHONIOENCODING": "utf-8"}
@@ -92,15 +97,23 @@ def _claude(prompt: str, model: str, timeout: int) -> str:
                            text=True, encoding="utf-8", errors="replace", env=env,
                            timeout=timeout)
     except subprocess.TimeoutExpired:
-        return f"[sub-agent timed out after {timeout}s]"
+        raise ClaudeError(f"timed out after {timeout}s") from None
     if p.returncode != 0:
-        return f"[claude CLI failed rc={p.returncode}: {(p.stderr or '').strip()[:300]}]"
+        raise ClaudeError(f"claude CLI failed rc={p.returncode}: {(p.stderr or '').strip()[:300]}")
     return (p.stdout or "").strip()
+
+
+def _sub(prompt: str, model: str, timeout: int) -> str:
+    # A failed sub-agent is a result the root can see and work around, so it stays text here.
+    try:
+        return _claude(prompt, model, timeout)
+    except ClaudeError as e:
+        return f"[sub-agent {e}]"
 
 
 def _fanout(calls: list[dict], sub_model: str) -> list[str]:
     with ThreadPoolExecutor(max_workers=PARALLEL) as ex:
-        futs = [ex.submit(_claude,
+        futs = [ex.submit(_sub,
                           f"{c['prompt']}\n\n===TEXT===\n{c.get('text','')}",
                           c.get("model") or sub_model, SUB_TIMEOUT)
                 for c in calls]
@@ -157,7 +170,7 @@ def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
     return [exe, "-p", profile, *cmd], "OS sandbox: sandbox-exec (no network; reads confined to the vault)"
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="Recursive-LM query over the vault.")
     ap.add_argument("question", nargs="+")
     ap.add_argument("--steps", type=int, default=12, help="max REPL turns for the root model")
@@ -218,7 +231,8 @@ def main() -> None:
 
     transcript: list[str] = []
     subs_used = 0
-    answer = None
+    answer = None     # only ever a FINAL the root model wrote
+    stopped = None    # why the run ended without one; never logged as an answer
     for step in range(1, args.steps + 1):
         # literal substitution, not .format(): the contract shows dict literals like
         # {title,path,line,text}, which str.format would try to interpret as fields.
@@ -232,7 +246,21 @@ def main() -> None:
             prompt += ("\nThis is your LAST step. Do NOT write code. Reply with FINAL and the "
                        "best answer your gathered evidence supports, stating explicitly what "
                        "you could not determine.\n")
-        reply = _claude(prompt, args.root_model, SUB_TIMEOUT)
+        reply, err = None, ""
+        for attempt in (1, 2):      # one retry: a 529 or a slow turn is usually transient
+            try:
+                reply = _claude(prompt, args.root_model, SUB_TIMEOUT)
+                if reply.strip():
+                    break
+                reply, err = None, "empty reply"
+            except ClaudeError as e:
+                err = str(e)
+            print(f"   ✗ root model call failed at step {step} ({err})"
+                  + ("; retrying" if attempt == 1 else ""), file=sys.stderr)
+        if reply is None:
+            stopped = f"[stopped: the root model call failed twice at step {step}: {err}]"
+            rec({"t": "root_failed", "step": step, "error": err})
+            break
         code = _code_of(reply)
         if code is None:
             answer = re.sub(r"^\s*FINAL\s*\n", "", reply.strip(), flags=re.I)
@@ -267,7 +295,7 @@ def main() -> None:
             break
         if timed_out:
             worker.kill()
-            answer = (f"[stopped: step {step} ran past EXEC_TIMEOUT ({EXEC_TIMEOUT}s, excluding sub-agent "
+            stopped = (f"[stopped: step {step} ran past EXEC_TIMEOUT ({EXEC_TIMEOUT}s, excluding sub-agent "
                       f"time); the REPL worker was killed]")
             print(f"   ✗ step {step} exceeded {EXEC_TIMEOUT}s — worker killed")
             rec({"t": "timeout", "step": step, "limit_s": EXEC_TIMEOUT})
@@ -278,7 +306,7 @@ def main() -> None:
         rec({"t": "output", "step": step, "out": out[:20000]})
         transcript.append(f"=== STEP {step} CODE ===\n{code}\n=== STEP {step} OUTPUT ===\n{shown}")
     else:
-        answer = "[stopped: step budget exhausted before the root model produced an answer]"
+        stopped = "[stopped: step budget exhausted before the root model produced an answer]"
 
     try:
         w_send({"t": "exit"})
@@ -286,7 +314,7 @@ def main() -> None:
     except (subprocess.TimeoutExpired, OSError, ValueError):
         worker.kill()
 
-    print("=" * 70 + "\n" + (answer or "(no answer)") + "\n" + "=" * 70)
+    print("=" * 70 + "\n" + (answer or stopped or "(no answer)") + "\n" + "=" * 70)
     print(f"sub-agents: {subs_used}/{args.subagents} · trace: {trace.relative_to(VAULT)}")
 
     if args.log and answer:
@@ -299,7 +327,9 @@ def main() -> None:
             fh.write(f"\n## ❓ {question}\n*{datetime.now():%Y-%m-%d %H:%M} · rlm.py "
                      f"({subs_used} sub-agents)*\n\n{answer}\n")
         print(f"(logged to {log.relative_to(VAULT)})")
+    # Non-zero when there is no answer, so a caller can tell a failed or cut-off run from one.
+    return 0 if answer else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
