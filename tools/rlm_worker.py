@@ -24,6 +24,7 @@ TOOLS = Path(__file__).resolve().parent   # this file's own dir, where ask.py li
 sys.path.insert(0, str(TOOLS))
 import ask  # reuse the vault's proven keyword scorer rather than inventing a second one
 
+
 def _claim_pipes():
     """Take the protocol pipes onto private descriptors before any model code runs.
 
@@ -274,7 +275,8 @@ _BLOCK_PREFIX = ("_winapi.", "subprocess.", "multiprocessing.", "os.exec", "os.s
 def _roots() -> tuple[Path, ...]:
     cand = [VAULT, SCRATCH, Path(sys.prefix), Path(sys.base_prefix),
             Path(sys.executable).parent]
-    for key in ("stdlib", "platstdlib", "purelib", "platlib", "data"):
+    # Not "data": on Homebrew Python that is /opt/homebrew itself, etc/ and var/ included.
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
         try:
             p = sysconfig.get_path(key)
             if p:
@@ -293,6 +295,129 @@ def _roots() -> tuple[Path, ...]:
 _READ_ROOTS = _roots()
 
 
+def _real_posix(s, _readlink=os.readlink, _getcwd=os.getcwd, _split=str.split, _rfind=str.rfind,
+                _starts=str.startswith, _oserr=OSError, _valerr=ValueError, _hops=40):
+    """os.path.realpath for a str, built only from C functions bound at definition time.
+
+    posixpath.realpath is Python code that looks up os.fspath/os.lstat/os.getcwd, stat.S_ISLNK and
+    isinstance in posixpath's module dict at call time, so model code that set posixpath.os to a
+    fake whose fspath() returns a scratch path passed every check the hook made; with no OS
+    sandbox that read files outside the vault and wrote tools/evil.py (review, 2026-09-30). This
+    walks the path one component at a time with readlink() (a component that is not a link, or
+    does not exist, is taken as it is, as realpath(strict=False) does) and never looks anything
+    up outside its own defaults: C functions, str methods and exception classes."""
+    if not _starts(s, "/"):
+        s = _getcwd() + "/" + s
+    pending = _split(s, "/")
+    pending.reverse()
+    out, hops = "", 0
+    while pending:
+        name = pending.pop()
+        if name == "" or name == ".":
+            continue
+        if name == "..":
+            if out:
+                out = out[:_rfind(out, "/")]
+            continue
+        cand = out + "/" + name
+        try:
+            target = _readlink(cand)
+        except _oserr:
+            out = cand
+            continue
+        hops += 1
+        if hops > _hops:
+            raise _valerr("too many symbolic links")
+        if _starts(target, "/"):
+            out = ""
+        more = _split(target, "/")
+        more.reverse()
+        pending += more
+    return out or "/"
+
+
+def _nt_final():
+    try:
+        import nt
+        return nt._getfinalpathname
+    except (ImportError, AttributeError):
+        return None
+
+
+def _real_nt(s, _final=_nt_final(), _getcwd=os.getcwd, _replace=str.replace, _split=str.split,
+             _join=str.join, _starts=str.startswith, _ends=str.endswith, _upper=str.upper, _len=len,
+             _oserr=OSError, _valerr=ValueError):
+    """The Windows counterpart of _real_posix, on the same terms (bound C functions only). Win32
+    applies "." and ".." lexically before it follows any reparse point, so the path is made
+    absolute and normalised as text, then the longest prefix that exists goes through
+    GetFinalPathNameByHandle (links, junctions, 8.3 names, canonical case) and the rest is
+    appended. Device paths, drive-relative paths on another drive and components Win32 would
+    silently trim (trailing dot or space) are refused rather than guessed at."""
+    s = _replace(s, "/", "\\")
+    verbatim = _starts(s, "\\\\?\\")    # Win32 does not normalise these; "." and ".." are refused
+    if _starts(s, "\\\\?\\UNC\\"):
+        s = "\\\\" + s[8:]
+    elif verbatim:
+        s = s[4:]
+    elif _starts(s, "\\\\.\\"):
+        raise _valerr("device path")
+    cwd = _replace(_getcwd(), "/", "\\")
+    if _starts(s, "\\\\"):
+        pass
+    elif s[1:2] == ":":
+        if s[2:3] != "\\":
+            if _upper(s[:2]) != _upper(cwd[:2]):
+                raise _valerr("drive-relative path on another drive")
+            s = cwd + "\\" + s[2:]
+    elif _starts(s, "\\"):
+        if cwd[1:2] == ":":
+            s = cwd[:2] + s
+        else:
+            c = _split(cwd[2:], "\\")
+            s = "\\\\" + c[0] + "\\" + c[1] + s
+    else:
+        s = cwd + "\\" + s
+    if _starts(s, "\\\\"):
+        parts = _split(s[2:], "\\")
+        if _len(parts) < 2 or parts[0] == "" or parts[1] == "":
+            raise _valerr("bad UNC path")
+        drive, rest = "\\\\" + parts[0] + "\\" + parts[1], parts[2:]
+    else:
+        drive, rest = _upper(s[:2]), _split(s[3:], "\\")
+    out = []
+    for name in rest:
+        if (name == "." or name == "..") and verbatim:
+            raise _valerr("relative component in a \\\\?\\ path")
+        if name == "" or name == ".":
+            continue
+        if name == "..":
+            if out:
+                out.pop()
+            continue
+        if _ends(name, ".") or _ends(name, " "):
+            raise _valerr("component Win32 would trim")
+        out.append(name)
+    i = _len(out)
+    while _final is not None and i >= 0:
+        try:
+            f = _final(drive + "\\" + _join("\\", out[:i]))
+        except _oserr:
+            i -= 1
+            continue
+        if _starts(f, "\\\\?\\UNC\\"):
+            f = "\\\\" + f[8:]
+        elif _starts(f, "\\\\?\\"):
+            f = f[4:]
+        tail = _join("\\", out[i:])
+        if tail == "":
+            return f
+        return (f if _ends(f, "\\") else f + "\\") + tail
+    return drive + "\\" + _join("\\", out)
+
+
+_real = _real_nt if os.name == "nt" else _real_posix
+
+
 def _make_audit(read_roots=_READ_ROOTS, scratch=SCRATCH, block_exact=frozenset(_BLOCK_EXACT),
                 block_prefix=_BLOCK_PREFIX + ("gc.",), write_events=frozenset(_WRITE_EVENTS)):
     """Build the audit hook with every rule bound NOW. The first version looked its rules up in
@@ -300,23 +425,28 @@ def _make_audit(read_roots=_READ_ROOTS, scratch=SCRATCH, block_exact=frozenset(_
     sys.modules["__main__"] (an external review set _READ_ROOTS to "/" and read outside the vault,
     2026-09-30). The second bound the rules but still called a module-level _within that looked
     up Path and os there, so rebinding sys.modules["__main__"].Path passed every check (review,
-    2026-09-30). Now every rule and primitive is a default argument of a nested function: plain
-    strings and C functions, no module globals, no builtins looked up at call time, no closure
-    cells (a traceback through this hook hands out its frame, and in 3.13 frame.f_locals writes
-    through to cells; a default is a per-call local). gc.* is blocked because gc.get_objects is
-    how code would find the hook itself, and reading or replacing within's __defaults__/__code__
-    is refused. Still defence in depth, not a boundary: the path functions it calls live in
-    posixpath/ntpath, which code in this interpreter can patch. The boundary is the OS sandbox
-    rlm.py wraps this process in, where one exists."""
+    2026-09-30). The third bound its own primitives but resolved paths with os.path.realpath,
+    Python code that looks up os and isinstance in posixpath's globals, so setting posixpath.os
+    passed every check again (review, 2026-09-30). Now every rule and primitive is a default
+    argument of a nested function, paths are resolved by _real_posix/_real_nt (C functions and
+    str methods only), and nothing is looked up in any module or in builtins at call time. No
+    closure cells either (a traceback through this hook hands out its frame, and in 3.13
+    frame.f_locals writes through to cells; a default is a per-call local). gc.* is blocked
+    because gc.get_objects is how code would find the hook itself, and reading or replacing the
+    __defaults__/__code__ of within or the resolver is refused. Still defence in depth, not a
+    boundary: the hook sees the path an open() names, not a dir_fd it is relative to, and it runs
+    in the interpreter it polices. The boundary is the OS sandbox rlm.py wraps this process in,
+    where one exists."""
     sep = os.sep
+    guarded = (_real,)
 
-    def within(path, roots, _fspath=os.fspath, _realpath=os.path.realpath, _isinstance=isinstance,
+    def within(path, roots, _fspath=os.fspath, _real=_real, _isinstance=isinstance,
                _str=str, _bytes=bytes, _enc=sys.getfilesystemencoding(), _sep=sep, _exc=Exception) -> bool:
         try:
             s = _fspath(path)
             # str.__str__ copies a str subclass to a plain str, so overridden methods never run here
             s = _bytes.decode(s, _enc, "surrogateescape") if _isinstance(s, _bytes) else _str.__str__(s)
-            p = _str.__str__(_realpath(s))
+            p = _real(s)
         except _exc:
             return False
         for r in roots:
@@ -324,10 +454,14 @@ def _make_audit(read_roots=_READ_ROOTS, scratch=SCRATCH, block_exact=frozenset(_
                 return True
         return False
 
-    def _audit(event, args, _reads=tuple(str(r) for r in read_roots), _scratch=(str(scratch),),
+    guarded += (within,)
+    reads = tuple(dict.fromkeys(_real(str(r)) for r in read_roots))
+    scr = (_real(str(scratch)),)
+
+    def _audit(event, args, _reads=reads, _scratch=scr,
                _shown=str(scratch), _exact=block_exact, _prefix=block_prefix, _writes=write_events,
-               _within=within, _perm=PermissionError, _isinstance=isinstance, _len=len, _any=any,
-               _str=str, _bytes=bytes, _int=int, _pathlike=os.PathLike,
+               _within=within, _guarded=guarded, _perm=PermissionError, _isinstance=isinstance,
+               _len=len, _any=any, _str=str, _int=int,
                _wmask=os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC):
         if event in _exact or event.startswith(_prefix):
             raise _perm(
@@ -352,9 +486,14 @@ def _make_audit(read_roots=_READ_ROOTS, scratch=SCRATCH, block_exact=frozenset(_
                             f"in `docs`, and anything outside it is not yours to send.")
         elif event in _writes:
             for a in args:
-                if _isinstance(a, (_str, _bytes, _pathlike)) and not _within(a, _scratch):
+                # CPython hands these events already-converted str/bytes paths plus int fds, modes
+                # and ids; anything else is checked as a path too, so it fails closed.
+                if a is None or _isinstance(a, _int):
+                    continue
+                if not _within(a, _scratch):
                     raise _perm(f"blocked by the RLM sandbox: {event} on {a!r}.")
-        elif event in ("object.__getattr__", "object.__setattr__") and args and args[0] is _within:
+        elif (event in ("object.__getattr__", "object.__setattr__") and args
+              and (args[0] is _guarded[0] or args[0] is _guarded[1])):
             raise _perm(f"blocked by the RLM sandbox: {event} on the sandbox's own check.")
 
     return _audit
