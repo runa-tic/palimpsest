@@ -9,7 +9,7 @@ Non-interactive invocations (cron, CI, a piped shell) print the plan and change 
 because a setup script that blocks on stdin in a scheduled job is a wedged job.
 """
 from __future__ import annotations
-import sys, os, json, platform, shlex
+import sys, os, re, json, platform, shlex
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -19,6 +19,9 @@ MODELS = [
     ("claude-haiku-4-5-20251001", "cheapest and fastest; fine for distilling transcripts"),
     ("claude-sonnet-5", "noticeably better notes, several times the cost per night"),
 ]
+
+
+HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 class NotATerminal(Exception):
@@ -159,7 +162,12 @@ def interview(cfg: dict) -> int:
 
     print("\n4) When should the sync run? It rewrites notes while it works, so pick an hour")
     print("   you are never mid-session in the vault.")
-    cfg["sync"]["at"] = ask("   time (HH:MM, local)", cfg["sync"]["at"])
+    # Checked here, not trusted: scheduler_hint() splits on ':' after the file is saved, so '6am'
+    # used to crash setup before it printed the hooks and the commit-guard instruction.
+    at = cfg["sync"]["at"] if HHMM.match(str(cfg["sync"]["at"])) else cfgmod.DEFAULTS["sync"]["at"]
+    while not (m := HHMM.match(ask("   time (HH:MM, local)", at))):
+        print("   not a 24-hour HH:MM time, e.g. 06:00 or 23:30")
+    cfg["sync"]["at"] = f"{int(m[1]):02d}:{m[2]}"
 
     print("\n5) Nightly backup? The pipeline can end by committing that night's notes and")
     print("   pushing them to the remote named in push_remote, so the vault stops drifting")
