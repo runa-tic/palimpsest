@@ -67,10 +67,19 @@ Return ONLY a JSON array (no prose, no code fence) of objects with these fields:
 The conversation transcript follows after the line "===CONVERSATION===".
 """
 
-def sanitize(name: str, maxlen: int = 90) -> str:
+def sanitize(name: str, maxlen: int = 90, maxbytes: int = 200) -> str:
     name = INVALID.sub(" ", name or "").strip()
-    name = re.sub(r"\s+", " ", name)
-    return (name[:maxlen].rstrip() or "Untitled")
+    # A leading "." makes a dotfile Obsidian hides, and a leading "_" is how every reader here
+    # (ask.gather, _note_index, dedupe) marks a file to skip: "__slots__ ..." was written but
+    # never retrieved or deduped.
+    name = re.sub(r"\s+", " ", name).lstrip("._ ")
+    name = name[:maxlen].rstrip()
+    # The cap is characters, but NAME_MAX is 255 BYTES on ext4: 90 CJK characters are 270 bytes,
+    # and the ENAMETOOLONG killed the whole run. Trim to a byte budget that leaves room for ".md".
+    while len(name.encode("utf-8")) > maxbytes:
+        name = name[:-1].rstrip()
+    return name or "Untitled"
+
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -82,6 +91,29 @@ def load_state() -> dict:
 
 def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+def as_text(v) -> str:
+    """A model field as one line of text; a list or number where a string was asked for is
+    common, and .strip() on it crashed the whole run."""
+    if v is None:
+        return ""
+    if isinstance(v, (list, tuple)):
+        return " ".join(as_text(x) for x in v).strip()
+    return str(v).strip()
+
+
+def clean_tags(tags) -> list[str]:
+    """Tags as safe YAML list items. Written raw, '*nix' or '@types' made the frontmatter
+    unparseable, and a nested list crashed set(tags)."""
+    out = []
+    for t in tags if isinstance(tags, list) else [tags]:
+        if isinstance(t, bool) or not isinstance(t, (str, int, float)):
+            continue
+        t = re.sub(r"[^\w/-]+", "-", str(t).strip().lower()).strip("-/")
+        if t and t not in out:
+            out.append(t)
+    return out
+
 
 # Extraction needs no tools, and the transcript it reads is untrusted text (a pasted email, a web
 # page). Run in the vault, `claude -p` loaded the vault's CLAUDE.md and project allowlist, whose
@@ -123,18 +155,38 @@ MAX_CHARS = 350_000  # keep a single request comfortably within the context wind
 def call_claude(transcript: str, model: str) -> str:
     return run_claude(PROMPT + "\n===CONVERSATION===\n" + transcript, model)
 
+def _split_long(turn: str, max_chars: int) -> list[str]:
+    """A single turn longer than the limit (a pasted log, a generated file), cut on paragraph,
+    then line boundaries, then hard. Left whole it failed `claude -p` on every run, forever."""
+    if len(turn) <= max_chars:
+        return [turn]
+    for sep in ("\n\n", "\n"):
+        parts = turn.split(sep)
+        if len(parts) > 1:
+            out, cur = [], ""
+            for p in parts:
+                if cur and len(cur) + len(sep) + len(p) > max_chars:
+                    out.append(cur)
+                    cur = p
+                else:
+                    cur = f"{cur}{sep}{p}" if cur else p
+            out.append(cur)
+            return [q for piece in out for q in _split_long(piece, max_chars)]
+    return [turn[i:i + max_chars] for i in range(0, len(turn), max_chars)]
+
 def chunk_transcript(transcript: str, max_chars: int = MAX_CHARS) -> list[str]:
     """Split a long transcript on turn boundaries so each chunk fits in one request."""
     if len(transcript) <= max_chars:
         return [transcript]
-    turns = transcript.split("\n---\n")
+    sep = "\n---\n"
+    turns = [piece for turn in transcript.split(sep) for piece in _split_long(turn, max_chars)]
     chunks, cur = [], ""
     for turn in turns:
-        if cur and len(cur) + len(turn) > max_chars:
+        if cur and len(cur) + len(sep) + len(turn) > max_chars:   # the separator counts too
             chunks.append(cur)
             cur = turn
         else:
-            cur = f"{cur}\n---\n{turn}" if cur else turn
+            cur = f"{cur}{sep}{turn}" if cur else turn
     if cur:
         chunks.append(cur)
     return chunks
@@ -209,8 +261,13 @@ DUP_NOTE_THRESHOLD = 0.30
 _NOTE_INDEX = None
 
 
+WORD = re.compile(r"[^\W_]+")   # letters and digits in any script: the vault is bilingual
+
+
 def _nwords(s: str) -> set:
-    return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower())
+    # [a-z0-9]+ reduced a Russian note to its few Latin tool names, so unrelated notes that
+    # mention the same tools scored as near-duplicates and a purely Cyrillic one scored as nothing.
+    return {w for w in WORD.findall((s or "").lower())
             if len(w) > 3 and w not in _NSTOP}
 
 
@@ -262,13 +319,11 @@ def remember_note(title: str, body: str, tags):
     _note_index().append((stem, _nwords(stem), _nwords(body), set(tags or [])))
 
 def write_atomic_note(note: dict, src: Path, date: str, dry: bool) -> str | None:
-    title = (note.get("title") or "").strip()
-    body = (note.get("body") or "").strip()
+    title = as_text(note.get("title"))
+    body = as_text(note.get("body"))
     if not title or not body:
         return None
-    tags = note.get("tags") or []
-    if not isinstance(tags, list):
-        tags = [str(tags)]
+    tags = clean_tags(note.get("tags") or [])
     fname = sanitize(title) + ".md"
     dest = NOTES_DIR / fname
     if dest.exists():
@@ -278,14 +333,14 @@ def write_atomic_note(note: dict, src: Path, date: str, dry: bool) -> str | None
     if near:
         sim_line = f"similar_to: \"[[{near[0]}]]\"\nsimilarity: {near[1]:.2f}\n"
         print(f"  ! near-duplicate of an existing note ({near[1]:.0%}): {near[0][:60]}")
-    tag_lines = "\n".join(f"  - {t}" for t in (["claude/extracted"] + [str(t) for t in tags]))
+    tag_lines = "\n".join(f"  - {t}" for t in (["claude/extracted"] + tags))
     # How this claim decays. Notes carrying operational state read exactly like notes carrying
     # principles, so a vault silently accumulates confident statements that stopped being true
     # months ago — in the vault this came from, notes asserting "UNCOMMITTED" were wrong by the time anyone
     # relied on them. Recording shelf life at write time is the only cheap moment to do it;
     # nobody classifies 954 notes later. "unknown" when the model declines to choose, so the
     # gap stays visible instead of defaulting into a lie.
-    vol = str(note.get("volatility") or "").strip().lower()
+    vol = as_text(note.get("volatility")).lower()
     if vol not in ("timeless", "dated", "live"):
         vol = "unknown"
     content = (
@@ -351,11 +406,13 @@ def main():
         date = date.group(0) if date else datetime.now().strftime("%Y-%m-%d")
         try:
             notes = extract_notes_from(transcript, args.model)
+            # Inside the try: one bad item (an unwritable name, an odd field) fails this
+            # conversation, reported and retried, instead of killing the run before any checkpoint.
+            written = [w for n in notes if (w := write_atomic_note(n, src, date, args.dry_run))]
         except Exception as e:
             print(f"  ! skipped ({e})")
             failed.append(src.name)      # not recorded in state, so the next run retries it
             continue
-        written = [w for n in notes if (w := write_atomic_note(n, src, date, args.dry_run))]
         total_notes += len(written)
         processed += 1
         if not args.dry_run:

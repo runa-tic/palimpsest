@@ -25,8 +25,9 @@ from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-# The model call is extract_notes.py's, so both extractors run it the same guarded way.
-from extract_notes import run_claude
+# The model call, chunking and field hygiene are extract_notes.py's. Two copies of each meant
+# every defect in them was found twice and, as often, fixed once.
+from extract_notes import sanitize, as_text, clean_tags, run_claude, chunk_transcript, WORD
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -47,8 +48,6 @@ try:
 except Exception:
     DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
-INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-MAX_CHARS = 350_000
 
 PROMPT = """You are mining a saved Claude Code session to grow a self-improving SKILL memory
 (reusable procedures an agent consults to ACT — distinct from facts it recalls to answer).
@@ -81,12 +80,6 @@ The conversation transcript follows after the line "===CONVERSATION===".
 """
 
 
-def sanitize(name: str, maxlen: int = 90) -> str:
-    name = INVALID.sub(" ", name or "").strip()
-    name = re.sub(r"\s+", " ", name)
-    return (name[:maxlen].rstrip() or "Untitled")
-
-
 def load_state() -> dict:
     if STATE_FILE.exists():
         try:
@@ -102,22 +95,6 @@ def save_state(state: dict):
 
 def call_claude(transcript: str, model: str) -> str:
     return run_claude(PROMPT + "\n===CONVERSATION===\n" + transcript, model)
-
-
-def chunk_transcript(transcript: str, max_chars: int = MAX_CHARS) -> list[str]:
-    if len(transcript) <= max_chars:
-        return [transcript]
-    turns = transcript.split("\n---\n")
-    chunks, cur = [], ""
-    for turn in turns:
-        if cur and len(cur) + len(turn) > max_chars:
-            chunks.append(cur)
-            cur = turn
-        else:
-            cur = f"{cur}\n---\n{turn}" if cur else turn
-    if cur:
-        chunks.append(cur)
-    return chunks
 
 
 def parse_skills(raw: str) -> list[dict]:
@@ -182,8 +159,15 @@ _INDEX: list[tuple[str, set]] | None = None
 
 
 def _words(s: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower())
+    # Any script, not [a-z0-9]: that reduced a Russian skill to the tool names it mentions, so two
+    # different procedures about pm2 and ecosystem.config.js scored 0.75 and the second was dropped.
+    return {w for w in WORD.findall((s or "").lower())
             if len(w) > 3 and w not in _STOP}
+
+
+# Below this many content words Jaccard is noise (3 shared words of 4 is "75% the same"), and a
+# false match here silently drops a skill for good, so a short candidate is never blocked.
+MIN_DUP_WORDS = 6
 
 
 def _proposal_index() -> list[tuple[str, set]]:
@@ -203,8 +187,8 @@ def _proposal_index() -> list[tuple[str, set]]:
 
 def near_duplicate_of(skill: dict, threshold: float) -> str | None:
     """Title of an existing proposal saying the same thing, or None."""
-    cand = _words(f"{skill.get('name', '')} {skill.get('steps', '')} {skill.get('why', '')}")
-    if not cand:
+    cand = _words(f"{skill.get('name', '')} {skill.get('steps', '')} {as_text(skill.get('why'))}")
+    if len(cand) < MIN_DUP_WORDS:
         return None
     for title, w in _proposal_index():
         if w and len(cand & w) / len(cand | w) >= threshold:
@@ -215,20 +199,38 @@ def near_duplicate_of(skill: dict, threshold: float) -> str | None:
 def remember_proposal(skill: dict, title: str):
     """Add a just-written proposal to the index so the NEXT chunk can't re-propose it."""
     _proposal_index().append(
-        (title, _words(f"{skill.get('name', '')} {skill.get('steps', '')} {skill.get('why', '')}")))
+        (title, _words(f"{skill.get('name', '')} {skill.get('steps', '')} {as_text(skill.get('why'))}")))
+
+
+def split_steps(steps: str) -> list[str]:
+    """One bullet per step: split on newlines and on "; ", but never inside a `code span`. Every
+    ';' used to split, which cut `for f in *.log; do gzip "$f"; done` into three bullets with
+    unbalanced backticks and PATH=C:\\bin;%PATH% into two."""
+    out = []
+    for line in steps.split("\n"):
+        cur = ""
+        for part in re.split(r"(`[^`\n]*`)", line):
+            if len(part) > 1 and part.startswith("`") and part.endswith("`"):
+                cur += part
+                continue
+            pieces = re.split(r";\s+", part)
+            for piece in pieces[:-1]:
+                out.append(cur + piece)
+                cur = ""
+            cur += pieces[-1]
+        out.append(cur)
+    return [s.strip() for s in out if s.strip()]
 
 
 def write_proposed_skill(skill: dict, src: Path, date: str, dry: bool,
                          dup_threshold: float = 0.45) -> str | None:
-    name = (skill.get("name") or "").strip()
-    steps = (skill.get("steps") or "").strip()
+    name = as_text(skill.get("name"))
+    steps = as_text(skill.get("steps"))
     if not name or not steps:
         return None
-    when = (skill.get("when_to_use") or "").strip()
-    why = (skill.get("why") or "").strip()
-    tags = skill.get("tags") or []
-    if not isinstance(tags, list):
-        tags = [str(tags)]
+    when = re.sub(r"\s+", " ", as_text(skill.get("when_to_use")))
+    why = as_text(skill.get("why"))
+    tags = clean_tags(skill.get("tags") or [])
     fname = sanitize(name) + ".md"
     dest = PROPOSED_DIR / fname
     if dest.exists():
@@ -238,15 +240,17 @@ def write_proposed_skill(skill: dict, src: Path, date: str, dry: bool,
         print(f"  ~ skip (says the same as an existing proposal): {name[:56]}")
         print(f"      existing: {dup[:70]}")
         return None
-    tag_lines = "\n".join(f"  - {t}" for t in (["skill/proposed"] + [str(t) for t in tags]))
-    steps_md = "\n".join(f"- {part.strip()}" for part in re.split(r"\n|;\s*", steps) if part.strip())
+    tag_lines = "\n".join(f"  - {t}" for t in (["skill/proposed"] + tags))
+    steps_md = "\n".join(f"- {part}" for part in split_steps(steps))
     content = (
         "---\n"
         "type: skill\n"
         "status: proposed\n"
         f"created: {date}\n"
         f"source: \"[[{conversation_link(src)}]]\"\n"
-        f"trigger: \"{when}\"\n"
+        # A JSON string is a valid YAML double-quoted scalar: a quote or a C:\\Users path in the
+        # trigger, written raw, made the whole frontmatter unparseable.
+        f"trigger: {json.dumps(when, ensure_ascii=False)}\n"
         "tags:\n"
         f"{tag_lines}\n"
         "---\n\n"
@@ -305,12 +309,13 @@ def main():
         date = m.group(0) if m else datetime.now().strftime("%Y-%m-%d")
         try:
             skills = extract_skills_from(transcript, args.model)
+            # Inside the try, as in extract_notes: one bad item fails this conversation only.
+            written = [w for s in skills
+                       if (w := write_proposed_skill(s, src, date, args.dry_run, args.dup_threshold))]
         except Exception as e:
             print(f"  ! skipped ({e})")
             failed.append(src.name)      # not recorded in state, so the next run retries it
             continue
-        written = [w for s in skills
-                   if (w := write_proposed_skill(s, src, date, args.dry_run, args.dup_threshold))]
         total += len(written)
         processed += 1
         if not args.dry_run:

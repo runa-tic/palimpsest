@@ -35,7 +35,7 @@ Usage:
   python tools/triage_skills.py --batch 12
 """
 from __future__ import annotations
-import sys, re, argparse
+import sys, re, json, argparse
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
@@ -60,8 +60,16 @@ def parse(path: Path) -> dict:
     txt = path.read_text(encoding="utf-8", errors="ignore")
     fm = re.match(r"---\n(.*?)\n---", txt, re.DOTALL)
     front = fm.group(1) if fm else ""
-    m = re.search(r"^trigger:\s*\"?(.*?)\"?\s*$", front, re.M)
-    trigger = m.group(1).strip() if m else ""
+    m = re.search(r"^trigger:\s*(.*?)\s*$", front, re.M)
+    trigger = m.group(1) if m else ""
+    if trigger.startswith('"'):
+        # extract_skills writes the trigger JSON-escaped (a valid YAML double-quoted scalar);
+        # older proposals hold it raw between quotes, which json cannot always read.
+        try:
+            trigger = json.loads(trigger)
+        except ValueError:
+            trigger = trigger[1:-1] if len(trigger) > 1 and trigger.endswith('"') else trigger[1:]
+    trigger = trigger.strip()
     m = re.search(r"^source:\s*\"?\[\[(.+?)\]\]", front, re.M)
     source = m.group(1).strip() if m else ""
     m = re.search(r"^created:\s*(\S+)", front, re.M)
