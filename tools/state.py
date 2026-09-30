@@ -857,12 +857,14 @@ def _vault_push(*extra: str) -> int:
     return p.returncode
 
 
+STATION_DESC = "which machine holds the vault for hand-written work"
+
+
 def cmd_station(args):
     """One writer at a time for hand-written content when a vault is worked from two machines.
     The lease is a ledger fact, so every take, takeover and release is dated and sourced. `take`
     pulls first and pushes the lease; `release` pushes everything, then frees the lease. It is a
     convention the ledger records, not a lock git enforces: vault_push does not refuse commits."""
-    ensure_entity("station", "flag", "which machine holds the vault for hand-written work")
     facts, _ = load_facts()
     holder, since = _lease(fold(facts))
     if args.action == "show":
@@ -879,6 +881,9 @@ def cmd_station(args):
                 sys.exit(1)
             facts, _ = load_facts()
             holder, since = _lease(fold(facts))
+        # Registered only after the pull: written before it, an untracked State/entities.json on a
+        # machine that had not yet pulled the registry made the pull refuse to overwrite it.
+        ensure_entity("station", "flag", STATION_DESC)
         if holder == MACHINE:
             print(f"station: already held by this machine since {local(since)}")
         else:
@@ -905,6 +910,7 @@ def cmd_station(args):
         if rc != 0:
             print("station release: the push did not complete — NOT releasing; fix the message above and rerun")
             sys.exit(rc)
+        ensure_entity("station", "flag", STATION_DESC)
         append(make_fact("station", "active", "free", "asserted", f"station:release@{MACHINE}",
                          [f"station release on {MACHINE}"], None, f"released by {MACHINE}"))
         refold()
