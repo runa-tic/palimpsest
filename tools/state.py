@@ -56,7 +56,7 @@ The value recorded is the command's first line of output; a non-zero exit record
 recorded and the throttle stays open: a laptop's DNS outage is not a fact about the server.
 """
 from __future__ import annotations
-import sys, os, re, json, hashlib, argparse, subprocess, socket
+import sys, os, re, json, hashlib, argparse, subprocess, socket, stat, tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -154,7 +154,9 @@ def hours_since(iso_s: str | None) -> float:
 def load_entities() -> tuple[dict, dict, dict]:
     if not ENTITIES.exists():
         return {}, {}, {}
-    reg = json.loads(ENTITIES.read_text(encoding="utf-8"))
+    # utf-8-sig: a registry saved by Windows Notepad starts with a BOM, which json.loads rejects,
+    # and every command crashed on it; facts.jsonl and proposed.jsonl are read the same way.
+    reg = json.loads(ENTITIES.read_text(encoding="utf-8-sig"))
     kinds, ents = reg.get("kinds", {}), reg.get("entities", {})
     alias = {}
     for eid, e in ents.items():
@@ -165,13 +167,38 @@ def load_entities() -> tuple[dict, dict, dict]:
 
 
 def save_entities(reg: dict) -> None:
+    """Write a temp file, then rename it over entities.json. Rewriting in place left a truncated
+    registry when the write was cut short (a sync step timeout, a full disk), and every command
+    then crashed on it. The temp file sits in tools/logs/ (gitignored, same filesystem), so one
+    orphaned by a kill is never committed as ledger content."""
     STATE.mkdir(parents=True, exist_ok=True)
-    ENTITIES.write_text(json.dumps(reg, indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    tmp_dir = TOOLS / "logs"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(ENTITIES.stat().st_mode)
+    except OSError:
+        mask = os.umask(0)
+        os.umask(mask)
+        mode = 0o666 & ~mask
+    fd, tmp = tempfile.mkstemp(dir=str(tmp_dir), prefix="entities.json.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(reg, indent=1, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, ENTITIES)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def ensure_entity(eid: str, kind: str, desc: str = "") -> None:
     """Register a built-in probe's entity on first use, so a fresh vault needs no setup for them."""
-    reg = json.loads(ENTITIES.read_text(encoding="utf-8")) if ENTITIES.exists() else {}
+    reg = json.loads(ENTITIES.read_text(encoding="utf-8-sig")) if ENTITIES.exists() else {}
     reg.setdefault("kinds", dict(DEFAULT_KINDS))
     ents = reg.setdefault("entities", {})
     if eid not in ents:
@@ -187,7 +214,8 @@ def load_facts(path: Path = FACTS) -> tuple[list[dict], int]:
     facts, bad = [], 0
     if not path.exists():
         return facts, bad
-    for ln in path.read_text(encoding="utf-8").splitlines():
+    # utf-8-sig: behind a BOM the first line did not parse and the first fact silently counted as bad.
+    for ln in path.read_text(encoding="utf-8-sig").splitlines():
         ln = ln.strip()
         if not ln:
             continue
@@ -636,7 +664,7 @@ def cmd_accept(args):
 
 
 def cmd_register(args):
-    reg = json.loads(ENTITIES.read_text(encoding="utf-8")) if ENTITIES.exists() else {}
+    reg = json.loads(ENTITIES.read_text(encoding="utf-8-sig")) if ENTITIES.exists() else {}
     reg.setdefault("kinds", dict(DEFAULT_KINDS))
     reg.setdefault("entities", {})
     e = reg["entities"].get(args.id, {})
