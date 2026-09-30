@@ -17,6 +17,16 @@ the scanners as the pre-commit hook runs them, each against a throwaway vault.
 10. Staged files under .obsidian/, _media/, node_modules/ are scanned.
 11. A deny-listed name of three words blocks a commit.
 12. A deny-listed phone number blocks a commit in any separator spelling, and is redacted so.
+
+Rework after the review of fix/scanners (2026-09-30):
+13. A deny list that MIXES encodings (UTF-8 plus an appended cp1252 line, UTF-8 plus an appended
+    UTF-16 section with its BOM mid-file, even mid-line) keeps every term; scan_pii blocks while the
+    list is not clean UTF-8, names the lines by number only, and never passes a listed term.
+14. An OpenAI key right after a literal JSON escape (\\n, \\t) is redacted and blocked.
+15. A staged file over 5MB is not read into the hook, and is listed as NOT scanned by both guards.
+16. The JSON-escaped AWS secret access key is redacted and blocked, and its label survives.
+17. A private key quoted with "> " on every line (a thinking callout) is redacted whole.
+18. A phone-shaped term does not match inside a longer run of digits (a Telegram id).
 """
 import os, shutil, subprocess, sys
 import _util
@@ -177,6 +187,96 @@ def main() -> int:
     out = redact(v12, "ring 1-555-010077 or +1 555 0100 77 today\n")
     c.ok(r.returncode == 1 and "0100" not in out and "today" in out,
          "a deny-listed phone number blocks and is redacted in any separator spelling", r.stdout + out)
+
+    # 13. mixed-encoding deny lists: no term is lost, and scan_pii fails closed with line numbers
+    bad = []
+    mixed = {
+        # PowerShell 5.1 Add-Content appends in the ANSI codepage to the UTF-8 file setup writes
+        "utf-8 + cp1252 line": ("Сидорова\nPetrovsky\n".encode() + "Müller\n".encode("cp1252"),
+                                ["Сидорова", "Petrovsky", "Müller"], True),
+        # PowerShell 5 `>>` appends UTF-16 with a BOM; also to a file with no final newline
+        "utf-8 + utf-16 section": ("Сидорова\nAlpha\n".encode() + "Petrovsky\r\nИванова\r\n".encode("utf-16"),
+                                   ["Сидорова", "Alpha", "Petrovsky", "Иванова"], False),
+        "utf-8 (no newline) + utf-16": ("Сидорова\nAlpha".encode() + "Petrovsky\r\n".encode("utf-16"),
+                                        ["Сидорова", "Alpha", "Petrovsky"], False),
+        "utf-8 + bomless utf-16le": ("Alpha\n".encode() + "Kowalski\r\nИванова\r\n".encode("utf-16-le"),
+                                     ["Alpha", "Kowalski", "Иванова"], False),
+    }
+    for name, (raw, terms, unclean) in mixed.items():
+        vd = pii_vault(raw)
+        out = redact(vd, " / ".join(f"met {t} today" for t in terms) + "\n")
+        missed = [t for t in terms if t in out]
+        if missed or "STDERR" in out:
+            bad.append((name, "redact", missed, out[-200:]))
+        for t in terms:           # every term blocks on its own, in a note written by hand
+            write(vd, "10 Notes/n.md", f"met {t} today\n")
+            git(vd, "add", "10 Notes/n.md")
+            p = run(vd, "scan_pii.py")
+            if p.returncode != 1 or "Traceback" in p.stderr or t in p.stdout:
+                bad.append((name, "scan_pii", t, p.returncode, p.stdout[-200:], p.stderr[-200:]))
+        write(vd, "10 Notes/n.md", "nothing listed here\n")
+        git(vd, "add", "10 Notes/n.md")
+        p = run(vd, "scan_pii.py")
+        want = (1, "not clean UTF-8") if unclean else (0, "clean")
+        if p.returncode != want[0] or want[1] not in p.stdout or (unclean and "line 3" not in p.stdout):
+            bad.append((name, "scan_pii clean note", p.returncode, p.stdout[-300:], p.stderr[-200:]))
+    c.ok(not bad, "a deny list mixing UTF-8 with cp1252 or UTF-16 keeps every term; unclean lists block",
+         repr(bad)[:1200])
+
+    # 14. OpenAI key after a literal JSON escape
+    keys = ["sk-proj-" + "Ab3dEf9hIj" * 4, "sk-proj-Ab3d-f9hIj_" + B64]
+    texts = [f'{{"keys": "a\\n{k}", "t": "b\\t{k}"}}' for k in keys]
+    outs = [redact(v, t + "\n") for t in texts]
+    r = scan_path(v, "\n".join(texts) + "\n")
+    c.ok(all(k[-10:] not in o for k, o in zip(keys, outs)) and r.returncode == 1
+         and r.stdout.count("OpenAI key") == 2,
+         "an OpenAI key right after a literal \\n or \\t escape is redacted and blocked",
+         "\n".join(outs) + r.stdout)
+
+    # 15. an oversize staged file is not read, and is listed as NOT scanned by both guards
+    v15 = pii_vault(b"Zelenskaya\n")
+    (v15 / "10 Notes" / "_media").mkdir(parents=True)
+    (v15 / "10 Notes" / "_media" / "video.mp4").write_bytes(os.urandom(6_000_000))
+    write(v15, "10 Notes/n.md", f"aws {AKIA}\n")
+    git(v15, "add", "-A")
+    rs = run(v15, "scan_secrets.py")
+    rp = run(v15, "scan_pii.py")
+    c.ok(rs.returncode == 1 and "NOT scanned" in rs.stdout and "video.mp4" in rs.stdout
+         and "AWS access key id" in rs.stdout and "video.mp4" in rp.stdout,
+         "a staged file over 5MB is listed as NOT scanned (not read), and the rest still blocks",
+         f"{rs.stdout}\n{rp.stdout}")
+
+    # 16. AWS secret key in escaped JSON (tool output); the label stays readable
+    sak = "wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCYQZXW" + "zzzzzz"
+    esc = f'{{\\"SecretAccessKey\\": \\"{sak}\\"}}'
+    out = redact(v, f"{esc}\n{{\"SecretAccessKey\": \"{sak}\"}}\n")
+    r = scan_path(v, esc + "\n")
+    c.ok(sak not in out and out.count("SecretAccessKey") == 2 and r.returncode == 1
+         and "AWS secret access key" in r.stdout,
+         "a JSON-escaped AWS secret access key is redacted (label kept) and blocked", out + r.stdout)
+
+    # 17. a key quoted in a callout: every line prefixed "> "
+    lines_ = [f"{dashes}BEGIN PGP PRIVATE KEY BLOCK{dashes}", "Comment: synthetic", ""] + body + [
+        "=Ab1c", f"{dashes}END PGP PRIVATE KEY BLOCK{dashes}"]
+    pem = [f"{dashes}BEGIN OPENSSH PRIVATE KEY{dashes}"] + body + [f"{dashes}END OPENSSH PRIVATE KEY{dashes}"]
+    outs = [redact(v, "> [!thinking]\n" + "\n".join(("> " + ln).rstrip() for ln in ls) + "\n> after\n")
+            for ls in (lines_, pem)]
+    c.ok(all(not any(b in o for b in body) and "=Ab1c" not in o and "> after" in o for o in outs),
+         "a private key quoted with '> ' on every line is redacted as a whole block", "\n".join(outs))
+
+    # 18. a phone-shaped term is its own number, not any digit run that contains it
+    v18 = pii_vault(b"555-0100-77\n")
+    write(v18, "10 Notes/n.md", "chat id 9555010077123 and timestamp 15550100771\n")
+    git(v18, "add", "-A")
+    quiet = run(v18, "scan_pii.py")
+    write(v18, "10 Notes/n.md", "call (555) 0100 77\n")
+    git(v18, "add", "-A")
+    loud = run(v18, "scan_pii.py")
+    out = redact(v18, "id 9555010077123 / call 555.0100.77\n")
+    c.ok(quiet.returncode == 0 and loud.returncode == 1 and "9555010077123" in out and "0100.77" not in out,
+         "a phone-shaped term blocks its own number but not a longer digit run containing it",
+         quiet.stdout + loud.stdout + out)
+
     for d in VAULTS:
         shutil.rmtree(d, ignore_errors=True)
     return c.done()
