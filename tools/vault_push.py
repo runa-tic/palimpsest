@@ -172,6 +172,14 @@ def release_lock() -> None:
     except FileNotFoundError: pass
 
 
+def _present(rel: str) -> bool:
+    """On disk OR tracked. Checking only the disk skipped a content directory that had been
+    deleted whole, so its deletions were never staged and the run said "nothing new to commit"
+    (review, 2026-09-30). `git add -A -- <gone but tracked dir>` stages them fine; only a path
+    git has never seen would make `git add` fail, and ls-files keeps those out."""
+    return (VAULT / rel).exists() or bool(git("ls-files", "--", rel).stdout.strip())
+
+
 def main() -> int:
     if not (VAULT / ".git").exists():
         print("not a git repo — nothing to do")
@@ -215,7 +223,7 @@ def _run() -> int:
         print(f"vault-push: {msg}")
         return 0 if ok else 1
 
-    existing = [p for p in CONTENT if (VAULT / p).exists()]
+    existing = [p for p in CONTENT if _present(p)]
     # Drop gitignored paths BEFORE staging. `git add` fails outright when handed an ignored
     # path, so one ignored directory meant nothing at all got staged and the whole nightly
     # backup failed — while still reporting a tidy "nothing to commit". Worse, an ignored
@@ -235,7 +243,7 @@ def _run() -> int:
     st = git("status", "--porcelain", "--", *existing)
     changed = [l for l in st.stdout.splitlines() if l.strip()]
 
-    code_paths = [c for c in CODE if (VAULT / c).exists()]
+    code_paths = [c for c in CODE if _present(c)]
     code_st = git("status", "--porcelain", "--", *code_paths) if code_paths else None
     code_changed = [l for l in code_st.stdout.splitlines() if l.strip()] if code_st else []
     if args.code and code_changed:
