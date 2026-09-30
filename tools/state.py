@@ -655,6 +655,12 @@ def local_network_up(hosts: list[str] | None = None) -> bool:
             with socket.create_connection((host, 443), timeout=5) as sock:
                 with ctx.wrap_socket(sock, server_hostname=host):
                     return True
+        except ssl.SSLCertVerificationError:
+            # A peer answered with a certificate chain, which a local TUN proxy with nothing
+            # upstream cannot do; only this machine cannot verify it (a python.org build with
+            # no CA store, a TLS-inspecting proxy). Reading that as "network down" meant no
+            # failed probe was ever recorded on such a machine.
+            return True
         except (OSError, ssl.SSLError):
             continue
     return False
