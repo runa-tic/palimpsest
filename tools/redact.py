@@ -27,7 +27,7 @@ Idempotent: replacements leave a [redacted] marker the rules don't re-match, so 
 recorder can re-run every turn without compounding.
 """
 from __future__ import annotations
-import re
+import codecs, re, sys
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
@@ -45,28 +45,55 @@ except Exception:
     _CRED = []
 
 
+_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),   # before UTF-16: same lead
+          (codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
+_warned = False
+
+
+def _deny_texts(raw: bytes) -> list[str]:
+    """The deny list as text, whatever Windows saved it as. A strict UTF-8 read raised on UTF-16
+    (PowerShell 5 `>`) or ANSI (Notepad), which the recorder swallowed and wrote the note with NO
+    redaction, credentials included; a UTF-8 BOM silently disabled the first term (review,
+    2026-09-30). Not UTF-8 and no BOM: cp1251 or cp1252 cannot be told apart, so both readings are
+    denied; the wrong one only adds a term nobody writes."""
+    global _warned
+    for bom, enc in _BOMS:
+        if raw.startswith(bom):
+            return [raw.decode(enc, errors="replace")]
+    try:
+        return [raw.decode("utf-8")]
+    except UnicodeDecodeError:
+        if not _warned:
+            _warned = True
+            sys.stderr.write(f"redact: {DENY_FILE.name} is not UTF-8; reading it as cp1251 and as cp1252."
+                             " Re-save it as UTF-8.\n")
+        return [raw.decode(enc, errors="replace") for enc in ("cp1251", "cp1252")]
+
+
 def _load_deny() -> tuple[list[str], list[re.Pattern]]:
     literals: list[str] = []
     regexes: list[re.Pattern] = []
     if not DENY_FILE.exists():
         return literals, regexes
     try:
-        lines = DENY_FILE.read_text(encoding="utf-8").splitlines()
+        texts = _deny_texts(DENY_FILE.read_bytes())
     except OSError:
         return literals, regexes
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("re:"):
-            pat = line[3:].strip()
-            if pat:
-                try:
-                    regexes.append(re.compile(pat, re.I))
-                except re.error:
-                    pass  # a bad pattern shouldn't break the whole pass
-        else:
-            literals.append(line)
+    for text in texts:
+        # NULs: UTF-16 appended to a UTF-8 file (PowerShell 5 `>>`); U+FEFF: a BOM mid-file.
+        for line in text.replace("\x00", "").replace("\ufeff", "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("re:"):
+                pat = line[3:].strip()
+                if pat and pat not in (r.pattern for r in regexes):
+                    try:
+                        regexes.append(re.compile(pat, re.I))
+                    except re.error:
+                        pass  # a bad pattern shouldn't break the whole pass
+            elif line not in literals:
+                literals.append(line)
     return literals, regexes
 
 
@@ -94,7 +121,11 @@ def redact_text(s: str) -> tuple[str, int]:
     for rx in _CRED:
         s, k = rx.subn(MARK, s)
         n += k
-    literals, regexes = _load_deny()
+    try:
+        literals, regexes = _load_deny()
+    except Exception as e:   # keep the credential pass above: the caller would write the raw text
+        sys.stderr.write(f"redact: deny list unreadable ({type(e).__name__}); credentials only\n")
+        return s, n
     for rx in regexes:
         s, k = rx.subn(MARK, s)
         n += k
