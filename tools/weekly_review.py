@@ -8,9 +8,9 @@ are kept. Wired into sync.py.
 Usage (from vault root):  python tools/weekly_review.py
 """
 from __future__ import annotations
-import sys, re, time
+import sys, re, time, subprocess
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -27,10 +27,58 @@ START, END = "<!-- weekly:start -->", "<!-- weekly:end -->"
 PAIR = re.compile(re.escape(START) + r"(?:(?!" + re.escape(START) + r").)*?" + re.escape(END), re.DOTALL)
 REFLECTION = "## ✍️ Reflection\n- What did I learn? What's the one thing to push next week?\n"
 
-def recent(folder: Path, days=7, recurse=False):
+def git_times(folder: Path, first: bool) -> dict[Path, float]:
+    """Commit time per file under folder: when it was first added, or last changed."""
+    try:
+        r = subprocess.run(["git", "-c", "core.quotePath=false", "log", "--format=@%ct", "--name-only",
+                            "--relative", *(["--diff-filter=A"] if first else []), "--",
+                            str(folder.relative_to(VAULT))], cwd=VAULT, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out, ts = {}, None
+    for line in r.stdout.splitlines() if r.returncode == 0 else []:
+        if line.startswith("@"):
+            ts = float(line[1:])
+        elif line and ts is not None and (first or VAULT / line not in out):
+            out[VAULT / line] = ts          # log is newest first: first=True keeps the oldest
+    return out
+
+def recent(folder: Path, days=7, recurse=False, keys=("created",), first=True):
+    """Files dated within the last `days`.
+
+    Not by mtime: a clone, or a pull that rewrites a file, sets it to the checkout time, so on the
+    second machine every old note was "new this week" and the two machines committed different
+    reviews. The date is the frontmatter's (`keys`, in order), else the filename's leading date,
+    else git history (first add, or last commit), and mtime only for a file git has never seen.
+    """
+    since = date.today() - timedelta(days=days)
     cutoff = time.time() - days * 86400
     it = folder.rglob("*.md") if recurse else folder.glob("*.md")
-    return [p for p in it if not p.name.startswith("_") and p.stat().st_mtime >= cutoff]
+    out, gt = [], None
+    for p in it:
+        if p.name.startswith("_"):
+            continue
+        with p.open(encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(1500).lstrip("\ufeff")          # transcripts are large; the header is enough
+        fm = re.match(r"---\n(.*?)\n---", head, re.DOTALL)
+        found = [re.search(rf"^{k}:\s*[\"']?(\d{{4}}-\d{{2}}-\d{{2}})", fm.group(1), re.M)
+                 for k in keys] if fm else []
+        found.append(re.match(r"(\d{4}-\d{2}-\d{2})", p.stem))
+        d = next((m.group(1) for m in found if m), None)
+        try:
+            day = date.fromisoformat(d) if d else None
+        except ValueError:
+            day = None
+        if day:
+            if day >= since:
+                out.append(p)
+            continue
+        if gt is None:
+            gt = git_times(folder, first)
+        if gt.get(p, p.stat().st_mtime) >= cutoff:
+            out.append(p)
+    return out
 
 TASK = re.compile(r"^\s*- \[ \] (.+)$", re.M)
 
@@ -72,7 +120,9 @@ def main():
     out = VAULT / "Reviews" / "Weekly" / f"{tag}.md"
 
     new_notes = sorted(p.stem for p in recent(NOTES))
-    new_convs = sorted((p.stem for p in recent(CONVS, recurse=True)), reverse=True)
+    # A conversation counts in the week it was last active, not only the week it started.
+    new_convs = sorted((p.stem for p in recent(CONVS, recurse=True, keys=("ended", "date"), first=False)),
+                       reverse=True)
 
     projects = []
     for p in PROJECTS.glob("*.md"):
