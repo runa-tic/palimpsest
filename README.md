@@ -56,6 +56,11 @@ What took months was learning which of the obvious designs are wrong. Those are 
   commit hook, the one chokepoint every writer crosses.
 - **A sandbox that can call an LLM has egress**, so read scope is send scope. Blocking sockets
   contains nothing when the harness itself hands the sandboxed code a model call.
+- **A Python audit hook is not a boundary against code in the same interpreter.** Model-written
+  code rebound the hook's allowed roots and read outside the vault. On macOS the REPL now runs
+  under `sandbox-exec` (no network, no reads under `/Users` beyond the vault and the Python
+  install, no writes outside scratch); on Linux and Windows the hook — hardened, but in-process —
+  is all there is, and `rlm.py` says so when it starts.
 - **Generated blocks are not durable state.** The daily briefing is regenerated output; a
   checkbox ticked inside it is silently overwritten on the next run.
 - **Word overlap cannot see a reworded duplicate.** "GramJS FloodWaitError carries the wait
@@ -182,7 +187,8 @@ than a chatbot standing next to it.
 Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
 assume that. The two-machine sync, the state ledger and the reranked retrieval in this release
 were tested on macOS only (the test suite in `tests/` and a clean install); their Windows paths —
-hidden console windows, the git hook — have not been run yet. The skills extractor is disabled in the default pipeline — it burned most of a
+hidden console windows, the git hook — have not been run yet. `rlm.py`'s read confinement is
+OS-enforced on macOS only; elsewhere, treat the REPL as able to read what your user can. The skills extractor is disabled in the default pipeline — it burned most of a
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
 absence takes several nightly runs to drain. Embeddings are opt-in and CPU-bound. The default
