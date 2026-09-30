@@ -130,7 +130,7 @@ def coverage(model_name: str, files: list[Path]) -> float:
         return 0.0
     if not files:
         return 1.0
-    return sum(1 for p in files if p.resolve().relative_to(VAULT).as_posix() in have) / len(files)
+    return sum(1 for p in files if Index._rel(p) in have) / len(files)
 
 
 def use_model(name: str):
@@ -262,18 +262,24 @@ class Index:
 
     # ---- incremental build
     @staticmethod
-    def _rel(p: Path) -> str:
-        return p.resolve().relative_to(VAULT).as_posix()
+    def _rel(p: Path) -> str | None:
+        try:
+            return p.resolve().relative_to(VAULT).as_posix()
+        except ValueError:       # a symlink out of the vault (ask.gather drops those): not indexed
+            return None
 
     def _sync(self, files: list[Path], progress: bool):
         wanted: dict[str, tuple[Path, str, str]] = {}   # rel -> (path, sha, text)
         for p in files:
+            rel = self._rel(p)
+            if rel is None:
+                continue
             try:
                 raw = p.read_bytes()
             except OSError:
                 continue
-            wanted[self._rel(p)] = (p, hashlib.sha1(raw).hexdigest(),
-                                    strip_frontmatter(raw.decode("utf-8", "ignore")))
+            wanted[rel] = (p, hashlib.sha1(raw).hexdigest(),
+                           strip_frontmatter(raw.decode("utf-8", "ignore")))
 
         if not any(self._delta(wanted)):
             return
