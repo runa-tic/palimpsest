@@ -29,7 +29,9 @@ MOCS = VAULT / "60 Maps of Content"
 STOP = set("a an the of to in on for and or is are be not with from as at by it its this that than into".split())
 
 def words(s: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in STOP and len(w) > 3}
+    # Unicode word characters, not [a-z0-9]: the ASCII class dropped every Cyrillic title word,
+    # so a Russian note's title contributed nothing to related-note ranking.
+    return {w for w in re.findall(r"[^\W_]+", s.lower()) if w not in STOP and len(w) > 3}
 
 def frontmatter_tags(text: str) -> list[str]:
     """Tags from frontmatter, in BOTH YAML forms.

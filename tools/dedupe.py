@@ -26,10 +26,17 @@ STOP = set("a an the of to in on for and or is are be not with from as at by it 
            "you your our we my me but if then so can could should would will not no".split())
 
 def words(s: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in STOP and len(w) > 3}
+    # Unicode word characters: [a-z0-9] dropped every Cyrillic word, so all a Russian note had
+    # left was its English headings, every Russian pair scored 1.0 and one family swallowed them.
+    return {w for w in re.findall(r"[^\W_]+", s.lower()) if w not in STOP and len(w) > 3}
+
+# Boilerplate every note shares: heading lines, and the generated Related / Source sections
+# (links and "From conversation"). Left in, they are the overlap between any two notes.
+BOILER = re.compile(r"(?ms)^#{1,6} (?:Related|Source)\b.*?(?=^#{1,6} |\Z)|^#{1,6} [^\n]*$")
 
 def jaccard(a: set, b: set) -> float:
-    return len(a & b) / len(a | b) if (a or b) else 0.0
+    # 0 when EITHER side is empty: nothing to compare is not evidence of agreement.
+    return len(a & b) / len(a | b) if (a and b) else 0.0
 
 def load():
     notes = {}
@@ -43,7 +50,7 @@ def load():
         body = txt.split("---", 2)[-1]
         notes[f.stem] = {
             "title_w": words(f.stem),
-            "body_w": words(body),
+            "body_w": words(BOILER.sub("", body)),
             "tags": tags,
             "text": body,          # raw, for the semantic pass
         }
