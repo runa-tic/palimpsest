@@ -25,9 +25,11 @@ from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-# The model call, chunking and field hygiene are extract_notes.py's. Two copies of each meant
-# every defect in them was found twice and, as often, fixed once.
-from extract_notes import sanitize, as_text, clean_tags, run_claude, chunk_transcript, WORD
+# The checkpoint, lock, model call, chunking and field hygiene are extract_notes.py's. Two copies
+# of each meant every defect in them was found twice and, as often, fixed once.
+from extract_notes import (sanitize, read_state, write_state, open_state, hold_lock, content_sig,
+                           is_extracted, source_index, captured_block, as_text, clean_tags,
+                           run_claude, chunk_transcript, WORD)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -81,20 +83,15 @@ The conversation transcript follows after the line "===CONVERSATION===".
 
 
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+    return read_state(STATE_FILE)
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    write_state(STATE_FILE, state)
 
 
-def call_claude(transcript: str, model: str) -> str:
-    return run_claude(PROMPT + "\n===CONVERSATION===\n" + transcript, model)
+def call_claude(transcript: str, model: str, captured=()) -> str:
+    return run_claude(PROMPT + captured_block(captured) + "\n===CONVERSATION===\n" + transcript, model)
 
 
 def parse_skills(raw: str) -> list[dict]:
@@ -127,13 +124,13 @@ def parse_skills(raw: str) -> list[dict]:
     return data
 
 
-def extract_skills_from(transcript: str, model: str) -> list[dict]:
+def extract_skills_from(transcript: str, model: str, captured=()) -> list[dict]:
     seen, out = set(), []
     chunks = chunk_transcript(transcript)
     for i, ch in enumerate(chunks):
         if len(chunks) > 1:
             print(f"  · chunk {i + 1}/{len(chunks)} ({len(ch):,} chars)")
-        raw = call_claude(ch, model)
+        raw = call_claude(ch, model, [*captured, *(s["name"] for s in out)])
         for s in parse_skills(raw):
             key = (s.get("name") or "").strip().lower()
             if key and key not in seen:
@@ -223,7 +220,7 @@ def split_steps(steps: str) -> list[str]:
 
 
 def write_proposed_skill(skill: dict, src: Path, date: str, dry: bool,
-                         dup_threshold: float = 0.45) -> str | None:
+                         dup_threshold: float = 0.45, sig: str = "") -> str | None:
     name = as_text(skill.get("name"))
     steps = as_text(skill.get("steps"))
     if not name or not steps:
@@ -248,9 +245,10 @@ def write_proposed_skill(skill: dict, src: Path, date: str, dry: bool,
         "status: proposed\n"
         f"created: {date}\n"
         f"source: \"[[{conversation_link(src)}]]\"\n"
+        + (f"source_hash: {sig}\n" if sig else "")
         # A JSON string is a valid YAML double-quoted scalar: a quote or a C:\\Users path in the
         # trigger, written raw, made the whole frontmatter unparseable.
-        f"trigger: {json.dumps(when, ensure_ascii=False)}\n"
+        + f"trigger: {json.dumps(when, ensure_ascii=False)}\n"
         "tags:\n"
         f"{tag_lines}\n"
         "---\n\n"
@@ -291,27 +289,42 @@ def main():
         print(f"No conversation notes in {CONV_DIR}. Run import_claude.py first.")
         return
 
-    state = load_state()
+    if not hold_lock("extract_skills.lock"):
+        print("extract_skills: another extraction run holds the lock — skipping this one")
+        return
+    state = open_state(load_state, STATE_FILE, args.force)
+    # Promoted skills are moved up into Skills/ and keep their source: they count as taken too.
+    by_source = source_index(PROPOSED_DIR, PROPOSED_DIR.parent)
     processed = 0
     failed: list[str] = []
     total = 0
+    adopted = False
     for src in sources:
         key = str(src.relative_to(VAULT))
-        sig = f"{src.stat().st_mtime_ns}:{src.stat().st_size}"
-        if not args.force and state.get(key, {}).get("sig") == sig:
+        st = src.stat()
+        stat_sig = f"{st.st_mtime_ns}:{st.st_size}"
+        prev = state.get(key, {})
+        if not args.force and prev.get("stat") == stat_sig:
+            continue
+        transcript = src.read_text(encoding="utf-8")
+        transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
+        sig = content_sig(transcript)
+        from_here = by_source.get(src.stem, [])
+        if not args.force and is_extracted(prev, st, sig, {h for _, h in from_here}):
+            if not args.dry_run:
+                state[key] = {**prev, "sig": sig, "stat": stat_sig}
+                adopted = True
             continue
         if args.limit and processed >= args.limit:
             break
         print(f"• {src.name}")
-        transcript = src.read_text(encoding="utf-8")
-        transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
         m = re.search(r"\d{4}-\d{2}-\d{2}", src.name)
         date = m.group(0) if m else datetime.now().strftime("%Y-%m-%d")
         try:
-            skills = extract_skills_from(transcript, args.model)
+            skills = extract_skills_from(transcript, args.model, [n for n, _ in from_here])
             # Inside the try, as in extract_notes: one bad item fails this conversation only.
             written = [w for s in skills
-                       if (w := write_proposed_skill(s, src, date, args.dry_run, args.dup_threshold))]
+                       if (w := write_proposed_skill(s, src, date, args.dry_run, args.dup_threshold, sig))]
         except Exception as e:
             print(f"  ! skipped ({e})")
             failed.append(src.name)      # not recorded in state, so the next run retries it
@@ -319,10 +332,14 @@ def main():
         total += len(written)
         processed += 1
         if not args.dry_run:
-            state[key] = {"sig": sig, "proposed": written}
+            by_source.setdefault(src.stem, []).extend((Path(w).stem, sig) for w in written)
+            state[key] = {"sig": sig, "stat": stat_sig,
+                          "proposed": list(dict.fromkeys([*prev.get("proposed", []), *written]))}
             save_state(state)
         if not skills:
             print("  (no reusable procedures)")
+    if adopted:
+        save_state(state)
 
     print(f"\nDone. Processed {processed} conversation(s), proposed {total} skill(s) into Skills/_proposed/.")
     if total and not args.dry_run:
