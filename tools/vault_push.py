@@ -49,6 +49,14 @@ VAULT = TOOLS.parent
 # Generated or hand-written knowledge: safe to snapshot unattended.
 CONTENT = ["00 Inbox", "10 Notes", "20 Projects", "30 Areas", "40 Resources", "50 Archive",
            "60 Maps of Content", "Daily", "Reviews", "Skills", "Templates", "State"]
+# Per-machine renders inside a content folder. maintenance.py rewrites the whole dashboard, with a
+# minute timestamp and this machine's counts, at every session start, so two machines' renders
+# always differ: once one machine had pushed its render, the other's pull stopped on the autostash
+# and every later run refused on the unmerged path (review, 2026-09-30). They are never
+# committed, and a local render is set aside across a pull and put back — the next run re-renders
+# it anyway, so nothing a human wrote is at stake.
+PER_MACHINE = ["Reviews/Vault Health.md"]
+KEEP_OUT = [f":(exclude){p}" for p in PER_MACHINE]
 CODE_HINT = "tools"
 # Committed only with --code (the commit guards still run): tools and the root config files.
 CODE = ["tools", ".claude", "CLAUDE.md", ".gitignore", ".gitattributes"]
@@ -163,10 +171,42 @@ def branch() -> str:
     return git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
 
+def _set_aside() -> dict[str, bytes]:
+    """Take this machine's uncommitted PER_MACHINE renders out of the pull's way: back to HEAD if
+    tracked, removed if not (an untracked render made the pull refuse to check out the other
+    machine's copy). Returns the bytes to put back."""
+    kept = {}
+    for rel in PER_MACHINE:
+        f = VAULT / rel
+        if not f.is_file() or not git("status", "--porcelain", "--", rel).stdout.strip():
+            continue
+        kept[rel] = f.read_bytes()
+        if git("cat-file", "-e", f"HEAD:{rel}").returncode == 0:
+            git("checkout", "HEAD", "--", rel)
+        else:
+            git("rm", "-q", "--cached", "--ignore-unmatch", "--", rel)
+            f.unlink()
+    return kept
+
+
 def pull_rebase(remote: str) -> tuple[bool, str]:
     """`git pull --rebase --autostash <remote> <branch>`. Returns (ok, one-line report). Never
     forces, never resolves: a conflicted rebase is aborted — git then re-applies the autostash —
-    and the file list is reported for a human."""
+    and the file list is reported for a human. This machine's PER_MACHINE renders sit out the
+    pull and come back after it, whatever it did."""
+    kept = _set_aside()
+    try:
+        return _pull_rebase(remote)
+    finally:
+        for rel, data in kept.items():
+            try:
+                (VAULT / rel).parent.mkdir(parents=True, exist_ok=True)
+                (VAULT / rel).write_bytes(data)
+            except OSError:
+                pass  # a render; the next maintenance run writes it again
+
+
+def _pull_rebase(remote: str) -> tuple[bool, str]:
     before = git("rev-parse", "HEAD").stdout.strip()
     stashes = len(git("stash", "list").stdout.splitlines())
     br = branch()
@@ -312,7 +352,7 @@ def _run() -> int:
     if not existing:
         print("vault-push: every content path is gitignored — nothing can be backed up")
         return 1
-    changed = status(*existing)
+    changed = status(*existing, *KEEP_OUT)
 
     code_paths = [c for c in CODE if _present(c)]
     code_changed = status(*code_paths) if code_paths else []
@@ -337,7 +377,7 @@ def _run() -> int:
             print("vault-push: no git identity — commit skipped. Fix once with:")
             print('  git config user.name "you"  &&  git config user.email "you@example.com"')
             return 1
-        add = git("add", "--", *existing)
+        add = git("add", "--", *existing, *KEEP_OUT)
         if add.returncode != 0:
             print(f"vault-push: FAILED to stage — {add.stderr.strip()[:200]}")
             return 1
@@ -373,7 +413,7 @@ def _run() -> int:
         # everything else staged and out of this commit; the guards see the same temporary index.
         # Areas, not all existing dirs: a pathspec naming a dir git knows nothing about (an empty
         # Daily/) fails the whole commit.
-        c = git("commit", "-m", msg, "--", *sorted(areas))
+        c = git("commit", "-m", msg, "--", *sorted(areas), *KEEP_OUT)
         if c.returncode != 0:
             out = (c.stdout + c.stderr).strip()
             if "pii-scan" in out or "secret-scan" in out or "blocked" in out.lower():
