@@ -27,6 +27,8 @@ Two findings came from looking *inside* the pipeline rather than at its output:
 
 On the full 5,286-file vault the reranker's limit is the first stage: it can only reorder what hybrid returns. Reranking the top 20 / 50 / 100 / 150 / 200 gave R@8 0.46 / 0.55 / 0.59 / 0.62 / 0.63 (hybrid alone: 0.38), at 0.2 / 0.5 / 1.0 / 2.2 / 3.5 s on a laptop CPU. Past 100, R@1 and MRR stop moving and English R@8 barely does (0.73, 0.75, 0.75); only Russian keeps climbing, because its first stage is weaker, with the right note in hybrid's top 20 only 35% of the time. `ask.py` ships depth 100, routed by script: `ms-marco-MiniLM-L-6-v2` for English, `mmarco-mMiniLMv2-L12-H384-v1` for anything with Cyrillic.
 
+The first stage was the next lever, and a bigger embedding model moved it. Swapping multilingual-e5-small for multilingual-e5-base, same full vault, rerank at 100: the Russian gold note reaches the reranker's candidates 0.89 of the time instead of 0.64, recall@8 goes 0.59 → 0.71 overall (English 0.73 → 0.78, Russian 0.45 → 0.63) and MRR 0.41 → 0.48. The price is index build time, hours instead of minutes on a laptop CPU, which is why the switch is guarded: a machine uses e5-base only once its index covers 95% of the vault.
+
 Limits: synthetic questions written from the notes' own text, one run, and a comparison of retrieval only. Hindsight's temporal and graph recall were not exercised, and neither was its capture path.
 
 The general rule: benchmark per stage, not per system. When a pipeline wins, find the stage that wins, and check whether it transplants.

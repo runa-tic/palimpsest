@@ -183,14 +183,14 @@ Built for Windows with Obsidian and a PARA layout, so paths and a couple of proc
 assume that. The skills extractor is disabled in the default pipeline — it burned most of a
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
-absence takes several nightly runs to drain. Embeddings are opt-in and CPU-bound: the first
-index over a large vault takes tens of minutes (the nightly sync then keeps it fresh, and that
-step is a no-op until the package is installed), and the small multilingual model closes only
-part of the cross-language gap: on the full source vault, recall@8 with the rerank is 0.45 in
-Russian against 0.73 in English, and for a third of Russian questions the right note never
-reaches the reranker's 100 candidates. The rerank adds about a second per question on a laptop
-CPU and a ~0.5 GB model download on first use. None of this is a product; it is one person's working system, published because
-the failure log is more useful than the code.
+absence takes several nightly runs to drain. Embeddings are opt-in and CPU-bound. The default
+model, multilingual-e5-base, closes most of the cross-language gap (recall@8 with the rerank on
+the full source vault: 0.78 English, 0.63 Russian, against 0.73 / 0.45 for e5-small), but its
+first index over a large vault takes hours on a laptop CPU; until it covers 95% of the vault,
+`ask.py` answers with the small model and says so, and the nightly sync builds the big one a
+slice at a time. Russian still trails English. The rerank adds about a second per question and a
+~0.5 GB model download on first use. None of this is a product; it is one person's working
+system, published because the failure log is more useful than the code.
 
 ## Credit
 

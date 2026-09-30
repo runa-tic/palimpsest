@@ -92,10 +92,13 @@ keyword overlap, which needs nothing installed and is fine for lookups in the la
 are written in. It cannot see that a question in one language and a note in another mean the
 same thing, and it cannot see a paraphrase. A local embedding model can, and it stays local.
 
-If they want that: `pip install sentence-transformers` (torch and a ~120M-parameter
-multilingual model, about a gigabyte, CPU only), then `python tools/embed.py` to build the index.
-Tell them the cost before they run it: roughly 20 chunks a second on a laptop CPU, so a vault
-with a few thousand files is tens of minutes, checkpointed every 2,048 chunks and resumable.
+If they want that: `pip install sentence-transformers` (torch plus the models, CPU only), then
+`python tools/embed.py` to build the index. Tell them the cost before they run it. The default
+model is multilingual-e5-base (~1.1 GB download): noticeably better, especially across languages,
+but slow to index — hours for a vault with a few thousand files on a laptop CPU, checkpointed
+every 2,048 chunks and resumable. Until that index covers 95% of the vault, `ask.py` uses
+multilingual-e5-small (~0.5 GB, tens of minutes for the same vault) and prints a one-line hint;
+`BRAIN_EMBED_MODEL=intfloat/multilingual-e5-small` pins the small model for good.
 After that, `ask.py` is hybrid by default; the nightly sync keeps the index current, and a call
 between syncs embeds only the files that changed since the last one. `--mode lexical` is the keyword-only behaviour and needs nothing.
 
