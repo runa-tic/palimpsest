@@ -65,7 +65,11 @@ written. If they want a cheap first look, `python tools/briefing.py` alone is in
 Then write `palimpsest.json` (schema in `tools/config.py`), and give them, in this order: the
 exact scheduler command for their OS for the time they chose (`python tools/setup.py` prints
 it), `git config core.hooksPath tools/githooks` for the commit guards, and finally
-`python tools/sync.py` for the first run.
+`python tools/sync.py` for the first run. The hooks path is per-clone config, so every machine
+needs that line: without it the nightly backup (`vault_push`) runs the two scans itself before
+its own commits, but a hand commit runs none. Tell them too that `Reviews/Vault Health.md` is
+per-machine and never auto-committed, and that `vault_push` lists, and does not back up, changes
+outside the content folders (a note at the vault root, pasted attachments).
 
 **Do not hand them hook-registration JSON if they cloned this repo** — `.claude/settings.json`
 ships with SessionStart and Stop already wired, and you can prove it: the notice you are

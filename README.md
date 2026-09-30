@@ -97,7 +97,8 @@ What took months was learning which of the obvious designs are wrong. Those are 
 - **A union merge never fails, so it never tells you.** Two machines rendered the same daily
   note, a union merge kept both briefing blocks, and nothing complained. Union is for
   append-only files whose readers ignore order; everything regenerated gets a pull-first guard
-  and byte-identical renders instead.
+  and byte-identical renders instead — or, like `Reviews/Vault Health.md`, which carries one
+  machine's counts and a timestamp, is per-machine and never auto-committed.
 - **Notes rarely rot; memory does.** Extraction already discards temporary state, so shelf-life
   labelling finds little in `10 Notes/`. The perishable claims live in Claude's memory
   directory, which is loaded into context every session and asserts deployment state as fact —
@@ -112,7 +113,8 @@ opening a Claude Code session in it walks you through setup on the first turn.
 
 ```bash
 git clone <this repo> && cd palimpsest
-git config core.hooksPath tools/githooks     # secret + PII commit guards
+git config core.hooksPath tools/githooks     # secret + PII commit guards, per clone: without it
+                                              # vault_push runs both scans itself; a hand commit, none
 claude                                        # first session: it will offer setup
 
 # or just double-click the launcher in the vault root:
@@ -146,7 +148,9 @@ goes in the redaction deny list; each default is
 argued rather than assumed, in `tools/config.py`.
 
 `sync.py` runs each step under a hard timeout, records `ok`/`failures` to
-`.sync_status.json`, and is safe to run repeatedly — every step no-ops when nothing changed.
+`.sync_status.json` (an unreadable `palimpsest.json` is a `config` failure: that run fell back to
+defaults, with pull, push and state off), and is safe to run repeatedly — every step no-ops when
+nothing changed.
 Drive it from a real daily scheduled job, not a logon-triggered shortcut.
 
 **Nightly backup is opt-in.** With `steps.push` enabled, the pipeline ends by committing the
@@ -154,6 +158,12 @@ night's content and pushing it, so a vault that syncs automatically stops drifti
 remote. It never uses `--no-verify` (the secret and PII guards run exactly as on a human
 commit, and a block aborts the push), never force-pushes or resolves divergence, and never
 auto-commits anything under `tools/` — a 06:00 job should not immortalise a half-finished edit.
+On a clone where `core.hooksPath` is not `tools/githooks` (it is per-clone config, so a second
+machine starts without it) it runs the two scans itself before committing and says so.
+`Reviews/Vault Health.md` is rendered per machine and never auto-committed. A change outside the
+content folders, `tools/` and the root config — a note at the vault root, Obsidian's pasted
+attachments — is never staged; each run lists it as not backed up (move it into a content
+folder, commit it by hand, or gitignore it).
 
 **Two machines on one vault** work since 2026-09: turn on `steps.pull` as well, and each run
 starts by rebasing onto the remote, skips the briefing if that pull failed (so neither machine
