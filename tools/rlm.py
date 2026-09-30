@@ -426,10 +426,18 @@ def main() -> int:
                     timed_out = True
                     break
                 if msg["t"] == "rlm":
-                    calls = msg["calls"]
-                    print(f"   → {len(calls)} sub-agent(s)…", flush=True)
+                    # The cap is enforced HERE, not only in the worker: model code can reach the
+                    # worker's module globals (sys.modules['__main__']) and raise _BUDGET['limit'] or
+                    # call _send itself, so a worker-side count is advisory against hostile code
+                    # (review, 2026-09-30). Calls past --subagents are never run.
+                    asked = list(msg.get("calls") or [])
+                    room = max(0, args.subagents - subs_used)
+                    calls, over = asked[:room], max(0, len(asked) - room)
+                    print(f"   → {len(calls)} sub-agent(s)…" + (f" ({over} over budget, not run)" if over else ""),
+                          flush=True)
                     t_sub = time.monotonic()
-                    results = _fanout(calls, args.sub_model)
+                    results = _fanout(calls, args.sub_model) if calls else []
+                    results += [f"[NOT RUN — sub-agent budget exhausted, {over} call(s) dropped]"] * over
                     deadline += time.monotonic() - t_sub      # sub-agent time does not count
                     subs_used += len(calls)
                     rec({"t": "subagents", "step": step, "n": len(calls),
