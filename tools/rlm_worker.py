@@ -71,13 +71,27 @@ class Corpus:
 
     # --- resolution
     def _resolve(self, key) -> Path:
+        """int -> by position; Path -> itself (internal callers, exact); str -> relative path, else a
+        unique filename. Every internal caller used to pass p.stem, which resolved to the FIRST note
+        with that name, so two notes both called "Status" read as one (review, 2026-09-30); an
+        ambiguous name is now an error that lists the paths instead of a silent pick."""
         if isinstance(key, int):
             return self._paths[key]
+        if isinstance(key, Path):
+            return key
         k = str(key).replace("\\", "/")
+        named = []
         for p in self._paths:
             rel = str(p.relative_to(VAULT)).replace("\\", "/")
-            if rel == k or p.stem == k or rel.endswith("/" + k):
+            if rel == k:
                 return p
+            if p.stem == k or rel.endswith("/" + k):
+                named.append(p)
+        if len(named) == 1:
+            return named[0]
+        if named:
+            raise KeyError(f"{key!r} matches {len(named)} notes; pass one of these paths: "
+                           + ", ".join(str(q.relative_to(VAULT)).replace("\\", "/") for q in named[:10]))
         raise KeyError(f"no doc matching {key!r}")
 
     def text(self, key) -> str:
@@ -92,7 +106,7 @@ class Corpus:
 
     def filter(self, fn) -> "Corpus":
         keep = [p for p in self._paths
-                if fn(str(p.relative_to(VAULT)).replace("\\", "/"), self.text(p.stem))]
+                if fn(str(p.relative_to(VAULT)).replace("\\", "/"), self.text(p))]
         return Corpus(keep, self._cache)
 
     def under(self, *prefixes) -> "Corpus":
@@ -108,7 +122,7 @@ class Corpus:
         qt = ask.tokens(query)
         scored = []
         for p in self._paths:
-            s = ask.score(qt, self.text(p.stem), p.stem, p)
+            s = ask.score(qt, self.text(p), p.stem, p)
             if s > 0:
                 scored.append((s, p))
         scored.sort(key=lambda x: -x[0])
@@ -118,11 +132,11 @@ class Corpus:
         rx = re.compile(pattern, flags)
         hits = []
         for p in self._paths:
-            lines = self.text(p.stem).splitlines()
+            lines = self.text(p).splitlines()
             for i, ln in enumerate(lines):
                 if rx.search(ln):
                     body = "\n".join(lines[max(0, i - ctx): i + ctx + 1]) if ctx else ln
-                    hits.append({"title": p.stem,
+                    hits.append({"title": p.stem, "path": str(p.relative_to(VAULT)).replace("\\", "/"),
                                  "path": str(p.relative_to(VAULT)).replace("\\", "/"),
                                  "line": i + 1, "text": body.strip()[:400]})
                     if len(hits) >= limit:
@@ -133,7 +147,7 @@ class Corpus:
         """Pack docs into labelled chunks sized for one sub-agent each."""
         out, cur, cur_n = [], [], 0
         for p in self._paths:
-            t = self.text(p.stem)
+            t = self.text(p)
             body = t if len(t) <= per_doc_cap else t[: per_doc_cap // 2] + \
                 f"\n…[{len(t)-per_doc_cap} chars elided]…\n" + t[-per_doc_cap // 2:]
             block = f"### NOTE: {p.stem}\n{body}\n"
