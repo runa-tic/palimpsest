@@ -51,7 +51,7 @@ def tokens(s: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9а-яё]+", s.lower()) if w not in STOP and len(w) > 2]
 
 def gather() -> list[Path]:
-    files = []
+    files, outside = [], 0
     for d in SEARCH_DIRS:
         for f in (VAULT / d).rglob("*.md"):
             # Skip _-prefixed files and directories, with one deliberate exception:
@@ -59,7 +59,19 @@ def gather() -> list[Path]:
             parts = f.relative_to(VAULT).parts
             if any(p.startswith("_") and p != "_proposed" for p in parts):
                 continue
+            # rglob yields symlinks. One that dangles, or whose target lies outside the vault (a
+            # note or a whole folder linked in from elsewhere), is skipped: the embedding index is
+            # keyed by the resolved vault-relative path and crashed on it, and the vault's edge is
+            # what may be sent to the model, as in rlm.py's sandbox.
+            try:
+                f.resolve(strict=True).relative_to(VAULT)
+            except (OSError, RuntimeError, ValueError):
+                outside += 1
+                continue
             files.append(f)
+    if outside:
+        print(f"ask: skipped {outside} file(s) that are dangling symlinks or lead outside the vault",
+              file=sys.stderr)
     return files
 
 def score(qtoks: list[str], text: str, title: str, path: Path) -> float:
@@ -83,7 +95,16 @@ def dir_weight(path: Path) -> float:
     return DIR_WEIGHT.get(parts[0], 1.0)
 
 def load_corpus() -> list[tuple[Path, str]]:
-    return [(f, f.read_text(encoding="utf-8", errors="ignore")) for f in gather()]
+    # Bytes decoded as-is, exactly as embed.py reads them: its chunk spans count a CRLF as two
+    # characters, and read_text() would fold it to one, so on a CRLF transcript (Windows) every
+    # line above the match shifted the excerpt and the rerank passage past what embeddings found.
+    out = []
+    for f in gather():
+        try:
+            out.append((f, f.read_bytes().decode("utf-8", "ignore")))
+        except OSError:        # deleted by a concurrent pull since gather(); embed._sync skips it too
+            continue
+    return out
 
 # ---- the three retrieval modes. Each returns documents best-first; the benchmark in
 # bench_retrieval.py scores exactly these functions, so what is measured is what ships.
@@ -253,20 +274,26 @@ def main():
         print("embed: sentence-transformers is not installed, so this is keyword search only. "
               "Opt in with `pip install sentence-transformers`.", file=sys.stderr)
         args.mode = "lexical"
+    if args.mode != "lexical":
+        try:
+            from embed import Index, strip_frontmatter, pick_model
+            hint = pick_model([f for f, _ in corpus])
+            if hint:
+                print(hint, file=sys.stderr)
+            idx = Index.open([f for f, _ in corpus])
+            spans = {(VAULT / r).resolve().as_posix().lower(): (s, e) for r, (_, s, e) in idx.doc_scores(q).items()}
+            ranked = embed_rank(q, idx) if args.mode == "embed" else hybrid_rank(q, corpus, idx)
+        except Exception as e:
+            # Installed but unusable (model not downloaded and offline, cache cleared): the same
+            # answer-anyway fallback as the package missing, and as rerank() below.
+            print(f"embed: skipped ({type(e).__name__}: {str(e)[:120]}); keyword search only", file=sys.stderr)
+            args.mode, spans = "lexical", {}
     if args.mode == "lexical":
         ranked = lexical_rank(q, corpus)
-    else:
-        from embed import Index, strip_frontmatter, pick_model
-        hint = pick_model([f for f, _ in corpus])
-        if hint:
-            print(hint, file=sys.stderr)
-        idx = Index.open([f for f, _ in corpus])
-        spans = {(VAULT / r).resolve().as_posix().lower(): (s, e) for r, (_, s, e) in idx.doc_scores(q).items()}
-        ranked = embed_rank(q, idx) if args.mode == "embed" else hybrid_rank(q, corpus, idx)
-        if args.rerank:
-            fused = ranked
-            ranked = rerank(q, fused, text_of, spans)
-            reranked = ranked is not fused      # rerank hands back its input object when it falls back
+    elif args.rerank:
+        fused = ranked
+        ranked = rerank(q, fused, text_of, spans)
+        reranked = ranked is not fused      # rerank hands back its input object when it falls back
     top = ranked[: args.top]
     label = f"{args.mode}{'+rerank' if reranked else ''}"
     if not top and not state_ctx:
