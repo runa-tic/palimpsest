@@ -8,11 +8,18 @@ into the vault the moment someone types it. Found exactly that on 2026-08-08: a 
 address, deny-listed since 07-23, sitting in an atomic note written 08-04.
 
 Two tiers, matching the secret scanner's block/warn split:
-  BLOCK  terms that are unambiguously an identifier — anything containing "@", or an
-         alphabetic term of 5+ characters (surnames, handles, reference codes).
-  WARN   short or numeric literals (amounts, ids). These collide with legitimate vault
-         content — the vault is full of numbers — so they report and let the commit through
-         rather than wedging the automated sync on a coincidence.
+  BLOCK  terms that are unambiguously an identifier — anything containing "@", a phone number
+         or other run of 7+ digits (matched in any separator spelling), or an alphabetic term of
+         5+ characters (surnames, full names, handles, reference codes); spaces, hyphens,
+         apostrophes and dots do not count against "alphabetic".
+  WARN   short numeric literals and short words (amounts, small ids, 2-4 letter names). These
+         collide with legitimate vault content — the vault is full of numbers — so they report
+         and let the commit through rather than wedging the automated sync on a coincidence.
+
+The deny list is read line by line in whatever Windows saved or appended it as (UTF-8, UTF-16,
+cp1251/cp1252). A line that is not clean UTF-8 or UTF-16 is checked in every likely reading, AND
+the commit is blocked until the file is re-saved as UTF-8: which codepage it is cannot be known,
+so a clean result over it would be a guess.
 
 Values are never printed. The Stop hook records this session into the vault, so echoing an
 address while removing it just recreates the leak in a new file; masked forms only.
@@ -21,12 +28,12 @@ Usage:
   python tools/scan_pii.py        # scan staged changes (used by pre-commit)
 """
 from __future__ import annotations
-import sys, re
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redact import _load_deny          # the one parser for .redact_terms.txt
-from scan_secrets import staged_files, staged_content
+from redact import DENY_FILE, load_deny_report, is_phone, term_pattern   # the one parser/matcher
+from scan_secrets import NotScanned, staged_blobs, staged_files
 
 
 def mask(term: str) -> str:
@@ -36,58 +43,89 @@ def mask(term: str) -> str:
 
 
 def is_hard(term: str) -> bool:
-    if "@" in term:
+    # A phone number is what SETUP asks for first and promises is blocked at commit time; it only
+    # warned, which in the unattended nightly push surfaces nowhere (review, 2026-09-30).
+    if "@" in term or is_phone(term):
         return True
-    return len(term) >= 5 and sum(c.isalpha() for c in term) >= len(term) - 1
+    # Name punctuation is not "numeric": counting each space as a non-letter made every full name
+    # of three words ("Mary Ann Lee") a soft term that only warned (review, 2026-09-30).
+    other = sum(not (c.isalpha() or c in " -'.") for c in term)
+    return len(term) >= 5 and other <= 1 and sum(c.isalpha() for c in term) >= 3
 
 
 def _safe_path(rel: str, literals, regexes) -> str:
     """The path as printed: every deny-listed term in it masked, since the path itself may be
     what carries the term (and this output is recorded into the vault)."""
     for t in sorted(literals, key=len, reverse=True):
-        rel = re.sub(re.escape(t), lambda m: mask(m.group(0)), rel, flags=re.I)
+        rel = term_pattern(t).sub(lambda m: mask(m.group(0)), rel)
     for rx in regexes:
         rel = rx.sub(lambda m: mask(m.group(0)), rel)
     return rel
 
 
-def _scan(rel: str, content: str, hard, soft, regexes, blocking: list, warning: list) -> None:
+def _scan(rel: str, content: str, hard, soft, regexes, blocking: dict, warning: dict) -> None:
+    """Add this text's match counts to blocking / warning, keyed (file label, term) with the
+    masked term as the value's label: a large file arrives in several runs of lines."""
     if not content:
         return
-    for term in hard:
-        n = len(re.findall(re.escape(term), content, re.I))
-        if n:
-            blocking.append((rel, mask(term), n))
-    for term in soft:
-        n = len(re.findall(re.escape(term), content, re.I))
-        if n:
-            warning.append((rel, mask(term), n))
+    for terms, into in ((hard, blocking), (soft, warning)):
+        for term in terms:
+            if n := len(term_pattern(term).findall(content)):
+                shown, k = into.get((rel, term), (mask(term), 0))
+                into[(rel, term)] = (shown, k + n)
     for rx in regexes:
-        n = len(rx.findall(content))
-        if n:
-            blocking.append((rel, f"re:{mask(rx.pattern)}", n))
+        if n := len(rx.findall(content)):
+            shown, k = blocking.get((rel, rx), (f"re:{mask(rx.pattern)}", 0))
+            blocking[(rel, rx)] = (shown, k + n)
 
 
 def main() -> int:
-    literals, regexes = _load_deny()
-    if not literals and not regexes:
+    literals, regexes, problems = load_deny_report()
+    if not literals and not regexes and not problems:
         return 0
     hard = [t for t in literals if is_hard(t)]
     soft = [t for t in literals if not is_hard(t)]
 
-    blocking: list[tuple[str, str, int]] = []
-    warning: list[tuple[str, str, int]] = []
-    for rel in staged_files():
+    found: dict[tuple, tuple[str, int]] = {}
+    warned: dict[tuple, tuple[str, int]] = {}
+    unscanned: list[tuple[str, str]] = []
+    failed = False
+    for rel, blocks in staged_blobs(staged_files()):
         # Scan the path as well as the content: a note named after a person or a conversation
         # title carries the term in its filename, where a contents-only scan never looks.
-        for label, content in ((f"{rel} [path]", rel), (rel, staged_content(rel) or "")):
-            _scan(_safe_path(label, literals, regexes), content, hard, soft, regexes, blocking, warning)
+        _scan(_safe_path(f"{rel} [path]", literals, regexes), rel, hard, soft, regexes, found, warned)
+        label = _safe_path(rel, literals, regexes)
+        try:
+            for _, text in blocks:
+                _scan(label, text, hard, soft, regexes, found, warned)
+        except NotScanned as e:
+            unscanned.append((label, e.why))
+            failed |= e.fails
+    blocking = [(rel, m, n) for (rel, _), (m, n) in found.items()]
+    warning = [(rel, m, n) for (rel, _), (m, n) in warned.items()]
 
+    for rel, why in unscanned:
+        print(f"pii-scan: NOT scanned ({why}): {rel}")
+    if failed:
+        print("pii-scan: FAILED — a staged file above could not be scanned, so the commit is not clean.")
 
     for rel, m, n in warning:
         print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m} (numeric/short; not blocking)")
 
+    if problems:
+        # Fail closed, as the strict read did before (with a traceback): a line in a codepage that
+        # is neither cp1251 nor cp1252 is a term this scan cannot match, and a one-line stderr
+        # warning in an unattended push surfaces nowhere. Line numbers only, never the values.
+        print("")
+        print(f"Commit blocked by pii-scan — tools/{DENY_FILE.name} is not clean UTF-8:")
+        for i, what in problems:
+            print(f"  line {i}: {what}")
+        print("Every term was still checked in each likely reading" + (" (findings below)." if blocking else "."))
+        print("Open it, check that the lines listed read correctly, save it as UTF-8 (Notepad:")
+        print("Save As, Encoding UTF-8) and commit again.")
     if not blocking:
+        if problems or failed:
+            return 1
         print("pii-scan: clean (staged changes).")
         return 0
 
