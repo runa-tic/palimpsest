@@ -2,10 +2,24 @@
 # Read by redact.py, applied by the conversation recorder before a note is written, and
 # enforced again at commit time by scan_pii.py.
 #
+# Save it as UTF-8. Every line is read in whatever Windows wrote (UTF-8, UTF-16, or cp1251 /
+# cp1252 read both ways), but a line that is not clean UTF-8 or UTF-16 blocks every commit until
+# the file is re-saved as UTF-8: which codepage it was cannot be known, so scan_pii fails closed.
+# Appending from PowerShell 5.1: Add-Content -Encoding utf8 (its default is the ANSI codepage).
+#
 # Format, one per line:
-#   plain line   -> literal, case-insensitive substring match
+#   plain line   -> literal, case-insensitive substring match. A number of 7+ digits with only
+#                   " +-.()" besides (a phone, an account or application number) matches its
+#                   digits in any separator spelling ('+1 555-0100' also catches '15550100' and
+#                   '+1 (555) 0100'), but not inside a longer run of digits.
 #   re: PATTERN  -> Python regex (case-insensitive)
 #   # comment    -> ignored
+#
+# At commit time (scan_pii.py) a term BLOCKS when it contains "@", is such a 7+ digit number, or
+# is 5+ characters with at least 3 letters and at most one other character (spaces, hyphens,
+# apostrophes and dots do not count: "Mary Ann Lee" blocks); a regex always blocks. Everything
+# else (shorter numbers, amounts, small ids, 2-4 letter names) only WARNs, because it collides
+# with ordinary vault text.
 #
 # Deny-list driven on purpose: a vault legitimately holds long numeric ids, addresses and
 # tickers, so blanket heuristics over-redact and shred real content. The cost of that choice
