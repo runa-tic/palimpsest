@@ -223,7 +223,9 @@ def main():
     no_related, untagged, orphans = [], [], []
     for p in atomic:
         txt = p.read_text(encoding="utf-8", errors="ignore")
-        rel = re.search(r"## Related\n(.*?)(?=\n## Source|\Z)", txt, re.DOTALL)
+        # The Related list only, as link_notes reads it: a "[[ ]]" in a later section is not a
+        # placeholder link_notes would ever fill.
+        rel = re.search(r"## Related\n((?:[ \t]*\n)*(?:[ \t]*- .*(?:\n|\Z))*)", txt)
         if rel and "[[ ]]" in rel.group(1):
             no_related.append(p.stem)
         fm = re.match(r"---\n(.*?)\n---", txt, re.DOTALL)

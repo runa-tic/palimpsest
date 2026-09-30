@@ -112,7 +112,10 @@ def moc_score(note_tags: set, profile: Counter, n_members: int, declared: set) -
         s += DECLARED_WEIGHT * len(note_tags & declared) / len(note_tags)
     return s
 
-REL_PAT = re.compile(r"## Related\n.*?(?=\n## Source|\Z)", re.DOTALL)
+# The Related LIST only: the heading plus the list lines directly under it. This used to run to
+# the next "## Source" or to the end of the file, so a hand-written note with sections after
+# Related and no Source (common) lost all of them to the regenerated links.
+REL_PAT = re.compile(r"## Related\n(?:[ \t]*\n)*(?:[ \t]*- .*(?:\n|\Z))*")
 
 def needs_linking(text: str) -> bool:
     m = REL_PAT.search(text)
@@ -233,7 +236,7 @@ def main():
         links += [f"- [[{r}]]" for r in related]
         if not links:
             continue
-        new_text = REL_PAT.sub("## Related\n" + "\n".join(links) + "\n", n["text"])
+        new_text = REL_PAT.sub(lambda _m: "## Related\n" + "\n".join(links) + "\n", n["text"], count=1)
         n["path"].write_text(new_text, encoding="utf-8")
 
         # add to MOC note list if not present
