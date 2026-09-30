@@ -153,6 +153,13 @@ def parse_skills(raw: str) -> list[dict]:
         raise ValueError(f"model output is not valid JSON ({e.msg} at char {e.pos})") from None
     if not isinstance(data, list):
         raise ValueError(f"model output is JSON but not an array ({type(data).__name__})")
+    # Every item needs its required fields, or the whole reply is treated as malformed: the writer
+    # dropped an incomplete item silently and the conversation was checkpointed as done, so
+    # [{"title": "An insight"}] ended as zero notes and no retry (review, 2026-09-30).
+    for i, item in enumerate(data):
+        missing = [k for k in ['name', 'steps'] if not (isinstance(item, dict) and isinstance(item.get(k), str) and item[k].strip())]
+        if missing:
+            raise ValueError(f"item {i} lacks required field(s) {', '.join(missing)}")
     return data
 
 
