@@ -67,7 +67,9 @@ def gen(n: int, seed: int):
         picked.append((rel, p.stem, body[:700]))
         if len(picked) >= n:
             break
-    print(f"generating queries for {len(picked)} notes ({len(done)} already cached)")
+    gone = sum(1 for rel in done if not (VAULT / rel).exists())
+    print(f"generating queries for {len(picked)} notes ({len(done)} already cached"
+          + (f", {gone} of them for notes that no longer exist, which --run skips" if gone else "") + ")")
     QUERIES.parent.mkdir(parents=True, exist_ok=True)
     with QUERIES.open("a", encoding="utf-8") as fh:
         for k in range(0, len(picked), BATCH):
@@ -156,6 +158,15 @@ def run():
     rows = [json.loads(l) for l in QUERIES.read_text(encoding="utf-8").splitlines() if l.strip()] if QUERIES.exists() else []
     if not rows:
         sys.exit(f"no queries at {QUERIES.relative_to(VAULT)}; run --gen N first")
+    # A gold note merged, renamed or deleted since --gen is a data problem, not a retrieval miss:
+    # scored, it charged every system a miss and read as a regression.
+    gone = sum(1 for r in rows if not (VAULT / r["rel"]).exists())
+    rows = [r for r in rows if (VAULT / r["rel"]).exists()]
+    if gone:
+        print(f"skipping {gone} cached quer{'y' if gone == 1 else 'ies'} whose gold note no longer exists "
+              f"(`--gen {gone}` adds replacements)")
+    if not rows:
+        sys.exit("every cached query's gold note is gone; run --gen N first")
     corpus = ask.load_corpus()
     rel = lambda p: p.resolve().relative_to(VAULT).as_posix()
     from embed import Index, MODEL
@@ -207,7 +218,8 @@ def run():
     lines = []
     lines.append(f"# Retrieval benchmark — lexical vs embeddings\n")
     lines.append(f"*Run {time.strftime('%Y-%m-%d %H:%M')} · {len(rows)} notes × 2 languages · model `{MODEL}` · "
-                 f"corpus {len(corpus)} files / {len(idx.rows)} chunks · queries are synthetic (see `tools/bench_retrieval.py`)*\n")
+                 f"corpus {len(corpus)} files / {len(idx.rows)} chunks · queries are synthetic (see `tools/bench_retrieval.py`)"
+                 + (f" · {gone} skipped, gold note gone" if gone else "") + "*\n")
     lines.append("| system | lang | R@1 | R@5 | R@8 | R@8† | MRR | ms/query |")
     lines.append("|---|---|---|---|---|---|---|---|")
     for s in systems:
