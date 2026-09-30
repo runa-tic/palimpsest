@@ -14,6 +14,8 @@ VAULT = TOOLS.parent
 PY = sys.executable or "python"
 STATUS = TOOLS / ".sync_status.json"
 STALE_DAYS = 3
+_START, _END = "<!-- briefing:start -->", "<!-- briefing:end -->"
+BRIEF_BLOCK = re.compile(re.escape(_START) + r"((?:(?!" + re.escape(_START) + r").)*?)" + re.escape(_END), re.DOTALL)
 
 sys.path.insert(0, str(TOOLS))
 import config as cfgmod
@@ -150,8 +152,9 @@ def main():
     brief = ""
     daily = VAULT / "Daily" / f"{today}.md"
     if daily.exists():
-        m = re.search(r"<!-- briefing:start -->(.*?)<!-- briefing:end -->",
-                      daily.read_text(encoding="utf-8"), re.DOTALL)
+        # One well-formed pair, as briefing.BLOCK: a plain START(.*?)END ran from an orphaned start
+        # marker (its end deleted while editing) to the next block's end, stale text included.
+        m = BRIEF_BLOCK.search(daily.read_text(encoding="utf-8"))
         if m:
             brief = m.group(1).strip()
 
