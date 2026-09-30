@@ -199,15 +199,23 @@ def state_context(q: str) -> tuple[str, list[str]]:
         facts, _ = st.load_facts()
         cur, obs = st.fold(facts), st.load_observed()
         lines = ["### STATE (ledger — current view, dated and sourced; prefer it over prose for "
-                 "where-does-X-run / status / flag questions; cite [[State Register]] and the fact's source)"]
+                 "where-does-X-run / status / flag questions; cite [[State Register]] and the fact's source. "
+                 "A ⚠️ flag means the value is uncertain: say it is stale or disputed, do not assert it as current)"]
         for eid in hits[:6]:
             recs = cur.get(eid, {})
             if not recs:
                 lines.append(f"- {eid}: no facts recorded")
                 continue
             for attr, rec in sorted(recs.items(), key=lambda kv: st.attr_order(kv[0])):
+                # The same warnings `state.py show` prints: this block tells the model to prefer the
+                # ledger over prose, so a stale or contested value must not arrive looking settled.
+                flags = ""
+                if st.is_stale(rec, eid, attr, kinds, ents, obs):
+                    flags += f"  ⚠️ STALE: not re-observed since {st.last_seen(rec, eid, attr, obs)}"
+                for c in rec.get("conflicts") or []:
+                    flags += f"  ⚠️ CONFLICT: {c.get('reason') or 'unresolved contradiction'}"
                 lines.append(f"- {eid}.{attr} = {st.render_value(rec)}  ({rec.get('kind')}, "
-                             f"{st.when_str(rec, eid, attr, obs)}; source: {st.src_str(rec) or 'n/a'})")
+                             f"{st.when_str(rec, eid, attr, obs)}; source: {st.src_str(rec) or 'n/a'}){flags}")
         return "\n".join(lines) + "\n", hits
     except Exception as e:
         print(f"state hop skipped ({type(e).__name__})", file=sys.stderr)
