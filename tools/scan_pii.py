@@ -9,7 +9,8 @@ address, deny-listed since 07-23, sitting in an atomic note written 08-04.
 
 Two tiers, matching the secret scanner's block/warn split:
   BLOCK  terms that are unambiguously an identifier — anything containing "@", or an
-         alphabetic term of 5+ characters (surnames, handles, reference codes).
+         alphabetic term of 5+ characters (surnames, full names, handles, reference codes);
+         spaces, hyphens, apostrophes and dots do not count against "alphabetic".
   WARN   short or numeric literals (amounts, ids). These collide with legitimate vault
          content — the vault is full of numbers — so they report and let the commit through
          rather than wedging the automated sync on a coincidence.
@@ -38,7 +39,10 @@ def mask(term: str) -> str:
 def is_hard(term: str) -> bool:
     if "@" in term:
         return True
-    return len(term) >= 5 and sum(c.isalpha() for c in term) >= len(term) - 1
+    # Name punctuation is not "numeric": counting each space as a non-letter made every full name
+    # of three words ("Mary Ann Lee") a soft term that only warned (review, 2026-09-30).
+    other = sum(not (c.isalpha() or c in " -'.") for c in term)
+    return len(term) >= 5 and other <= 1 and sum(c.isalpha() for c in term) >= 3
 
 
 def _safe_path(rel: str, literals, regexes) -> str:
