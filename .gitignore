@@ -3,7 +3,8 @@ tools/.sync_status.json
 tools/.sync.lock
 tools/.vault_push.lock
 # State ledger: regenerated on every fold, or per-machine. facts.jsonl, entities.json,
-# proposed.jsonl and seen/<machine>.json ARE committed — they are the ledger.
+# proposed.jsonl and seen/<machine>.json ARE committed — they are the ledger — and so is
+# extracted/<kind>-<machine>.json, the extractors' cross-machine checkpoint.
 State/Register.md
 State/current.json
 State/.observed.json
