@@ -101,8 +101,11 @@ def staged_files() -> list[str]:
     --name-only a rename or copy yields its DESTINATION, which is the path `git show :path`
     reads. R was missing until the Codex review of 2026-09: rename a note and add a key in the
     same commit and neither guard read a byte of it."""
+    # Everything staged except deletions (lowercase d excludes). Listing types to include kept
+    # missing one: ACM dropped renames, then ACMR dropped type changes (T) — a symlink replaced by
+    # a file holding a key sailed through (external review, 2026-09-30).
     out = subprocess.run(
-        ["git", "diff", "--cached", "-z", "--name-only", "--diff-filter=ACMR"],
+        ["git", "diff", "--cached", "-z", "--name-only", "--diff-filter=d"],
         cwd=VAULT, capture_output=True, text=True, encoding="utf-8",
     ).stdout
     return [p for p in out.split("\0") if p]
