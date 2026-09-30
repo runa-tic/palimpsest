@@ -83,7 +83,10 @@ def dir_weight(path: Path) -> float:
     return DIR_WEIGHT.get(parts[0], 1.0)
 
 def load_corpus() -> list[tuple[Path, str]]:
-    return [(f, f.read_text(encoding="utf-8", errors="ignore")) for f in gather()]
+    # Bytes decoded as-is, exactly as embed.py reads them: its chunk spans count a CRLF as two
+    # characters, and read_text() would fold it to one, so on a CRLF transcript (Windows) every
+    # line above the match shifted the excerpt and the rerank passage past what embeddings found.
+    return [(f, f.read_bytes().decode("utf-8", "ignore")) for f in gather()]
 
 # ---- the three retrieval modes. Each returns documents best-first; the benchmark in
 # bench_retrieval.py scores exactly these functions, so what is measured is what ships.
