@@ -11,8 +11,10 @@ Two redaction sources:
   1. Built-in credential shapes, reused from scan_secrets HIGH (API keys, tokens,
      private keys). Unambiguously must never sync, so they are always masked.
   2. A local, git-ignored deny list: tools/.redact_terms.txt — one term per line.
-         plain line   -> literal, case-insensitive substring match; a phone number
-                         (7+ digits, only separators besides) in any separator spelling
+         plain line   -> literal, case-insensitive substring match. A number of 7+ digits
+                         with only " +-.()" besides (a phone, an EMPLID, an application
+                         number) matches its digits in any separator spelling, but not
+                         inside a longer digit run; scan_pii blocks a commit on it.
          re: PATTERN  -> Python regex (case-insensitive)
          # comment
      This is where personal identifiers go (EMPLIDs, application numbers, emails,
@@ -46,55 +48,129 @@ except Exception:
     _CRED = []
 
 
-_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),   # before UTF-16: same lead
-          (codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
+_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"))   # whole file only
+# Where a UTF-16 section starts: its BOM at the start of the file or of a line, or anywhere when the
+# next two bytes are an ASCII character in that byte order. PowerShell 5 `>>` appends UTF-16 with a
+# BOM to a UTF-8 file, and the file may not end in a newline. "\xff\xfe" is also cp1251 "яю", which
+# never starts a line and is never followed by a NUL.
+_UTF16_START = re.compile(
+    rb"(?:\A|(?<=\n)|(?<=\n\x00))(?:\xff\xfe|\xfe\xff)|\xff\xfe(?=[^\x00]\x00)|\xfe\xff(?=\x00[^\x00])")
+_LEGACY = ("cp1251", "cp1252")     # Windows ANSI for the lists this vault holds; not tellable apart
+
+
+def _plausible(text: str) -> bool:
+    """A UTF-16 reading of bytes that are not UTF-16 (or in the other byte order) comes out as CJK,
+    replacement or control characters."""
+    return all(("\x20" <= c < "\u3000" and c != "\x7f") or c in "\t\r" or "\uff00" <= c < "\ufff0"
+               for c in text)
+
+
+def _bomless_utf16(b: bytes) -> list[str]:
+    """Readings of a line with NULs in it: UTF-16 without a BOM, in whichever byte order gives
+    text. Split on b"\n", a little-endian line leads with the NUL of the previous newline and a
+    big-endian one ends in the NUL of its own."""
+    odd = len(b) % 2
+    return [t for enc, cut in (("utf-16-le", b[odd:]), ("utf-16-be", b[:len(b) - odd]))
+            if _plausible(t := cut.decode(enc, errors="replace"))]
+
+
+def _byte_lines(chunk: bytes, first: int, lines: list, problems: list) -> None:
+    """A section with no UTF-16 BOM, one line at a time: UTF-8 first; a line that is not UTF-8
+    alone is read as cp1251 AND cp1252. Decoding the whole file at once turned every UTF-8 term
+    into mojibake the moment one line was ANSI (review of fix/scanners, 2026-09-30)."""
+    for i, b in enumerate(chunk.replace(codecs.BOM_UTF8, b"").split(b"\n"), first):
+        if b"\x00" in b:
+            if readings := _bomless_utf16(b):
+                lines.extend((i, t) for t in readings)
+                continue
+            problems.append((i, "has NUL bytes but is not UTF-16; read without them"))
+            b = b.replace(b"\x00", b"")
+        try:
+            lines.append((i, b.decode("utf-8")))
+        except UnicodeDecodeError:
+            readings = [b.decode(enc, errors="replace") for enc in _LEGACY]
+            lines.extend((i, t) for t in readings)
+            problems.append((i, "not UTF-8, read as cp1251 and as cp1252"
+                             + ("; bytes neither codepage defines" if all("\ufffd" in t for t in readings)
+                                else "")))
+
+
+def _utf16_lines(bom: bytes, chunk: bytes, first: int, lines: list, problems: list) -> int:
+    """A section that starts with a UTF-16 BOM, one line at a time. A line that does not read as
+    UTF-16 (UTF-8 appended after it, or the rare cp1251 line starting "\u044f\u044e") is read as bytes
+    too, BOM included."""
+    enc = "utf-16-le" if bom == codecs.BOM_UTF16_LE else "utf-16-be"
+    parts = chunk.split("\n".encode(enc))
+    for i, b in enumerate(parts, first):
+        text = b.decode(enc, errors="replace")
+        lines.append((i, text))
+        if not _plausible(text):
+            problems.append((i, "inside a UTF-16 section but not UTF-16; read both ways"))
+            _byte_lines((bom if i == first else b"") + b.replace(b"\x00", b""), i, lines, problems)
+    return first + len(parts) - 1
+
+
+def deny_lines(raw: bytes) -> tuple[list[str], list[tuple[int, str]]]:
+    """The deny list's lines, whatever Windows saved or appended it as, and (line number, what was
+    wrong) for every line that was not clean UTF-8 or UTF-16. Never returns a value in a problem."""
+    lines: list[tuple[int, str]] = []
+    problems: list[tuple[int, str]] = []
+    for bom, enc in _BOMS:
+        if raw.startswith(bom):
+            text = raw.decode(enc, errors="replace")
+            return text.splitlines(), ([(1, "undecodable bytes")] if "\ufffd" in text else [])
+    line = 1
+    starts = [(m.start(), m.group(0)) for m in _UTF16_START.finditer(raw)]
+    # A byte section runs to the first UTF-16 BOM; a UTF-16 section runs to the next BOM.
+    if not starts or starts[0][0] > 0:
+        head = raw[:starts[0][0]] if starts else raw
+        _byte_lines(head, line, lines, problems)
+        line += head.count(b"\n")
+    for k, (at, bom) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else len(raw)
+        line = _utf16_lines(bom, raw[at + 2:end], line, lines, problems)
+    return [t for _, t in lines], problems
+
+
 _warned = False
 
 
-def _deny_texts(raw: bytes) -> list[str]:
-    """The deny list as text, whatever Windows saved it as. A strict UTF-8 read raised on UTF-16
-    (PowerShell 5 `>`) or ANSI (Notepad), which the recorder swallowed and wrote the note with NO
-    redaction, credentials included; a UTF-8 BOM silently disabled the first term (review,
-    2026-09-30). Not UTF-8 and no BOM: cp1251 or cp1252 cannot be told apart, so both readings are
-    denied; the wrong one only adds a term nobody writes."""
+def load_deny_report() -> tuple[list[str], list[re.Pattern], list[tuple[int, str]]]:
+    """(literals, regexes, problems): problems name the lines that were not clean UTF-8 or UTF-16,
+    by number only. scan_pii refuses to call a commit clean over any of them."""
     global _warned
-    for bom, enc in _BOMS:
-        if raw.startswith(bom):
-            return [raw.decode(enc, errors="replace")]
-    try:
-        return [raw.decode("utf-8")]
-    except UnicodeDecodeError:
-        if not _warned:
-            _warned = True
-            sys.stderr.write(f"redact: {DENY_FILE.name} is not UTF-8; reading it as cp1251 and as cp1252."
-                             " Re-save it as UTF-8.\n")
-        return [raw.decode(enc, errors="replace") for enc in ("cp1251", "cp1252")]
-
-
-def _load_deny() -> tuple[list[str], list[re.Pattern]]:
     literals: list[str] = []
     regexes: list[re.Pattern] = []
     if not DENY_FILE.exists():
-        return literals, regexes
+        return literals, regexes, []
     try:
-        texts = _deny_texts(DENY_FILE.read_bytes())
+        texts, problems = deny_lines(DENY_FILE.read_bytes())
     except OSError:
-        return literals, regexes
-    for text in texts:
-        # NULs: UTF-16 appended to a UTF-8 file (PowerShell 5 `>>`); U+FEFF: a BOM mid-file.
-        for line in text.replace("\x00", "").replace("\ufeff", "").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("re:"):
-                pat = line[3:].strip()
-                if pat and pat not in (r.pattern for r in regexes):
-                    try:
-                        regexes.append(re.compile(pat, re.I))
-                    except re.error:
-                        pass  # a bad pattern shouldn't break the whole pass
-            elif line not in literals:
-                literals.append(line)
+        return literals, regexes, []
+    if problems and not _warned:
+        _warned = True
+        sys.stderr.write(f"redact: {DENY_FILE.name} is not clean UTF-8 (line(s) "
+                         f"{', '.join(str(i) for i, _ in problems)}); those lines are read in every"
+                         " likely codepage. Re-save it as UTF-8.\n")
+    for line in texts:
+        # NULs: stray bytes of a UTF-16 newline; U+FEFF: a BOM that is not at a section start.
+        line = line.replace("\x00", "").replace("\ufeff", "").strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("re:"):
+            pat = line[3:].strip()
+            if pat and pat not in (r.pattern for r in regexes):
+                try:
+                    regexes.append(re.compile(pat, re.I))
+                except re.error:
+                    pass  # a bad pattern shouldn't break the whole pass
+        elif line not in literals:
+            literals.append(line)
+    return literals, regexes, problems
+
+
+def _load_deny() -> tuple[list[str], list[re.Pattern]]:
+    literals, regexes, _ = load_deny_report()
     return literals, regexes
 
 
@@ -105,9 +181,11 @@ def is_phone(term: str) -> bool:
 def term_pattern(term: str) -> re.Pattern:
     """How a literal deny-list term matches, here and in scan_pii. A phone number is listed once but
     written many ways ('+1 555-0100' / '+1 (555) 0100' / '15550100'), and a literal match caught
-    only the spelling on the list, so its digits match with any separators between them."""
+    only the spelling on the list, so its digits match with any separators between them. Not
+    inside a longer run of digits: a 7-digit id blocks the commit now, and a Telegram id or a
+    timestamp that merely contains its digits must not stop the unattended nightly push."""
     if is_phone(term):
-        return re.compile(r"[\s().+-]*".join(c for c in term if c.isdigit()))
+        return re.compile(r"(?<![0-9])" + r"[\s().+-]*".join(c for c in term if c.isdigit()) + r"(?![0-9])")
     return re.compile(re.escape(term), re.I)
 
 
@@ -119,12 +197,24 @@ def term_pattern(term: str) -> re.Pattern:
 # A PGP armored key ends its header in " BLOCK", carries Version:/Comment: armor headers, and has
 # two short lines before END (the last base64 line and the =XXXX checksum); both header patterns
 # missed it entirely until the 2026-09-30 review.
+# A key pasted into a thinking callout or a quote has "> " (or "> > ") before every line, and only
+# its header was consumed until the second 2026-09-30 review, so the body stayed in the note.
+_SEP = r"(?:[\s>]|\\[nr])"
 _PEM_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
-    r"(?:(?:\s|\\[nr])+(?:(?:Proc-Type|DEK-Info|Version|Comment|Charset|Hash):[^\n\\]*"
+    rf"(?:{_SEP}+(?:(?:Proc-Type|DEK-Info|Version|Comment|Charset|Hash):[^\n\\]*"
     r"|[A-Za-z0-9+/=]{16,}))*"
-    r"(?:(?:(?:\s|\\[nr])*[A-Za-z0-9+/=]{1,15}){0,2}(?:\s|\\[nr])*"
+    rf"(?:(?:{_SEP}*[A-Za-z0-9+/=]{{1,15}}){{0,2}}{_SEP}*"
     r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----)?")
+
+
+def _mark(m: re.Match) -> str:
+    """A rule with a named group "v" (a secret found by its label) masks the value and keeps the
+    label, so the note still says what was there: '"SecretAccessKey": "[redacted]"'."""
+    if "v" not in m.re.groupindex or m.start("v") < 0:
+        return MARK
+    s0 = m.start()
+    return m.group(0)[:m.start("v") - s0] + MARK + m.group(0)[m.end("v") - s0:]
 
 
 def redact_text(s: str) -> tuple[str, int]:
@@ -133,7 +223,7 @@ def redact_text(s: str) -> tuple[str, int]:
         return s, 0
     s, n = _PEM_BLOCK.subn(MARK, s)
     for rx in _CRED:
-        s, k = rx.subn(MARK, s)
+        s, k = rx.subn(_mark, s)
         n += k
     try:
         literals, regexes = _load_deny()
