@@ -14,7 +14,7 @@ makes four decisions deliberately instead of inheriting one person's habits:
 vault with an onboarding brief instead of a briefing.
 """
 from __future__ import annotations
-import json
+import json, sys
 from pathlib import Path
 from datetime import datetime
 
@@ -87,26 +87,62 @@ class ConfigError(ValueError):
     """palimpsest.json exists but cannot be read as a JSON object."""
 
 
-def load() -> dict:
-    """Config merged over defaults. A missing file yields pure defaults; an unreadable one raises
-    ConfigError. Falling back to defaults there looked harmless and was not: pull, push and state
-    all default OFF, so one trailing comma quietly ended the nightly backup while every status
-    line still said clean — and setup.py then saved the defaults over the user's file."""
+_WARNED = False
+
+
+def _read_user() -> dict:
+    """The user's palimpsest.json as a dict ({} when there is none). Raises ConfigError."""
+    if not CONFIG.exists():
+        return {}
+    try:
+        # utf-8-sig: Windows Notepad saves with a BOM, which plain utf-8 json.loads rejects.
+        user = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        raise ConfigError(f"{CONFIG.name} is unreadable ({e}); fix it or move it aside and "
+                          f"re-run tools/setup.py") from e
+    if not isinstance(user, dict):
+        raise ConfigError(f"{CONFIG.name} must hold a JSON object, not {type(user).__name__}")
+    return user
+
+
+def problem() -> str:
+    """Why palimpsest.json cannot be used, or '' when it can (or does not exist). The hook for
+    whatever reports status — the sync's .sync_status.json, the session opener — to say so."""
+    try:
+        _read_user()
+    except ConfigError as e:
+        return str(e)
+    return ""
+
+
+def load(strict: bool = False) -> dict:
+    """Config merged over defaults. A missing file yields pure defaults.
+
+    An unreadable file is never quietly the same as a missing one. strict=True raises
+    ConfigError — setup.py, which would otherwise save defaults plus five answers over the
+    user's push_remote, machine and probes. The default degrades to DEFAULTS but says so on
+    stderr (once per process), because the callers are the nightly sync, the session opener,
+    the ledger and the push: a raise there killed sync.py at import — no .sync_status.json, no
+    sync.log — and left the opener with no output at all, which is quieter than the fallback it
+    replaced. Reporters should also check problem(); pull, push and state default OFF, so the
+    fallback alone reads as a clean night."""
+    global _WARNED
     cfg = json.loads(json.dumps(DEFAULTS))
-    if CONFIG.exists():
-        try:
-            # utf-8-sig: Windows Notepad saves with a BOM, which plain utf-8 json.loads rejects.
-            user = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError) as e:
-            raise ConfigError(f"{CONFIG.name} is unreadable ({e}); fix it or move it aside and "
-                              f"re-run tools/setup.py") from e
-        if not isinstance(user, dict):
-            raise ConfigError(f"{CONFIG.name} must hold a JSON object, not {type(user).__name__}")
-        for k, v in user.items():
-            if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-                cfg[k].update(v)
-            else:
-                cfg[k] = v
+    try:
+        user = _read_user()
+    except ConfigError as e:
+        if strict:
+            raise
+        if not _WARNED:
+            _WARNED = True
+            print(f"palimpsest: WARNING {e}. Running on DEFAULTS until it is fixed — pull, push "
+                  f"and state are OFF.", file=sys.stderr)
+        return cfg
+    for k, v in user.items():
+        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+            cfg[k].update(v)
+        else:
+            cfg[k] = v
     return cfg
 
 

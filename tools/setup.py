@@ -109,7 +109,7 @@ def plan(cfg: dict) -> str:
 
 def main() -> int:
     try:
-        cfg = cfgmod.load()
+        cfg = cfgmod.load(strict=True)
     except cfgmod.ConfigError as e:
         # Never interview over it: save() would replace the user's push_remote, machine and
         # probes with defaults plus five answers.
