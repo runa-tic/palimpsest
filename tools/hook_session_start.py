@@ -98,6 +98,12 @@ def state_block() -> str:
     try:
         p = subprocess.run([PY, str(TOOLS / "state.py"), "show", "--hot", "--opener"], cwd=str(VAULT),
                            capture_output=True, text=True, encoding="utf-8", timeout=30)
+        # A crash (a hand-edited entities.json that no longer parses) leaves stdout empty, and an
+        # empty block reads as "no ledger" — exactly the silence sync_line() refuses to emit.
+        if p.returncode != 0:
+            err = [l for l in (p.stderr or "").strip().splitlines() if l.strip()]
+            return (f"**State:** ⚠️ ledger unreadable (exit {p.returncode}): "
+                    f"{err[-1][:200] if err else 'no output'} — state answers are unverified")
         return (p.stdout or "").strip()
     except Exception as e:
         return f"**State:** ⚠️ ledger unavailable ({type(e).__name__})"
