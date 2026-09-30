@@ -108,6 +108,15 @@ def text_from_content(content, include_thinking: bool, include_tools: bool) -> s
         # tool_result blocks (user side) are skipped as noise
     return "\n\n".join(p for p in parts if p)
 
+def existing_note(folder: Path, sid: str) -> str | None:
+    """Filename of the note already recorded for this session (matched by the "(sid).md" suffix),
+    if any. The name is built from the title, and a session's title changes after it is first
+    recorded (the first message, later an AI title), so building it afresh left one note per title
+    for the same session; 23 sessions in the source vault had two (review, 2026-09-30). The first
+    name is kept rather than renamed: atomic notes link to conversations by filename."""
+    hits = sorted(folder.glob(f"* ({sid}).md"), key=lambda q: q.stat().st_mtime, reverse=True) if folder.exists() else []
+    return hits[0].name if hits else None
+
 def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
     folder.mkdir(parents=True, exist_ok=True)
     fm_lines = ["---"]
@@ -195,7 +204,8 @@ def process_transcript(f: Path, include_thinking=False, include_tools=False, all
 
     proj_label = f.parent.name.split("-")[-1] or f.parent.name
     date = iso_to_date(first_ts)
-    fname = f"{date} {sanitize(title)} ({f.stem[:8]}).md"
+    folder = OUT_BASE / "Claude Code" / proj_label
+    fname = existing_note(folder, f.stem[:8]) or f"{date} {sanitize(title)} ({f.stem[:8]}).md"
 
     body_parts = [f"# {title}\n"]
     for role, txt in turns:
@@ -214,7 +224,6 @@ def process_transcript(f: Path, include_thinking=False, include_tools=False, all
         "claude_version": version or "",
         "tags": ["claude/conversation", "claude/code", f"project/{sanitize(proj_label).replace(' ', '-')}"],
     }
-    folder = OUT_BASE / "Claude Code" / proj_label
     write_note(folder, fname, fm, body)
     return folder / fname
 
@@ -284,7 +293,7 @@ def import_web(args):
         if not turns:
             continue
         date = iso_to_date(created)
-        fname = f"{date} {sanitize(name)} ({uuid[:8]}).md"
+        fname = existing_note(OUT_BASE / "claude.ai", uuid[:8]) or f"{date} {sanitize(name)} ({uuid[:8]}).md"
         body_parts = [f"# {name}\n"]
         for role, txt in turns:
             who = "🧑 **Me**" if role == "user" else "🤖 **Claude**"
