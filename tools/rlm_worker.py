@@ -248,29 +248,42 @@ def _within(path, roots) -> bool:
     return any(p == r or r in p.parents for r in roots)
 
 
-def _audit(event: str, args):
-    if event in _BLOCK_EXACT or event.startswith(_BLOCK_PREFIX):
-        raise PermissionError(
-            f"blocked by the RLM sandbox: {event}. This REPL has no network and no child "
-            f"processes — use rlm()/rlm_map() for model calls, and don't shell out.")
-    if event == "open":
-        path, mode, flags = (list(args) + [None, None, None])[:3]
-        if path is None or isinstance(path, int):
-            return  # already-open fd; the originating open() was audited
-        writing = any(c in mode for c in "wax+") if isinstance(mode, str) else bool(
-            (flags or 0) & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC))
-        if writing:
-            if not _within(path, (SCRATCH,)):
-                raise PermissionError(f"blocked by the RLM sandbox: write to {path!r}. "
-                                      f"Writes are confined to {SCRATCH}.")
-        elif not _within(path, _READ_ROOTS):
-            raise PermissionError(f"blocked by the RLM sandbox: read of {path!r}. "
-                                  f"Reads are confined to the vault — the corpus is already "
-                                  f"in `docs`, and anything outside it is not yours to send.")
-    elif event in _WRITE_EVENTS:
-        for a in args:
-            if isinstance(a, (str, bytes, os.PathLike)) and not _within(a, (SCRATCH,)):
-                raise PermissionError(f"blocked by the RLM sandbox: {event} on {a!r}.")
+def _make_audit(read_roots=_READ_ROOTS, scratch=SCRATCH, block_exact=frozenset(_BLOCK_EXACT),
+                block_prefix=_BLOCK_PREFIX + ("gc.",), write_events=frozenset(_WRITE_EVENTS), within=_within):
+    """Build the audit hook with every rule bound NOW. The first version looked its rules up in
+    module globals at call time, so model-written code could rebind them from
+    sys.modules["__main__"] (an external review set _READ_ROOTS to "/" and read outside the vault,
+    2026-09-30). Rebinding the module does nothing to this closure; gc.* is blocked because
+    gc.get_objects is how code would find the installed hook to edit its cells. Still defence in
+    depth: the boundary is the OS sandbox rlm.py wraps this process in, where one exists."""
+    _READ_ROOTS, SCRATCH, _BLOCK_EXACT, _BLOCK_PREFIX, _WRITE_EVENTS, _within = (
+        read_roots, scratch, block_exact, block_prefix, write_events, within)
+
+    def _audit(event: str, args):
+        if event in _BLOCK_EXACT or event.startswith(_BLOCK_PREFIX):
+            raise PermissionError(
+                f"blocked by the RLM sandbox: {event}. This REPL has no network and no child "
+                f"processes — use rlm()/rlm_map() for model calls, and don't shell out.")
+        if event == "open":
+            path, mode, flags = (list(args) + [None, None, None])[:3]
+            if path is None or isinstance(path, int):
+                return  # already-open fd; the originating open() was audited
+            writing = any(c in mode for c in "wax+") if isinstance(mode, str) else bool(
+                (flags or 0) & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC))
+            if writing:
+                if not _within(path, (SCRATCH,)):
+                    raise PermissionError(f"blocked by the RLM sandbox: write to {path!r}. "
+                                          f"Writes are confined to {SCRATCH}.")
+            elif not _within(path, _READ_ROOTS):
+                raise PermissionError(f"blocked by the RLM sandbox: read of {path!r}. "
+                                      f"Reads are confined to the vault — the corpus is already "
+                                      f"in `docs`, and anything outside it is not yours to send.")
+        elif event in _WRITE_EVENTS:
+            for a in args:
+                if isinstance(a, (str, bytes, os.PathLike)) and not _within(a, (SCRATCH,)):
+                    raise PermissionError(f"blocked by the RLM sandbox: {event} on {a!r}.")
+
+    return _audit
 
 
 # ---------------------------------------------------------------- main loop
@@ -315,7 +328,7 @@ def main() -> None:
           "re": re, "json": json, "math": math, "statistics": statistics,
           "collections": collections, "Counter": Counter, "defaultdict": defaultdict,
           "Path": Path}
-    sys.addaudithook(_audit)
+    sys.addaudithook(_make_audit())
     _send({"t": "ready", "docs": len(docs), "dirs": CORPUS_DIRS})
     while True:
         msg = _recv()
