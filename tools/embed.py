@@ -28,7 +28,7 @@ index at the same moment waits for it instead of racing it.
   idx.doc_scores("...")                   # {relpath: (best-chunk cosine, start, end)}
 """
 from __future__ import annotations
-import sys, os, re, json, hashlib, time, math, importlib.util
+import sys, os, re, json, hashlib, time, math, zlib, importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
@@ -70,7 +70,10 @@ class _WriterLock:
     consistent, but the last writer dropped the other's new rows until the next open re-embedded
     them. The lock is a file created with O_EXCL, which is portable and crash-tolerant: a lock
     older than LOCK_STALE is treated as abandoned, and a waiter gives up after LOCK_WAIT and
-    proceeds anyway, which is only the old behaviour and never a hang."""
+    proceeds anyway, which is only the old behaviour and never a hang. The holder refreshes the
+    lock's mtime at every checkpoint (refresh), so an hours-long first build never reads as
+    abandoned; mtime is the liveness signal because a pid check is not portable (os.kill on
+    Windows terminates the process)."""
 
     def __init__(self, cache_dir: Path):
         self.path = cache_dir / ".lock"
@@ -93,8 +96,12 @@ class _WriterLock:
                     try:
                         self.path.unlink()
                     except OSError:
+                        # Not removable (Windows refuses while a live holder keeps it open): wait it
+                        # out like a live lock. Retrying at once skipped LOCK_WAIT and the sleep, and
+                        # spun a core forever.
                         pass
-                    continue
+                    else:
+                        continue
                 if time.time() - t0 > LOCK_WAIT:
                     print(f"embed: another writer has held the index for {age:.0f}s; proceeding without the lock",
                           file=sys.stderr)
@@ -104,13 +111,26 @@ class _WriterLock:
                     told = True
                 time.sleep(1)
 
-    def __exit__(self, *_):
-        if self.fd is not None:                   # never remove a lock we did not take
-            os.close(self.fd)
-            try:
-                self.path.unlink()
+    def refresh(self):
+        if self.fd is not None:
+            try:                                  # by fd where possible: the path may not be ours
+                os.utime(self.fd if os.utime in os.supports_fd else self.path)
             except OSError:
                 pass
+
+    def __exit__(self, *_):
+        if self.fd is not None:                   # never remove a lock we did not take...
+            try:                                  # ...nor one another writer took over since
+                mine = os.path.samestat(os.fstat(self.fd), os.stat(self.path))
+            except OSError:
+                mine = False
+            os.close(self.fd)
+            self.fd = None
+            if mine:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
 FRONTMATTER = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.S)
 
 
@@ -130,7 +150,7 @@ def coverage(model_name: str, files: list[Path]) -> float:
         return 0.0
     if not files:
         return 1.0
-    return sum(1 for p in files if p.resolve().relative_to(VAULT).as_posix() in have) / len(files)
+    return sum(1 for p in files if Index._rel(p) in have) / len(files)
 
 
 def use_model(name: str):
@@ -219,6 +239,7 @@ class Index:
         self.files: dict[str, dict] = {}              # relpath -> {"sha", "spans": [[s,e],...]}
         self.rows: list[tuple[str, int, int]] = []    # per vector row: (relpath, start, end)
         self.vec = np.zeros((0, 0), dtype=np.float32)
+        self._lock: _WriterLock | None = None         # held while _sync writes
 
     # ---- persistence
     @classmethod
@@ -237,24 +258,37 @@ class Index:
             m = json.loads(man.read_text(encoding="utf-8"))
             if m.get("model") != MODEL or m.get("chunk_chars") != CHUNK_CHARS:
                 return
-            v = np.load(vec).astype(np.float32)
+            v16 = np.load(vec)
             rows = [(r, s, e) for r, s, e in m["rows"]]
-            if len(rows) != v.shape[0]:
+            # The pair is published by two renames, so writers that raced without the lock (see
+            # _WriterLock) can leave one's vectors beside the other's manifest. The row count alone
+            # let an equal-length pair load misaligned; the checksum catches it (older manifests
+            # have none and keep the count check).
+            crc = m.get("vectors_crc")
+            if len(rows) != v16.shape[0] or (crc is not None and crc != zlib.crc32(np.ascontiguousarray(v16))):
+                print("embed: vectors.npy does not match manifest.json (two writers saved at once); rebuilding",
+                      file=sys.stderr)
                 return
-            self.files, self.rows, self.vec = m["files"], rows, v
+            self.files, self.rows, self.vec = m["files"], rows, v16.astype(np.float32)
         except Exception as e:  # a corrupt cache is a rebuild, never a crash
             print(f"embed: cache unreadable ({type(e).__name__}: {e}); rebuilding", file=sys.stderr)
 
     def _save(self):
+        if self._lock:
+            self._lock.refresh()                      # a checkpoint is proof of life
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        tmp_v = self.cache_dir / "vectors.npy.tmp"
-        tmp_m = self.cache_dir / "manifest.json.tmp"
+        # Per-process temp names: a writer that proceeded without the lock shared the fixed ones
+        # with the holder, renamed its half-written file away, and one of them crashed in os.replace.
+        tmp_v = self.cache_dir / f"vectors.npy.{os.getpid()}.tmp"
+        tmp_m = self.cache_dir / f"manifest.json.{os.getpid()}.tmp"
+        v16 = np.ascontiguousarray(self.vec.astype(np.float16))
         # np.save appends .npy to any PATH that lacks it (so 'vectors.npy.tmp' became
         # 'vectors.npy.tmp.npy' and the rename below failed); a file handle is written as-is.
         with open(tmp_v, "wb") as fh:
-            np.save(fh, self.vec.astype(np.float16))
+            np.save(fh, v16)
         tmp_m.write_text(json.dumps({"model": MODEL, "chunk_chars": CHUNK_CHARS,
                                      "built": time.strftime("%Y-%m-%d %H:%M"),
+                                     "vectors_crc": zlib.crc32(v16),
                                      "files": self.files, "rows": self.rows}, ensure_ascii=False),
                          encoding="utf-8")
         os.replace(tmp_v, self.cache_dir / "vectors.npy")
@@ -262,22 +296,28 @@ class Index:
 
     # ---- incremental build
     @staticmethod
-    def _rel(p: Path) -> str:
-        return p.resolve().relative_to(VAULT).as_posix()
+    def _rel(p: Path) -> str | None:
+        try:
+            return p.resolve().relative_to(VAULT).as_posix()
+        except ValueError:       # a symlink out of the vault (ask.gather drops those): not indexed
+            return None
 
     def _sync(self, files: list[Path], progress: bool):
         wanted: dict[str, tuple[Path, str, str]] = {}   # rel -> (path, sha, text)
         for p in files:
+            rel = self._rel(p)
+            if rel is None:
+                continue
             try:
                 raw = p.read_bytes()
             except OSError:
                 continue
-            wanted[self._rel(p)] = (p, hashlib.sha1(raw).hexdigest(),
-                                    strip_frontmatter(raw.decode("utf-8", "ignore")))
+            wanted[rel] = (p, hashlib.sha1(raw).hexdigest(),
+                           strip_frontmatter(raw.decode("utf-8", "ignore")))
 
         if not any(self._delta(wanted)):
             return
-        with _WriterLock(self.cache_dir):
+        with _WriterLock(self.cache_dir) as self._lock:
             # Another writer may have saved while we waited: reload and recompute against the
             # files on disk so its rows are kept rather than overwritten.
             self._load()
