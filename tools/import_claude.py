@@ -14,7 +14,7 @@ Usage (run from the vault root):
 Re-running is safe: a note is only rewritten if its source changed (tracked by id).
 """
 from __future__ import annotations
-import sys, os, re, json, argparse, glob, hashlib, tempfile
+import sys, os, re, json, argparse, glob, hashlib, stat, tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -123,6 +123,14 @@ def existing_note(folder: Path, sid: str) -> str | None:
     hits = sorted(folder.glob(f"* ({glob.escape(sid)}).md"), key=lambda q: q.stat().st_mtime, reverse=True) if folder.exists() else []
     return hits[0].name if hits else None
 
+def _plain_mode(path: Path) -> int:
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mask = os.umask(0)
+        os.umask(mask)
+        return 0o666 & ~mask
+
 def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
     folder.mkdir(parents=True, exist_ok=True)
     fm_lines = ["---"]
@@ -149,9 +157,14 @@ def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
     # surrogate (an emoji cut in half in tool output) cannot be encoded; replace it rather than fail.
     data = out.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8", "replace")
     # Content-stable: don't rewrite an unchanged note, or its mtime would bust the
-    # extractor's cache and trigger needless re-extraction (and duplicate notes).
-    if dest.exists() and dest.read_bytes() == data:
-        return
+    # extractor's cache and trigger needless re-extraction (and duplicate notes). A note the box
+    # wrote before this change holds CRLF (write_text on Windows): the same text, so it is left as
+    # it is. Rewritten to LF, its size changed, the extractors' old "mtime:size" checkpoint no longer
+    # matched, and both re-sent every such conversation to the model once.
+    if dest.exists():
+        old = dest.read_bytes()
+        if old == data or old.replace(b"\r\n", b"\n") == data:
+            return
     # Atomic: write_text() truncates first, so any failure part-way left the existing
     # conversation note empty, and the next Stop hook failed the same way and kept it empty.
     # The temp file goes in the gitignored tools/logs/, not the auto-committed content folder.
@@ -160,6 +173,9 @@ def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+        # mkstemp makes the file 0600; keep the mode a plain write would have left (the note's
+        # own, or 0666 less the umask), so a sync daemon or viewer running as another user can read it.
+        os.chmod(tmp, _plain_mode(dest))
         os.replace(tmp, dest)
     except BaseException:
         try:
