@@ -164,7 +164,16 @@ def interview(cfg: dict) -> int:
         # unconfigured push would publish a private vault into someone else's project.
         print("   Which remote? NOT guessed — if you cloned Palimpsest, `origin` is the")
         print("   harness repo and your notes would be pushed there.")
-        cfg["push_remote"] = ask("   push_remote", cfg.get("push_remote") or "origin")
+        # No default either: a bracketed [origin] turned "Enter accepts the default" into
+        # publishing the vault to the harness repo or the user's public fork. Blank = push off.
+        remote = ask("   push_remote (blank leaves push off)", cfg.get("push_remote") or "")
+        if remote == "origin" and not yes("   `origin` is where this clone came from. Push your "
+                                          "notes THERE", False):
+            remote = ""
+        if not remote:
+            print("   no remote named — nightly push stays OFF")
+            cfg["steps"]["push"] = False
+        cfg["push_remote"] = remote or None
 
     cfgmod.save(cfg)
     print("\n" + "=" * 60)
