@@ -29,6 +29,10 @@ NOTES = VAULT / "10 Notes"
 PROJECTS = VAULT / "20 Projects"
 CONVS = VAULT / "40 Resources" / "Claude Conversations"
 START, END = "<!-- briefing:start -->", "<!-- briefing:end -->"
+# One well-formed block: a START with no other START before its END. A plain START.*?END ran from
+# an orphan START (its END deleted while editing) to the next block's END, and the refresh
+# replaced everything the user had written in between.
+BLOCK = re.compile(re.escape(START) + r"(?:(?!" + re.escape(START) + r").)*?" + re.escape(END), re.DOTALL)
 
 def recent_daily(before: str) -> Path | None:
     cands = sorted(p for p in DAILY.glob("*.md")
@@ -183,12 +187,13 @@ def main():
     block = build_block()
     if f.exists():
         txt = f.read_text(encoding="utf-8")
-        if START in txt and END in txt:
-            # A callback, not the string: re.sub reads backslashes in a replacement string as escapes,
-            # so a rolled-over task holding a Windows path (C:\Users\...) raised "bad escape \U" on
-            # every refresh (review, 2026-09-30).
-            txt = re.sub(re.escape(START) + r".*?" + re.escape(END), lambda _m: block, txt, flags=re.DOTALL)
-        else:
+        # A callback, not the string: re.sub reads backslashes in a replacement string as escapes,
+        # so a rolled-over task holding a Windows path (C:\Users\...) raised "bad escape \U" on
+        # every refresh (review, 2026-09-30).
+        txt, n = BLOCK.subn(lambda _m: block, txt)
+        if not n:
+            # No well-formed block (never rendered, or a marker was deleted): add a fresh one and
+            # leave any orphan marker, and everything around it, exactly as it is.
             txt = txt.rstrip() + "\n\n" + block + "\n"
         f.write_text(txt, encoding="utf-8")
         print(f"Refreshed briefing in Daily/{today}.md")
