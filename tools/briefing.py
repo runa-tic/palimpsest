@@ -8,7 +8,7 @@ Fills today's Daily/YYYY-MM-DD.md with:
   - a digest of conversations from the last 2 days
 
 Safe to re-run: if today's note already has a briefing block it is refreshed in place,
-and your own content below it is preserved.
+and your own content below it is preserved, as is any rolled-over task you ticked in it.
 
 Usage (from vault root):  python tools/briefing.py
 """
@@ -33,6 +33,8 @@ START, END = "<!-- briefing:start -->", "<!-- briefing:end -->"
 # an orphan START (its END deleted while editing) to the next block's END, and the refresh
 # replaced everything the user had written in between.
 BLOCK = re.compile(re.escape(START) + r"(?:(?!" + re.escape(START) + r").)*?" + re.escape(END), re.DOTALL)
+ROLLED = "### ↩️ Rolled-over tasks"
+TASK_LINE = re.compile(r"^- \[[ xX]\] (.+?)[ \t]*$", re.M)
 
 def recent_daily(before: str) -> Path | None:
     cands = sorted(p for p in DAILY.glob("*.md")
@@ -180,6 +182,35 @@ def build_block() -> str:
     lines.append(END)
     return "\n".join(lines)
 
+def rolled_span(block: str) -> tuple[int, int] | None:
+    """Where the rolled-over task list sits in a block: after its heading, up to the next one."""
+    h = block.find(ROLLED + "\n")
+    if h < 0:
+        return None
+    a = h + len(ROLLED) + 1
+    nxt = re.compile(r"^\s*(?:###|" + re.escape(END) + ")", re.M).search(block, a)
+    return a, nxt.start() if nxt else len(block)
+
+
+def keep_ticks(block: str, old: str) -> str:
+    """Carry the rolled-over list of the block being replaced into the new one.
+
+    The rolled-over tasks are ticked HERE — this block is where they show up in the day's note —
+    and every refresh (each session start, each sync) rebuilt them from yesterday's note as
+    "- [ ]", so a task done this morning came back open, and rolled over again tomorrow. The old
+    list is kept as it is (ticks, and any task added to it by hand); a task not in it is added.
+    """
+    new_s, old_s = rolled_span(block), rolled_span(old)
+    if not new_s or not old_s:
+        return block
+    prev = old[old_s[0]:old_s[1]]
+    kept = set(TASK_LINE.findall(prev))
+    lines = [l for l in prev.splitlines() if TASK_LINE.match(l)]
+    lines += [l for l in block[new_s[0]:new_s[1]].splitlines()
+              if TASK_LINE.match(l) and TASK_LINE.match(l).group(1) not in kept]
+    return block[:new_s[0]] + "\n".join(lines or ["- *(none)*"]) + "\n" + block[new_s[1]:]
+
+
 def main():
     today = date.today().isoformat()
     DAILY.mkdir(parents=True, exist_ok=True)
@@ -190,7 +221,7 @@ def main():
         # A callback, not the string: re.sub reads backslashes in a replacement string as escapes,
         # so a rolled-over task holding a Windows path (C:\Users\...) raised "bad escape \U" on
         # every refresh (review, 2026-09-30).
-        txt, n = BLOCK.subn(lambda _m: block, txt)
+        txt, n = BLOCK.subn(lambda m: keep_ticks(block, m.group(0)), txt)
         if not n:
             # No well-formed block (never rendered, or a marker was deleted): add a fresh one and
             # leave any orphan marker, and everything around it, exactly as it is.
