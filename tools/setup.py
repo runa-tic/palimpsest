@@ -9,7 +9,7 @@ Non-interactive invocations (cron, CI, a piped shell) print the plan and change 
 because a setup script that blocks on stdin in a scheduled job is a wedged job.
 """
 from __future__ import annotations
-import sys, os, json, platform
+import sys, os, json, platform, shlex
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -47,14 +47,18 @@ def yes(prompt: str, default: bool) -> bool:
 
 def scheduler_hint(at: str) -> str:
     """The exact command for this OS. A cadence you can't install is a cadence you won't."""
-    launcher = f'"{sys.executable}" "{Path(__file__).resolve().parent / "sync.py"}"'
+    sync = Path(__file__).resolve().parent / "sync.py"
+    hh, mm = at.split(":")
     if platform.system() == "Windows":
-        hh, mm = at.split(":")
+        # A single-quoted PowerShell literal escapes ' as ''. -Argument reaches python.exe as a
+        # raw command line, so the path needs its own double quotes or it splits at a space.
+        ps = lambda s: "'" + str(s).replace("'", "''") + "'"
+        arg = f'"{sync}"'
         return (
             "Windows — run this in an ELEVATED PowerShell (Task Scheduler needs admin).\n"
             "Use the cmdlets, not schtasks: PowerShell 5.1 mangles nested quotes in /TR.\n\n"
-            f"  $act = New-ScheduledTaskAction -Execute '{sys.executable}' "
-            f"-Argument '{Path(__file__).resolve().parent / 'sync.py'}'\n"
+            f"  $act = New-ScheduledTaskAction -Execute {ps(sys.executable)} "
+            f"-Argument {ps(arg)} -WorkingDirectory {ps(cfgmod.VAULT)}\n"
             f"  $trg = New-ScheduledTaskTrigger -Daily -At {hh}:{mm}\n"
             "  $set = New-ScheduledTaskSettingsSet -StartWhenAvailable\n"
             "  Register-ScheduledTask -TaskName 'Palimpsest Sync' -Action $act "
@@ -62,9 +66,12 @@ def scheduler_hint(at: str) -> str:
             "Do NOT settle for a Startup-folder shortcut: it fires at logon only, so on a\n"
             "machine that stays up for weeks the vault silently stops syncing."
         )
-    hh, mm = at.split(":")
+    # Quoted for sh: an unquoted `cd` into "My Vault" failed, && skipped the sync, and the
+    # redirect hid it — every night. cron also turns a bare % into a newline, so escape it.
+    q = lambda s: shlex.quote(str(s)).replace("%", "\\%")
     return ("macOS / Linux — add to `crontab -e`:\n\n"
-            f"  {int(mm)} {int(hh)} * * * cd {cfgmod.VAULT} && {launcher} >/dev/null 2>&1")
+            f"  {int(mm)} {int(hh)} * * * cd {q(cfgmod.VAULT)} && {q(sys.executable)} {q(sync)} "
+            ">/dev/null 2>&1")
 
 
 HOOKS_JSON = r"""Register the hooks. Merge this into `.claude/settings.local.json` in the vault
