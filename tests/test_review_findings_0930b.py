@@ -24,9 +24,10 @@ def main() -> int:
     # 1. parse failures raise, genuine [] does not; a failing conversation is not checkpointed
     v = make_vault()
     en, es = load(v, "extract_notes"), load(v, "extract_skills")
-    for mod, fn in ((en, "parse_notes"), (es, "parse_skills")):
+    for mod, fn, item in ((en, "parse_notes", {"title": "t", "body": "b"}),
+                          (es, "parse_skills", {"name": "n", "steps": "s"})):
         parse = getattr(mod, fn)
-        c.ok(parse("[]") == [] and parse('```json\n[{"title": "t"}]\n```') == [{"title": "t"}],
+        c.ok(parse("[]") == [] and parse(f"```json\n[{json.dumps(item)}]\n```") == [item],
              f"{fn}: a genuine [] and a fenced array still parse")
         bad = 0
         for raw in ("", "no json here", '[{"title": "cut off', '{"title": "not a list"}'):
