@@ -135,6 +135,9 @@ def main():
         return
 
     cfg = cfgmod.load()
+    # A palimpsest.json that does not parse degrades to DEFAULTS (pull, push and state OFF). Say so
+    # first: the sync line only reports it once a sync has run on the broken file.
+    config_problem = cfgmod.problem()
     pull = pull_line() if cfg["steps"].get("pull") else ""
     if not pull or pull_is_ok(pull):
         run("briefing.py")             # ensure today's daily note + briefing exists
@@ -158,6 +161,8 @@ def main():
         health = m.group(1).strip()
 
     ctx = f"# 🧠 Brain session — {today}\n"
+    if config_problem:
+        ctx += f"\n**Config:** ⚠️ {config_problem} — running on defaults (pull/push/state OFF)\n"
     if health:
         ctx += f"\n**Vault health:** {health}  (details: [[Vault Health]])\n"
     try:
