@@ -156,7 +156,7 @@ def load_entities() -> tuple[dict, dict, dict]:
     kinds, ents = reg.get("kinds", {}), reg.get("entities", {})
     alias = {}
     for eid, e in ents.items():
-        alias[eid.lower()] = eid
+        alias[eid.lower().lstrip("@")] = eid   # resolve() strips '@' from input, so an '@id' must be keyed without it
         for a in e.get("aliases", []):
             alias[a.lower().lstrip("@")] = eid
     return kinds, ents, alias
