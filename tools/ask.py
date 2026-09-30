@@ -248,7 +248,10 @@ def main():
     if args.mode == "lexical":
         ranked = lexical_rank(q, corpus)
     else:
-        from embed import Index, strip_frontmatter
+        from embed import Index, strip_frontmatter, pick_model
+        hint = pick_model([f for f, _ in corpus])
+        if hint:
+            print(hint, file=sys.stderr)
         idx = Index.open([f for f, _ in corpus])
         spans = {(VAULT / r).resolve().as_posix().lower(): (s, e) for r, (_, s, e) in idx.doc_scores(q).items()}
         ranked = embed_rank(q, idx) if args.mode == "embed" else hybrid_rank(q, corpus, idx)

@@ -7,8 +7,9 @@ thing, or that "first trading date" is a "TGE proxy" unless the vault already sa
 place. A trained multilingual sentence encoder does, runs on CPU in minutes for a corpus this
 size, and no text leaves the box.
 
-Model: intfloat/multilingual-e5-small (384-d, 118M params, 100+ languages). e5 expects the
-"query: " / "passage: " prefixes; dropping them costs measurable accuracy.
+Model: intfloat/multilingual-e5-base (768-d, 278M params, 100+ languages), with
+intfloat/multilingual-e5-small (384-d, 118M) as the fallback until the base index is built — see
+pick_model. e5 expects the "query: " / "passage: " prefixes; dropping them costs measurable accuracy.
 
 Index: brute-force cosine over an in-memory float32 matrix. At ~25k chunks x 384 dims a query
 is one matmul, well under a millisecond. An ANN index or a vector database buys nothing below
@@ -33,7 +34,16 @@ from pathlib import Path
 import numpy as np
 
 VAULT = Path(__file__).resolve().parent.parent
-MODEL = os.environ.get("BRAIN_EMBED_MODEL", "intfloat/multilingual-e5-small")
+# e5-base replaced e5-small as the default on a full-vault benchmark (5,286 files, 300 EN/RU
+# queries, rerank at 100): R@8 0.59 -> 0.71, Russian 0.45 -> 0.63, gold note inside the
+# reranker's candidates 0.64 -> 0.89 for Russian. Its index takes far longer to build, and
+# Index.open builds whatever is missing before answering, so a machine that has not built it
+# yet keeps answering with FALLBACK (see pick_model) instead of stalling on the first question.
+PREFERRED = "intfloat/multilingual-e5-base"
+FALLBACK = "intfloat/multilingual-e5-small"
+PINNED = os.environ.get("BRAIN_EMBED_MODEL")      # an explicit choice is never second-guessed
+MODEL = PINNED or PREFERRED
+READY = 0.95   # share of the vault's files the preferred index must already cover
 CACHE_ROOT = VAULT / "tools" / "cache"
 # ~1100 chars is ~280 English tokens and ~450 Russian ones for this tokenizer: inside the
 # model's 512-token window either way, with room for the title prefix.
@@ -106,6 +116,44 @@ FRONTMATTER = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.S)
 
 def _slug(model: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-")
+
+
+def coverage(model_name: str, files: list[Path]) -> float:
+    """Share of `files` already in `model_name`'s saved index. Reads the manifest only: no
+    model load, no hashing (a changed file still counts; Index.open re-embeds that delta)."""
+    try:
+        m = json.loads((CACHE_ROOT / f"embed-{_slug(model_name)}" / "manifest.json").read_text(encoding="utf-8"))
+        if m.get("model") != model_name or m.get("chunk_chars") != CHUNK_CHARS:
+            return 0.0
+        have = m.get("files", {})
+    except Exception:
+        return 0.0
+    if not files:
+        return 1.0
+    return sum(1 for p in files if p.resolve().relative_to(VAULT).as_posix() in have) / len(files)
+
+
+def use_model(name: str):
+    global MODEL, _model
+    if name != MODEL:
+        MODEL, _model = name, None
+
+
+def pick_model(files: list[Path]) -> str | None:
+    """Choose the model an interactive query should use; returns a hint line when it falls back.
+    `python tools/embed.py` (and the nightly embed step) always builds PREFERRED, checkpointed,
+    so a time-budgeted nightly run finishes it over a few nights; queries switch over by
+    themselves once it covers READY of the vault."""
+    if PINNED:
+        use_model(PINNED)
+        return None
+    c = coverage(PREFERRED, files)
+    if c >= READY:
+        use_model(PREFERRED)
+        return None
+    use_model(FALLBACK)
+    return (f"embed: the {PREFERRED.split('/')[-1]} index covers {c:.0%} of the vault; answering with "
+            f"{FALLBACK.split('/')[-1]}. Build it with `python tools/embed.py` (resumable).")
 
 
 def strip_frontmatter(text: str) -> str:
