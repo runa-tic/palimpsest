@@ -64,7 +64,7 @@ HIGH = [
     # Lookarounds, not \b: in a Bot API URL (.../bot<token>/getMe) "bot" runs straight into the
     # digits, and a secret may end in '-'; \b missed both.
     ("Telegram bot token",  re.compile(r"(?<![0-9])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])")),
-    ("Private key block",   re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("Private key block",   re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----")),   # BLOCK: PGP armor
     ("Telegram api_hash",   re.compile(r"api_hash['\"\s:=]+[a-f0-9]{32}\b", re.I)),
 ]
 # Lower-confidence / often-public shapes: report but don't block by default.
