@@ -900,7 +900,15 @@ def cmd_station(args):
             refold()
             print(f"station: lease taken by {MACHINE}" + (f" — {note}" if note else ""))
         print("push:")
-        sys.exit(_vault_push(*(["--code"] if args.code else [])))
+        rc = _vault_push(*(["--code"] if args.code else []))
+        # The push rebased onto the remote first; a take from another machine that arrived there
+        # and is dated later wins the fold, and this take would otherwise report success.
+        now_holder, _ = _lease(fold(load_facts()[0]))
+        if rc == 0 and now_holder != MACHINE:
+            print(f"station: {now_holder} took the lease after this take (its take arrived in the push's rebase "
+                  f"and is dated later) — {now_holder} holds it now; do not hand-edit here")
+            sys.exit(1)
+        sys.exit(rc)
     if args.action == "release":
         if holder not in (MACHINE, "free"):
             print(f"station: the lease is held by {holder}, not this machine — nothing to release")
@@ -910,6 +918,13 @@ def cmd_station(args):
         if rc != 0:
             print("station release: the push did not complete — NOT releasing; fix the message above and rerun")
             sys.exit(rc)
+        # Re-check after that push's rebase: the holder above came from this machine's ledger
+        # before any pull, so a forced takeover from another machine was freed silently.
+        holder, _ = _lease(fold(load_facts()[0]))
+        if holder not in (MACHINE, "free"):
+            print(f"station: {holder} took the lease over since this machine last pulled — NOT releasing "
+                  f"(your work is pushed; the lease stays with {holder})")
+            sys.exit(1)
         ensure_entity("station", "flag", STATION_DESC)
         append(make_fact("station", "active", "free", "asserted", f"station:release@{MACHINE}",
                          [f"station release on {MACHINE}"], None, f"released by {MACHINE}"))
