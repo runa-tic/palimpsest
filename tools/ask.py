@@ -197,6 +197,9 @@ def rerank(q: str, ranked: list[Path], text_of: dict[str, str], spans: dict[str,
         return ranked
     return [f for _, f in sorted(zip(scores, head), key=lambda x: -x[0])] + ranked[depth:]
 
+STATE_UNREADABLE = "### STATE (ledger could not be read"
+
+
 def state_context(q: str) -> tuple[str, list[str]]:
     """State-first hop. If the question names a registered State-ledger entity (or alias), prepend
     the ledger's current facts for it — dated, sourced — so "where does X run" is answered from
@@ -239,8 +242,14 @@ def state_context(q: str) -> tuple[str, list[str]]:
                              f"{st.when_str(rec, eid, attr, obs)}; source: {st.src_str(rec) or 'n/a'}){flags}")
         return "\n".join(lines) + "\n", hits
     except Exception as e:
+        # Silence here read as "no ledger", and the model answered a where/status question from
+        # prose as if nothing contradicted it. Say in the prompt that the ledger is unreadable.
         print(f"state hop skipped ({type(e).__name__})", file=sys.stderr)
-        return "", []
+        return (f"{STATE_UNREADABLE}: "
+                f"{type(e).__name__}: {str(e)[:160]}. The current state of anything this question asks "
+                "about is unknown: flag every where-does-X-run / status / flag answer as unverified, "
+                "say the State ledger could not be read, and do not present a note's prose as the "
+                "current value)\n"), []
 
 def main():
     ap = argparse.ArgumentParser(description="Ask your second brain.")
@@ -296,10 +305,12 @@ def main():
         reranked = ranked is not fused      # rerank hands back its input object when it falls back
     top = ranked[: args.top]
     label = f"{args.mode}{'+rerank' if reranked else ''}"
-    if not top and not state_ctx:
+    if not top and (not state_ctx or state_ctx.startswith(STATE_UNREADABLE)):
         # Stop only when BOTH sources are empty: a question the ledger answers ("where does X
         # run") in a vault with no matching prose used to be dropped here (review, 2026-09-30).
         print("No relevant notes found. Try different words, or import/extract more first.")
+        if state_ctx:
+            print("(The State ledger could not be read either — see the stderr line above.)")
         return
     if args.retrieve_only:
         if state_ctx:
@@ -335,7 +346,8 @@ def main():
         "Be concise and direct. If the notes don't contain the answer, say so plainly. "
         "If a STATE block is present it is the state ledger's current view (dated, sourced): for "
         "questions about where something runs, its status or its flags, answer from STATE and cite "
-        "[[State Register]] plus the fact's own source.\n\n"
+        "[[State Register]] plus the fact's own source; if it says the ledger could not be read, "
+        "say so and mark any answer about current state as unverified.\n\n"
         f"QUESTION: {q}\n\n===NOTES===\n" + "\n".join(ctx)
     )
     proc = subprocess.run(["claude", "-p", "--model", args.model],
