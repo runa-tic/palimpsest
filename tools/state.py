@@ -23,7 +23,7 @@ Files (State/ at the vault root):
   Register.md · current.json · .observed.json   regenerated at every fold (gitignore them)
 
 Usage:
-  state.py add <entity> <attr> <value> [--kind decided|asserted] [--since WHEN] [--source S ...] [--by WHO] [--note N]
+  state.py add <entity> <attr> <value> [--kind decided|asserted] [--since WHEN [--future]] [--source S ...] [--by WHO] [--note N]
   state.py show [<entity-or-alias>] [--history] [--json]
   state.py show --hot [--opener]            # what the session opener prints
   state.py fold                             # regenerate Register.md + current.json
@@ -36,7 +36,8 @@ Usage:
   state.py lint                             # unknown entities, open conflicts, stale, duplicates
 WHEN accepts 2026-09-01, 2026-09-08T15:01Z, 2026-09-08T23:01+08:00, "2026-09-08 23:01 UTC".
 Omit --since for "now": a date-only --since means midnight UTC, which loses the fold to any
-same-day timestamped fact (add prints a WARNING when that happens).
+same-day timestamped fact (add prints a WARNING when that happens). A time without a zone is UTC
+too, and one more than a few minutes ahead is refused unless --future is given.
 
 Probes. Two are built in and need no configuration: `sync` (this machine's last sync run, from
 tools/.sync_status.json) and `git` (ahead / behind / diverged against push_remote, else the branch
@@ -79,6 +80,7 @@ IS_WIN = os.name == "nt"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WIN else 0
 KINDS = ("decided", "asserted", "observed", "retracted", "contradicts")
 LEASE_STALE_H = 4        # a station lease older than this may be taken without --force
+FUTURE_SLACK_MIN = 5     # a --since later than now by more than this needs --future (clock skew aside)
 DEFAULT_KINDS = {"host": {"stale_after_h": None}, "service": {"stale_after_h": 24},
                  "timer": {"stale_after_h": 26}, "flag": {"stale_after_h": 24},
                  "workflow": {"stale_after_h": None}}
@@ -542,13 +544,29 @@ def default_by() -> str:
     return f"session:{sid[:8]}" if sid else f"manual@{MACHINE}"
 
 
+def since_arg(args) -> str | None:
+    """--since as ISO UTC, refused when it lies in the future without --future. A naive time is read
+    as UTC, so a local wall time east of UTC landed hours ahead; the fold's latest valid_from then
+    outranked every probe observation until that hour came, while probe printed each as a change."""
+    if not args.since:
+        return None
+    vf = parse_when(args.since)
+    ahead_min = -hours_since(vf) * 60
+    if ahead_min > FUTURE_SLACK_MIN and not args.future:
+        print(f"refused: --since {args.since!r} is {vf} UTC, {ahead_min / 60:.1f} h in the future; until then it "
+              f"outranks every newer fact and observation on the key. A time without a zone is read as UTC: "
+              f"give the offset (…T15:00+03:00), omit --since for now, or pass --future if it is meant.")
+        sys.exit(2)
+    return vf
+
+
 def cmd_add(args):
     _, ents, alias = load_entities()
     eid = resolve(args.entity, alias)
     if not eid:
         print(f"unknown entity {args.entity!r} — register it first: state.py register <id> --kind <kind> --alias …")
         sys.exit(2)
-    vf = parse_when(args.since) if args.since else None
+    vf = since_arg(args)
     f = make_fact(eid, args.attr, args.value, args.kind, args.by or default_by(), args.source or [], vf, args.note or "")
     # The fold keeps the latest valid_from, so a fact dated earlier than one already on file is
     # recorded as history, not as the current value. A date-only --since (midnight UTC) does this
@@ -576,7 +594,7 @@ def cmd_retract(args):
         print(f"unknown entity {args.entity!r}")
         sys.exit(2)
     f = make_fact(eid, args.attr, None, "retracted", args.by or default_by(), args.source or [],
-                  parse_when(args.since) if args.since else None, args.note or "")
+                  since_arg(args), args.note or "")
     print(("retracted " if append(f) else "no-op: already retracted ") + f"{eid}.{args.attr} ({f['id']})")
     refold()
 
@@ -791,6 +809,15 @@ def cmd_probe(args):
                 print(f"  probe {name}: {eid} is not registered — `state.py register {eid} --kind service`")
                 continue
             rec = cur.get(eid, {}).get(attr)
+            if rec and (rec.get("valid_from") or "") > now:
+                # A later-dated fact outranks anything observed now: appending would not move the
+                # current value, yet it printed "(was X)" and appended another superseded copy on
+                # every run. Say what holds the key instead; nothing is recorded or marked seen.
+                if rec.get("value") != value:
+                    print(f"  {name}: observed {eid}.{attr} = {value}, but {rec.get('id')} (valid from "
+                          f"{rec.get('valid_from')}) outranks it; the current value stays {render_value(rec)}. "
+                          f"If that date is wrong, re-add the current value without --since.")
+                continue
             if rec and rec.get("value") == value and rec.get("kind") == "observed":
                 obs[f"{eid}.{attr}"] = now
                 seen += 1
@@ -898,12 +925,16 @@ def cmd_lint(args):
     ids = [f.get("id") for f in facts]
     dups = len(ids) - len(set(ids))
     badkind = [f.get("id") for f in facts if f.get("kind") not in KINDS]
+    future = [(e, a, r) for e, recs in cur.items() for a, r in recs.items() if (r.get("valid_from") or "") > iso(utcnow())]
     for u in unknown:
         print(f"unknown entity in ledger: {u}")
     for e, a in conflicts:
         print(f"open contradiction: {e}.{a}")
     for e, a in stale:
         print(f"stale observation: {e}.{a} (last seen {local(last_seen(cur[e][a], e, a, obs))})")
+    for e, a, r in future:
+        print(f"future-dated: {e}.{a} = {render_value(r)} valid from {r.get('valid_from')} ({r.get('id')}) "
+              f"outranks every observation until then")
     if bad:
         print(f"malformed lines: {bad}")
     if dups:
@@ -928,6 +959,7 @@ def main():
     a.add_argument("entity"); a.add_argument("attr"); a.add_argument("value")
     a.add_argument("--kind", choices=["decided", "asserted"], default="asserted")
     a.add_argument("--since", help="when it became true (valid_from); default now")
+    a.add_argument("--future", action="store_true", help="allow a --since more than a few minutes ahead")
     a.add_argument("--source", action="append", help="[[Note]] or transcript/log ref; repeatable")
     a.add_argument("--by"); a.add_argument("--note")
     a.set_defaults(fn=cmd_add)
@@ -948,6 +980,7 @@ def main():
 
     r = sub.add_parser("retract", help="mark an attribute as no longer holding any value")
     r.add_argument("entity"); r.add_argument("attr"); r.add_argument("--since"); r.add_argument("--source", action="append")
+    r.add_argument("--future", action="store_true", help="allow a --since more than a few minutes ahead")
     r.add_argument("--by"); r.add_argument("--note"); r.set_defaults(fn=cmd_retract)
 
     c = sub.add_parser("contradict", help="record an unordered conflict between two facts")
