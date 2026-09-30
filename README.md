@@ -187,7 +187,10 @@ than a chatbot standing next to it.
 Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
 assume that. The two-machine sync, the state ledger and the reranked retrieval in this release
 were tested on macOS only (the test suite in `tests/` and a clean install); their Windows paths —
-hidden console windows, the git hook — have not been run yet. `rlm.py`'s read confinement is
+hidden console windows, the git hook — have not been run yet. A Windows vault cloned with
+`core.autocrlf=true` before `.gitattributes` pinned LF endings keeps its CRLF `pre-commit`, which
+refuses every commit: after pulling those rules, run `python tools/setup.py --fix-line-endings`
+once (it rewrites only files the rules pin to LF, and only their line endings). `rlm.py`'s read confinement is
 OS-enforced on macOS only; elsewhere, treat the REPL as able to read what your user can. The skills extractor is disabled in the default pipeline — it burned most of a
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
