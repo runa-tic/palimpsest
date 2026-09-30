@@ -2,7 +2,8 @@
 """Generate this week's review note: what landed, what's open, where projects stand.
 
 Writes Reviews/Weekly/YYYY-Www.md (per ISO week). Safe to run daily — it refreshes the
-current week's file in place. Wired into sync.py.
+generated block of the current week's file in place; your Reflection, and any loop you ticked,
+are kept. Wired into sync.py.
 
 Usage (from vault root):  python tools/weekly_review.py
 """
@@ -21,6 +22,10 @@ NOTES = VAULT / "10 Notes"
 PROJECTS = VAULT / "20 Projects"
 DAILY = VAULT / "Daily"
 CONVS = VAULT / "40 Resources" / "Claude Conversations"
+START, END = "<!-- weekly:start -->", "<!-- weekly:end -->"
+# One well-formed pair: a START with no other START before its END (see briefing.py).
+PAIR = re.compile(re.escape(START) + r"(?:(?!" + re.escape(START) + r").)*?" + re.escape(END), re.DOTALL)
+REFLECTION = "## ✍️ Reflection\n- What did I learn? What's the one thing to push next week?\n"
 
 def recent(folder: Path, days=7, recurse=False):
     cutoff = time.time() - days * 86400
@@ -80,7 +85,27 @@ def main():
 
     tasks = dedupe_tasks(open_tasks_today() + open_tasks_in(PROJECTS))
 
-    L = [f"---\ntype: review\nweek: {tag}\ntags:\n  - review\n---\n",
+    # The file invites writing (Reflection) and ticking (Open loops), and this runs every day. It
+    # used to rebuild the whole file, so each night's sync erased what was written that week.
+    # Only the marked block is regenerated now, and a loop ticked in it stays ticked.
+    old = out.read_text(encoding="utf-8") if out.exists() else None
+    pair = PAIR.search(old) if old is not None else None
+    if old is not None and not pair:
+        if START in old or END in old:
+            print(f"{out.relative_to(VAULT)}: unbalanced weekly markers — left untouched; restore "
+                  f"the {START} / {END} pair to refresh it.", file=sys.stderr)
+            return 1
+        # Written before the markers existed: everything above Reflection was generated.
+        r = re.search(r"(?m)^## ✍️ Reflection", old)
+        if not r:
+            print(f"{out.relative_to(VAULT)}: no generated block and no Reflection heading — left "
+                  f"untouched.", file=sys.stderr)
+            return 1
+    generated = pair.group(0) if pair else (old[:r.start()] if old is not None else "")
+    ticked = {m.group(1).strip() for m in re.finditer(r"^- \[[xX]\] (.+?)  <sub>", generated, re.M)}
+
+    front = f"---\ntype: review\nweek: {tag}\ntags:\n  - review\n---\n"
+    L = [START,
          f"# 🗓️ Weekly Review — {tag}",
          f"*Generated {datetime.now():%Y-%m-%d %H:%M}. Health snapshot: [[Vault Health]].*\n"]
 
@@ -94,14 +119,20 @@ def main():
     L += [f"- {'🟢' if s=='active' else '⚪'} [[{n}]] — `{s}`" for n, s in projects] or ["- *(none)*"]
 
     L.append(f"\n## 🔓 Open loops ({len(tasks)})")
-    L += [f"- [ ] {t}  <sub>([[{src}]])</sub>" for src, t in tasks] or ["- *(none)*"]
+    L += [f"- [{'x' if t.strip() in ticked else ' '}] {t}  <sub>([[{src}]])</sub>" for src, t in tasks] \
+        or ["- *(none)*"]
+    L.append(END)
+    block = "\n".join(L)
 
-    L.append("\n## ✍️ Reflection")
-    L.append("- What did I learn? What's the one thing to push next week?\n")
-
+    if pair:
+        text = old[:pair.start()] + block + old[pair.end():]
+    elif old is not None:
+        text = front + block + "\n\n" + old[r.start():]
+    else:
+        text = front + block + "\n\n" + REFLECTION
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(L), encoding="utf-8")
+    out.write_text(text, encoding="utf-8")
     print(f"Wrote {out.relative_to(VAULT)} — {len(new_notes)} notes, {len(new_convs)} convs, {len(tasks)} open tasks.")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
