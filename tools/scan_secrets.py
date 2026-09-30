@@ -47,13 +47,19 @@ SKIP_PATHS = {
 # (label, compiled regex). These shapes are high-confidence credentials.
 HIGH = [
     ("CoinGecko API key",   re.compile(r"CG-[A-Za-z0-9]{20,}")),
-    ("OpenAI key",          re.compile(r"sk-(?:proj-)?[A-Za-z0-9]{20,}")),
+    # Current keys (sk-proj-, sk-svcacct-, sk-admin-) have a base64url body with '_' and '-', so
+    # the alphanumeric-only class missed about half of them and cut the rest short, leaving the
+    # tail in the note (review, 2026-09-30). The lookbehind keeps prose like "risk-admin-..." out.
+    ("OpenAI key",          re.compile(r"(?<![A-Za-z0-9])sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"
+                                       r"|sk-[A-Za-z0-9]{20,}")),
     ("Anthropic key",       re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
     ("GitHub token",        re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}")),
     ("Google API key",      re.compile(r"AIza[A-Za-z0-9_-]{30,}")),
     ("Slack token",         re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
     ("AWS access key id",   re.compile(r"AKIA[0-9A-Z]{16}")),
-    ("Telegram bot token",  re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b")),
+    # Lookarounds, not \b: in a Bot API URL (.../bot<token>/getMe) "bot" runs straight into the
+    # digits, and a secret may end in '-'; \b missed both.
+    ("Telegram bot token",  re.compile(r"(?<![0-9])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])")),
     ("Private key block",   re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("Telegram api_hash",   re.compile(r"api_hash['\"\s:=]+[a-f0-9]{32}\b", re.I)),
 ]
