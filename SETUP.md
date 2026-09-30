@@ -23,7 +23,10 @@ not an afterthought, and a user told "four" will wonder what went wrong at the f
    is scrubbed from recorded transcripts and blocked at commit time. It is deny-list-only by
    design — blanket scrubbing shreds real content — so anything unlisted passes through
    verbatim. Ask for their email addresses and phone numbers now and write the file
-   immediately.
+   immediately, as UTF-8: `scan_pii` fails closed on a deny list that is not clean UTF-8 (or
+   UTF-16), blocking every commit until it is re-saved. Any PowerShell 5.1 command that appends
+   to it must pass `-Encoding utf8` (`Add-Content -Encoding utf8`); the default writes the ANSI
+   codepage.
    **Why first:** the `Stop` hook records this conversation to disk after *every* turn, and
    redaction is applied at write time against whatever the list holds *then*. Ask it fifth and
    four turns are already on disk unprotected — if they mention an address while answering an
