@@ -14,7 +14,7 @@ Usage (run from the vault root):
 Re-running is safe: a note is only rewritten if its source changed (tracked by id).
 """
 from __future__ import annotations
-import sys, os, re, json, argparse
+import sys, os, re, json, argparse, tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -27,6 +27,7 @@ except Exception:
 
 VAULT = Path(__file__).resolve().parent.parent
 OUT_BASE = VAULT / "40 Resources" / "Claude Conversations"
+TMP_DIR = Path(__file__).resolve().parent / "logs"   # gitignored, same filesystem as the vault
 
 # ---------- helpers ----------
 
@@ -54,7 +55,9 @@ def clean_text(s: str) -> str:
     return s.strip()
 
 def sanitize(name: str, maxlen: int = 80) -> str:
-    name = INVALID.sub(" ", name or "").strip()
+    # A title cut mid-emoji holds a lone surrogate, which no filesystem path can encode.
+    name = (name or "").encode("utf-8", "replace").decode("utf-8")
+    name = INVALID.sub(" ", name).strip()
     name = re.sub(r"\s+", " ", name)
     return (name[:maxlen].rstrip() or "Untitled")
 
@@ -138,11 +141,29 @@ def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
     except Exception:
         pass
     dest = folder / fname
+    # One newline convention, compared as bytes: read_text() turns "\r\n" into "\n", so a note
+    # holding a pasted CRLF log never compared equal and was rewritten on every import. A lone
+    # surrogate (an emoji cut in half in tool output) cannot be encoded; replace it rather than fail.
+    data = out.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8", "replace")
     # Content-stable: don't rewrite an unchanged note, or its mtime would bust the
     # extractor's cache and trigger needless re-extraction (and duplicate notes).
-    if dest.exists() and dest.read_text(encoding="utf-8") == out:
+    if dest.exists() and dest.read_bytes() == data:
         return
-    dest.write_text(out, encoding="utf-8")
+    # Atomic: write_text() truncates first, so any failure part-way left the existing
+    # conversation note empty, and the next Stop hook failed the same way and kept it empty.
+    # The temp file goes in the gitignored tools/logs/, not the auto-committed content folder.
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(TMP_DIR), prefix="import-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 # ---------- source 1: Claude Code JSONL ----------
 
@@ -249,9 +270,18 @@ def import_code(args):
         print(f"No transcripts found under {projects}"
               + ("" if getattr(args, "all_projects", False) else f"/{slug}"))
         return
-    count = sum(1 for f in files
-                if process_transcript(f, args.include_thinking, args.include_tools))
+    count, failed = 0, []
+    for f in files:
+        # One transcript that cannot be written must not abort the batch before the rest.
+        try:
+            count += bool(process_transcript(f, args.include_thinking, args.include_tools))
+        except Exception as e:
+            print(f"  ! {f.name}: {type(e).__name__}: {e}")
+            failed.append(f.name)
     print(f"Imported {count} Claude Code conversation(s) into {OUT_BASE / 'Claude Code'}")
+    if failed:
+        print(f"FAILED on {len(failed)} transcript(s): " + ", ".join(failed[:5]) + (" …" if len(failed) > 5 else ""))
+        sys.exit(1)
 
 def import_file(args):
     """Import a single transcript by path (used by the live-recording Stop hook)."""
