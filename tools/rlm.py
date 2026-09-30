@@ -127,8 +127,17 @@ def _clip(s: str, n: int) -> str:
     return s[: n // 2] + f"\n…[{len(s)-n} chars elided]…\n" + s[-n // 2:]
 
 
+_FINAL = re.compile(r"\A\s*FINAL[ \t]*(?:\n|\Z)", re.I)
+_CODE = re.compile(r"```[ \t]*(?:python|py)[\d.]*[ \t]*\n(.*?)```", re.I | re.S)
+
+
 def _code_of(reply: str) -> str | None:
-    m = re.search(r"```(?:python|py)?\s*\n(.*?)```", reply, re.S)
+    """The step's code, or None when the reply is the answer. FINAL is checked first and only a
+    fence tagged python/py counts: the tag used to be optional, so a FINAL quoting a command in a
+    plain ``` block was executed as REPL code and the answer thrown away (review, 2026-09-30)."""
+    if _FINAL.match(reply):
+        return None
+    m = _CODE.search(reply)
     return m.group(1) if m else None
 
 
@@ -263,8 +272,14 @@ def main() -> int:
             break
         code = _code_of(reply)
         if code is None:
-            answer = re.sub(r"^\s*FINAL\s*\n", "", reply.strip(), flags=re.I)
+            answer = _FINAL.sub("", reply.strip(), count=1).strip()
             rec({"t": "final", "step": step, "answer": answer})
+            break
+        if step == args.steps:
+            # The last step was told not to write code; running it anyway only spends time and
+            # sub-agents on output nobody will read.
+            rec({"t": "code_not_run", "step": step, "code": code})
+            stopped = "[stopped: step budget exhausted before the root model produced an answer]"
             break
         print(f"── step {step} ──")
         print(textwrap.indent(_clip(code, 900), "  "))
