@@ -356,15 +356,23 @@ def render_value(rec: dict) -> str:
     return "∅ (retracted)" if v is None else str(v)
 
 
+def day(iso_s: str | None) -> str:
+    # A date-only --since is stored as midnight UTC; converted to local time it showed the day
+    # before anywhere west of UTC. Midnight UTC renders as the date it was given.
+    if iso_s and iso_s.endswith("T00:00:00Z"):
+        return iso_s[:10]
+    return local(iso_s, "%Y-%m-%d")
+
+
 def when_str(rec: dict, eid: str, attr: str, obs: dict) -> str:
     k = rec.get("kind")
     if k == "observed":
         return f"seen {local(last_seen(rec, eid, attr, obs), '%m-%d %H:%M')}"
     if k == "decided":
-        return f"decided {local(rec.get('valid_from'), '%Y-%m-%d')}"
+        return f"decided {day(rec.get('valid_from'))}"
     if k == "retracted":
-        return f"retracted {local(rec.get('valid_from'), '%Y-%m-%d')}"
-    return f"since {local(rec.get('valid_from'), '%Y-%m-%d')}"
+        return f"retracted {day(rec.get('valid_from'))}"
+    return f"since {day(rec.get('valid_from'))}"
 
 
 ATTR_ORDER = ["host", "role", "decision", "status", "active", "gate", "ref", "enabled", "armed",
