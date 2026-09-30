@@ -33,6 +33,20 @@ def words(s: str) -> set[str]:
     # so a Russian note's title contributed nothing to related-note ranking.
     return {w for w in re.findall(r"[^\W_]+", s.lower()) if w not in STOP and len(w) > 3}
 
+
+def read_note(f: Path) -> str | None:
+    """A note's text, or None (with a warning) when it is not valid UTF-8.
+
+    One file saved as cp1251 by PowerShell 5.1 or a legacy editor used to abort the whole run
+    with a traceback, so no note in the vault got linked until it was found by hand. Skipping it
+    is also what keeps it safe: a file decoded lossily must never be written back.
+    """
+    try:
+        return f.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"  skipped (not UTF-8, left untouched): {f.relative_to(VAULT)}", file=sys.stderr)
+        return None
+
 def frontmatter_tags(text: str) -> list[str]:
     """Tags from frontmatter, in BOTH YAML forms.
 
@@ -40,12 +54,19 @@ def frontmatter_tags(text: str) -> list[str]:
     inline form (`tags: [x, y]`). Since every MOC assignment is driven by tags, those notes were
     unassignable — 118 of them, all reported as untagged by this parser while maintenance.py,
     which handles both forms, correctly reported zero untagged notes in the vault.
+
+    The block list is read under the `tags:` key only; matching every indented `- x` in the
+    frontmatter counted `aliases:` entries as tags. A leading BOM (PowerShell 5.1's UTF8, older
+    Notepad) is skipped, or the anchored match fails and a tagged note reads as untagged.
     """
-    m = re.match(r"---\n(.*?)\n---", text, re.DOTALL)
+    m = re.match(r"---\n(.*?)\n---", text.lstrip("\ufeff"), re.DOTALL)
     if not m:
         return []
     fmt = m.group(1)
-    tags = re.findall(r"^\s+- (.+?)\s*$", fmt, re.M)
+    tags = []
+    blk = re.search(r"^tags:[ \t]*\n((?:[ \t]*-[ \t]*.+\n?)+)", fmt, re.M)
+    if blk:
+        tags += re.findall(r"^[ \t]*-[ \t]*(.+?)[ \t]*$", blk.group(1), re.M)
     inline = re.search(r"^tags:\s*\[(.*?)\]", fmt, re.M)
     if inline:
         tags += [t.strip().strip("\"'") for t in inline.group(1).split(",") if t.strip()]
@@ -56,7 +77,9 @@ def load_notes() -> dict[str, dict]:
     for f in NOTES.glob("*.md"):
         if f.name.startswith("_"):
             continue
-        txt = f.read_text(encoding="utf-8")
+        txt = read_note(f)
+        if txt is None:
+            continue
         out[f.stem] = {"path": f, "text": txt,
                        "tags": set(frontmatter_tags(txt)), "words": words(f.stem)}
     return out
@@ -66,8 +89,10 @@ def load_mocs() -> dict[str, list[str]]:
     for f in MOCS.glob("*.md"):
         if f.name.startswith("_"):
             continue
-        members = re.findall(r"- \[\[([^\]]+)\]\]", f.read_text(encoding="utf-8"))
-        mocs[f.stem] = members
+        txt = read_note(f)
+        if txt is None:          # never rewritten: not in mocs, so never rebuilt or appended to
+            continue
+        mocs[f.stem] = re.findall(r"- \[\[([^\]]+)\]\]", txt)
     return mocs
 
 
@@ -82,7 +107,7 @@ def declared_tags() -> dict[str, set[str]]:
     for f in MOCS.glob("*.md"):
         if f.name.startswith("_"):
             continue
-        m = re.match(r"---\n(.*?)\n---", f.read_text(encoding="utf-8"), re.DOTALL)
+        m = re.match(r"---\n(.*?)\n---", (read_note(f) or "").lstrip("\ufeff"), re.DOTALL)
         tags = []
         if m:
             fmt = m.group(1)
@@ -142,8 +167,8 @@ def refresh_moc_index(moc_names) -> None:
         return
     body = ("\n".join(f"- [[{n}]]" for n in sorted(moc_names))
             or "*(none yet — create your first map from `templates/MOC.md`)*")
-    txt = INDEX.read_text(encoding="utf-8")
-    if IDX_START not in txt or IDX_END not in txt:
+    txt = read_note(INDEX)
+    if txt is None or IDX_START not in txt or IDX_END not in txt:
         return
     new = re.sub(re.escape(IDX_START) + r".*?" + re.escape(IDX_END),
                  f"{IDX_START}\n{body}\n{IDX_END}", txt, flags=re.DOTALL)
