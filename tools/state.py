@@ -192,16 +192,34 @@ def load_facts(path: Path = FACTS) -> tuple[list[dict], int]:
     return facts, bad
 
 
-def fact_id(entity: str, attr: str, value, valid_from: str) -> str:
-    return hashlib.sha1(f"{entity}|{attr}|{'' if value is None else value}|{valid_from}".encode("utf-8")).hexdigest()[:12]
+def fact_id(entity: str, attr: str, value, valid_from: str, seq: int = 0) -> str:
+    # seq 0 keeps the original id scheme, so every fact already on file keeps its id
+    key = f"{entity}|{attr}|{'' if value is None else value}|{valid_from}" + (f"|{seq}" if seq else "")
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
 def append(fact: dict, path: Path = FACTS) -> bool:
-    """Append one fact; identical (entity, attr, value, valid_from) is a no-op. Never rewrites."""
+    """Append one fact. Never rewrites. A no-op only when it would not change anything: the key's
+    CURRENT fact already has this value, kind and valid_from (a retry, or a second machine
+    recording the same observation). Every append stamps `seq` = how many facts the key already
+    has, which orders facts recorded in the same second; and a return to an earlier value
+    (up -> down -> up) whose id would collide with the first gets a seq-qualified id instead of
+    being dropped as a duplicate (it was, until 2026-09-30, leaving the key at 'down')."""
     STATE.mkdir(parents=True, exist_ok=True)
     existing, _ = load_facts(path)
+    same = [f for f in existing if f.get("entity") == fact.get("entity") and f.get("attr") == fact.get("attr")
+            and f.get("kind") != "contradicts"]
+    if fact.get("kind") != "contradicts" and same:
+        cur = fold(same).get(fact["entity"], {}).get(fact["attr"]) or {}
+        if (cur.get("value") == fact.get("value") and cur.get("kind") == fact.get("kind")
+                and cur.get("valid_from") == fact.get("valid_from")):
+            return False
+    if fact.get("kind") != "contradicts":
+        fact["seq"] = len(same)
     if any(f.get("id") == fact["id"] for f in existing):
-        return False
+        if fact.get("kind") == "contradicts" or not fact.get("seq"):
+            return False
+        fact["id"] = fact_id(fact["entity"], fact["attr"], fact.get("value"), fact["valid_from"], fact["seq"])
     with path.open("a", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(fact, ensure_ascii=False) + "\n")
     return True
@@ -268,12 +286,23 @@ def fold(facts: list[dict]) -> dict:
         hist.setdefault((f["entity"], f["attr"]), []).append(f)
     cur: dict[str, dict[str, dict]] = {}
     for (e, a), fs in hist.items():
-        fs.sort(key=lambda x: (x.get("valid_from") or x["t"], x["t"]))
+        # A total order, so the fold never depends on line order (the union merge of facts.jsonl
+        # interleaves two machines' lines): valid_from, then record time, then seq (same-machine
+        # order within one second), then value and id as a last, arbitrary but stable resolution.
+        order = lambda x: (x.get("valid_from") or x["t"], x["t"], x.get("seq") or 0, str(x.get("value")), x.get("id") or "")
+        fs.sort(key=order)
         latest = fs[-1]
         rec = {k: latest.get(k) for k in ("value", "valid_from", "t", "kind", "by", "source", "id", "note")}
         if latest.get("kind") == "retracted":
             rec["value"] = None
         rec["superseded"] = [x["id"] for x in fs[:-1]]
+        tied = [x for x in fs[:-1] if order(x)[:3] == order(latest)[:3] and x.get("value") != latest.get("value")]
+        if tied:
+            # Nothing orders these (two machines, same second): the value shown is a tie-break,
+            # not knowledge, so say so where every reader looks — the conflicts list.
+            rec["conflicts"] = [{"ids": [x["id"] for x in tied] + [latest["id"]],
+                                 "reason": "facts recorded in the same second disagree; shown value is a tie-break",
+                                 "confidence": None, "t": latest["t"]}]
         cur.setdefault(e, {})[a] = rec
     for c in contras:
         e, a = c["entity"], c["attr"]
