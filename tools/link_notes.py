@@ -29,7 +29,23 @@ MOCS = VAULT / "60 Maps of Content"
 STOP = set("a an the of to in on for and or is are be not with from as at by it its this that than into".split())
 
 def words(s: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in STOP and len(w) > 3}
+    # Unicode word characters, not [a-z0-9]: the ASCII class dropped every Cyrillic title word,
+    # so a Russian note's title contributed nothing to related-note ranking.
+    return {w for w in re.findall(r"[^\W_]+", s.lower()) if w not in STOP and len(w) > 3}
+
+
+def read_note(f: Path) -> str | None:
+    """A note's text, or None (with a warning) when it is not valid UTF-8.
+
+    One file saved as cp1251 by PowerShell 5.1 or a legacy editor used to abort the whole run
+    with a traceback, so no note in the vault got linked until it was found by hand. Skipping it
+    is also what keeps it safe: a file decoded lossily must never be written back.
+    """
+    try:
+        return f.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"  skipped (not UTF-8, left untouched): {f.relative_to(VAULT)}", file=sys.stderr)
+        return None
 
 def frontmatter_tags(text: str) -> list[str]:
     """Tags from frontmatter, in BOTH YAML forms.
@@ -38,12 +54,19 @@ def frontmatter_tags(text: str) -> list[str]:
     inline form (`tags: [x, y]`). Since every MOC assignment is driven by tags, those notes were
     unassignable — 118 of them, all reported as untagged by this parser while maintenance.py,
     which handles both forms, correctly reported zero untagged notes in the vault.
+
+    The block list is read under the `tags:` key only; matching every indented `- x` in the
+    frontmatter counted `aliases:` entries as tags. A leading BOM (PowerShell 5.1's UTF8, older
+    Notepad) is skipped, or the anchored match fails and a tagged note reads as untagged.
     """
-    m = re.match(r"---\n(.*?)\n---", text, re.DOTALL)
+    m = re.match(r"---\n(.*?)\n---", text.lstrip("\ufeff"), re.DOTALL)
     if not m:
         return []
     fmt = m.group(1)
-    tags = re.findall(r"^\s+- (.+?)\s*$", fmt, re.M)
+    tags = []
+    blk = re.search(r"^tags:[ \t]*\n((?:[ \t]*-[ \t]*.+\n?)+)", fmt, re.M)
+    if blk:
+        tags += re.findall(r"^[ \t]*-[ \t]*(.+?)[ \t]*$", blk.group(1), re.M)
     inline = re.search(r"^tags:\s*\[(.*?)\]", fmt, re.M)
     if inline:
         tags += [t.strip().strip("\"'") for t in inline.group(1).split(",") if t.strip()]
@@ -54,7 +77,9 @@ def load_notes() -> dict[str, dict]:
     for f in NOTES.glob("*.md"):
         if f.name.startswith("_"):
             continue
-        txt = f.read_text(encoding="utf-8")
+        txt = read_note(f)
+        if txt is None:
+            continue
         out[f.stem] = {"path": f, "text": txt,
                        "tags": set(frontmatter_tags(txt)), "words": words(f.stem)}
     return out
@@ -64,8 +89,10 @@ def load_mocs() -> dict[str, list[str]]:
     for f in MOCS.glob("*.md"):
         if f.name.startswith("_"):
             continue
-        members = re.findall(r"- \[\[([^\]]+)\]\]", f.read_text(encoding="utf-8"))
-        mocs[f.stem] = members
+        txt = read_note(f)
+        if txt is None:          # never rewritten: not in mocs, so never rebuilt or appended to
+            continue
+        mocs[f.stem] = re.findall(r"- \[\[([^\]]+)\]\]", txt)
     return mocs
 
 
@@ -80,7 +107,7 @@ def declared_tags() -> dict[str, set[str]]:
     for f in MOCS.glob("*.md"):
         if f.name.startswith("_"):
             continue
-        m = re.match(r"---\n(.*?)\n---", f.read_text(encoding="utf-8"), re.DOTALL)
+        m = re.match(r"---\n(.*?)\n---", (read_note(f) or "").lstrip("\ufeff"), re.DOTALL)
         tags = []
         if m:
             fmt = m.group(1)
@@ -112,11 +139,17 @@ def moc_score(note_tags: set, profile: Counter, n_members: int, declared: set) -
         s += DECLARED_WEIGHT * len(note_tags & declared) / len(note_tags)
     return s
 
-REL_PAT = re.compile(r"## Related\n.*?(?=\n## Source|\Z)", re.DOTALL)
+# The Related LIST only: the heading plus the list lines directly under it. This used to run to
+# the next "## Source" or to the end of the file, so a hand-written note with sections after
+# Related and no Source (common) lost all of them to the regenerated links.
+REL_PAT = re.compile(r"## Related\n(?:[ \t]*\n)*(?:[ \t]*- .*(?:\n|\Z))*")
 
 def needs_linking(text: str) -> bool:
     m = REL_PAT.search(text)
     return bool(m) and "[[ ]]" in m.group(0)
+
+# A MOC's generated "## Notes" list: every "- [[x]]..." line under the heading, annotated or not.
+NOTES_LIST = re.compile(r"\n## Notes[ \t]*\n((?:- \[\[[^\]]+\]\][^\n]*(?:\n|\Z))*)")
 
 INDEX = MOCS / "_MOC Index.md"
 IDX_START, IDX_END = "<!-- moc-index:start -->", "<!-- moc-index:end -->"
@@ -134,8 +167,8 @@ def refresh_moc_index(moc_names) -> None:
         return
     body = ("\n".join(f"- [[{n}]]" for n in sorted(moc_names))
             or "*(none yet — create your first map from `templates/MOC.md`)*")
-    txt = INDEX.read_text(encoding="utf-8")
-    if IDX_START not in txt or IDX_END not in txt:
+    txt = read_note(INDEX)
+    if txt is None or IDX_START not in txt or IDX_END not in txt:
         return
     new = re.sub(re.escape(IDX_START) + r".*?" + re.escape(IDX_END),
                  f"{IDX_START}\n{body}\n{IDX_END}", txt, flags=re.DOTALL)
@@ -191,12 +224,20 @@ def main():
             # human work — never duplicate it into the flat block below. Anything already linked
             # OUTSIDE the "## Notes" section is left exactly where the author put it and dropped
             # from the generated part.
-            without = re.sub(r"\n## Notes\n(?:- \[\[[^\]]+\]\]\n?)*", "\n", txt)
-            curated = set(re.findall(r"- \[\[([^\]|#]+)", without))
+            #
+            # An annotated entry in the list itself ("- [[A]] — why it matters") is the same kind
+            # of work. The list pattern used to match bare "- [[A]]" only, so it stopped at the
+            # annotation: the text was split off onto a line of its own and every entry after it
+            # was frozen as "curated". Whole lines now; annotated ones are kept verbatim.
+            sec = NOTES_LIST.search(txt)
+            kept = [l for l in (sec.group(1).splitlines() if sec else [])
+                    if not re.fullmatch(r"- \[\[[^\]|#]+\]\]\s*", l)]
+            without = (txt[:sec.start()] + "\n" + txt[sec.end():]) if sec else txt
+            curated = set(re.findall(r"- \[\[([^\]|#]+)", "\n".join([without, *kept])))
             fresh = [m for m in sorted(members) if m not in curated]
-            block = "## Notes\n" + "\n".join(f"- [[{m}]]" for m in fresh) + "\n"
-            if re.search(r"\n## Notes\n", txt):
-                txt = re.sub(r"\n## Notes\n(?:- \[\[[^\]]+\]\]\n?)*", "\n" + block, txt, count=1)
+            block = "## Notes\n" + "".join(l + "\n" for l in kept + [f"- [[{m}]]" for m in fresh])
+            if sec:
+                txt = txt[:sec.start()] + "\n" + block + txt[sec.end():]
             else:
                 # keep the generated list ABOVE a trailing "*Part of [[_MOC Index]].*" footer
                 foot = re.search(r"\n---\n\*Part of .*?\*\s*$", txt, re.DOTALL)
@@ -233,17 +274,21 @@ def main():
         links += [f"- [[{r}]]" for r in related]
         if not links:
             continue
-        new_text = REL_PAT.sub("## Related\n" + "\n".join(links) + "\n", n["text"])
+        new_text = REL_PAT.sub(lambda _m: "## Related\n" + "\n".join(links) + "\n", n["text"], count=1)
         n["path"].write_text(new_text, encoding="utf-8")
 
         # add to MOC note list if not present
         if best_moc and stem not in mocs.get(best_moc, []):
             mf = MOCS / f"{best_moc}.md"
             mt = mf.read_text(encoding="utf-8")
-            if "## Notes" in mt:
-                mt = mt.replace("## Notes\n", f"## Notes\n- [[{stem}]]\n", 1)
+            # The exact heading line. A substring test passed on "## Notes & links" while the
+            # replace() below found nothing, so the MOC was rewritten unchanged, the note's
+            # placeholder was already gone, and it was never retried.
+            h = re.search(r"(?m)^## Notes[ \t]*$", mt)
+            if h:
+                mt = mt[:h.end()] + f"\n- [[{stem}]]" + mt[h.end():]
             else:
-                mt += f"\n## Notes\n- [[{stem}]]\n"
+                mt = mt.rstrip("\n") + f"\n\n## Notes\n- [[{stem}]]\n"
             mf.write_text(mt, encoding="utf-8")
             mocs[best_moc].append(stem)
         print(f"  linked: {stem}  ->  {best_moc or '(no MOC match)'}")
