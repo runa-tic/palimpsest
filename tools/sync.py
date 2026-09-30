@@ -41,6 +41,10 @@ import config as cfgmod
 # this file's — see tools/config.py for what each choice costs and tools/setup.py to make
 # them. Order below is the pipeline order; palimpsest.json only toggles and re-times it.
 CFG = cfgmod.load()
+# Why that load fell back to DEFAULTS ('' when palimpsest.json is fine or absent). On DEFAULTS pull,
+# push and state are OFF, so every step can run clean while the backup has silently stopped: the
+# run counts it as a failure of its own (see _main).
+CONFIG_PROBLEM = cfgmod.problem()
 _ARGS = {
     # Pull FIRST: regenerating the briefing or the reviews before pulling is how two machines
     # end up writing the same day's note on different bases.
@@ -77,6 +81,7 @@ def write_status(started: datetime, failures: list[str]):
             "steps": len(STEPS),
             "failures": failures,
             "ok": not failures,
+            **({"config_problem": CONFIG_PROBLEM} if CONFIG_PROBLEM else {}),
         }, indent=2), encoding="utf-8")
     except Exception as e:
         log(f"!! could not write {STATUS.name}: {e}")
@@ -125,6 +130,11 @@ def _main():
     started = datetime.now()
     log(f"\n===== SYNC START {started:%Y-%m-%d %H:%M:%S} =====")
     failures: list[str] = []
+    if CONFIG_PROBLEM:
+        log(f"!! config: {CONFIG_PROBLEM}")
+        log("!! WARNING this run uses DEFAULTS — pull, push and state are OFF — so its verdict is FAILED")
+        print(f"config: FAILED (config) — {CONFIG_PROBLEM}. Running on DEFAULTS: pull, push and state are OFF.")
+        failures.append("config")
     for name, args, timeout in STEPS:
         log(f"\n[{datetime.now():%H:%M:%S}] === {name} ===")
         why = skip_reason(name, failures)

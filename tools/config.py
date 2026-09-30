@@ -14,17 +14,13 @@ makes four decisions deliberately instead of inheriting one person's habits:
 vault with an onboarding brief instead of a briefing.
 """
 from __future__ import annotations
-import atexit, json, os, sys
+import json, sys
 from pathlib import Path
 from datetime import datetime
 
 TOOLS = Path(__file__).resolve().parent
 VAULT = TOOLS.parent
 CONFIG = VAULT / "palimpsest.json"
-# The nightly sync's receipt and log (tools/sync.py). Named here only so a run that fell back to
-# DEFAULTS can amend its own verdict — see _amend_sync_receipt.
-SYNC_STATUS = TOOLS / ".sync_status.json"
-SYNC_LOG = TOOLS / "sync.log"
 # `config.py --check` exits with this when palimpsest.json is unreadable (distinct from 1, which a
 # Python crash also returns, and from 9009, a missing interpreter on Windows).
 CHECK_BROKEN = 3
@@ -94,7 +90,7 @@ class ConfigError(ValueError):
     """palimpsest.json exists but cannot be read as a JSON object."""
 
 
-_FELL_BACK: datetime | None = None    # when this process first fell back to DEFAULTS
+_WARNED = False
 
 
 def _read_user() -> dict:
@@ -133,8 +129,9 @@ def load(strict: bool = False) -> dict:
     Degrading must not read as a clean night, though: pull, push and state default OFF, so a sync
     on DEFAULTS reports every step it ran as clean while the backup and the pull have silently
     stopped. A stderr warning alone does not reach anyone (cron discarded it, and a hook's stderr
-    never reaches the session), so a fallback also amends the sync's receipt — see
-    _amend_sync_receipt. The opener reads that receipt, so it says FAILED after the run."""
+    never reaches the session), so each caller asks problem() and says so where it reports:
+    sync.py counts a `config` failure in its receipt and log, the opener prints a Config line,
+    vault_push names the unreadable file instead of an unset push_remote."""
     cfg = json.loads(json.dumps(DEFAULTS))
     try:
         user = _read_user()
@@ -152,61 +149,13 @@ def load(strict: bool = False) -> dict:
 
 
 def _fell_back(why: str) -> None:
-    """Once per process: warn on stderr and arrange for the sync receipt to be amended at exit."""
-    global _FELL_BACK
-    if _FELL_BACK is not None:
+    """Once per process: warn on stderr."""
+    global _WARNED
+    if _WARNED:
         return
-    _FELL_BACK = datetime.now().replace(microsecond=0)
+    _WARNED = True
     print(f"palimpsest: WARNING {why}. Running on DEFAULTS until it is fixed — pull, push "
           f"and state are OFF.", file=sys.stderr)
-    atexit.register(_amend_sync_receipt, why, _FELL_BACK)
-
-
-def _amend_sync_receipt(why: str, since: datetime) -> None:
-    """At exit of a process that fell back: if that process wrote the sync receipt (a receipt
-    whose run started no earlier than the fallback — sync.py loads the config at import, before
-    its run starts), mark the run FAILED with a `config` entry, say why in sync.log and on stdout,
-    and exit 1 as sync.py does for any failed step. Every other caller (the opener, the push, the
-    ledger, a pipeline step inside the sync) finds an older receipt and leaves it alone.
-
-    This lives here, not in sync.py, only because this fix was limited to the setup/config files;
-    the natural home is sync.py's write_status. Limits, stated plainly:
-      * The opener learns of a broken config from the receipt, so it keeps showing the last
-        run's verdict until the next sync runs on the broken file. The launchers
-        (claude-code.sh, Claude Code.cmd) check at start and print the problem meanwhile; a
-        session started any other way hears of it only after the next sync.
-      * sync.py still prints "Sync complete (all steps clean)" before this runs; the line after
-        it, the receipt, the log and the exit code say FAILED.
-      * A run killed outright (SIGKILL, power loss) runs no exit handlers; it also writes no
-        receipt, so there is nothing to amend."""
-    try:
-        d = json.loads(SYNC_STATUS.read_text(encoding="utf-8"))
-        if datetime.fromisoformat(d["started"]) < since:
-            return
-        failures = list(d.get("failures") or [])
-        if any(str(f).startswith("config") for f in failures):
-            return
-        failures.append(f"config: {CONFIG.name} unreadable, ran on DEFAULTS (pull, push, state off)")
-        d.update(failures=failures, ok=False, config_problem=why)
-        SYNC_STATUS.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    except Exception:
-        return    # no receipt from this process (or none at all): nothing to amend
-    try:
-        with SYNC_LOG.open("a", encoding="utf-8") as f:
-            f.write(f"!! WARNING config: {why}\n!! this run used DEFAULTS — pull, push and state were "
-                    f"OFF — so its verdict is FAILED, whatever the steps above say\n")
-    except OSError:
-        pass
-    print(f"Sync verdict: FAILED (config) — {why}. This run used DEFAULTS: pull, push and state "
-          f"were OFF.")
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.flush()
-        except Exception:
-            pass
-    # sys.exit() inside an exit handler is ignored; os._exit is the only way to change the status.
-    # Handlers registered after this one have already run (they run last-in, first-out).
-    os._exit(1)
 
 
 def save(cfg: dict) -> None:
