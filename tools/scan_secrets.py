@@ -36,9 +36,10 @@ ALLOW_FILE = TOOLS / ".secret_scan_allow.txt"
 
 # Directories never scanned (protected, binary-heavy, or would self-flag).
 SKIP_DIRS = {".git", "_media", "node_modules", ".obsidian", "__pycache__"}
-# Specific repo-relative paths never scanned.
+# Specific repo-relative paths never scanned, matched exactly. A prefix match exempted anything
+# starting "tools/.secrets" (.secrets.env, .secrets_backup), and nothing gitignores those, so a
+# credentials file was committed "clean"; a secrets file is exactly what should block.
 SKIP_PATHS = {
-    "tools/.secrets",
     "tools/scan_secrets.py",
     "tools/.secret_scan_allow.txt",
     "tools/.redact_terms.txt",
@@ -156,7 +157,7 @@ def is_skipped(rel: str) -> bool:
     parts = rel.replace("\\", "/").split("/")
     if any(d in SKIP_DIRS for d in parts):
         return True
-    return any(rel.replace("\\", "/").startswith(s) for s in SKIP_PATHS)
+    return rel.replace("\\", "/") in SKIP_PATHS
 
 
 def read_file(p: Path) -> str | None:
