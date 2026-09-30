@@ -254,6 +254,17 @@ def _run() -> int:
         existing = [p for p in existing if p not in ignored]
     if ignored:
         print(f"vault-push: NOT backing up (gitignored): {', '.join(ignored)}")
+    # Anything outside the content folders and the code is never staged, and was never mentioned
+    # either: a note at the vault root or Obsidian's pasted attachments (the root, by default)
+    # were silently left out of the backup (review, 2026-09-30). Reported, not staged — an allow
+    # list cannot push what it never names, so what lives outside it stays the user's call.
+    known = set(CONTENT) | set(CODE)
+    outside = sorted({p.split("/")[0] + ("/" if "/" in p else "")
+                      for _, ps in status() for p in ps if p.split("/")[0] not in known})
+    if outside:
+        more = f" and {len(outside) - 8} more" if len(outside) > 8 else ""
+        print(f"vault-push: NOT backing up (outside the content folders): {', '.join(outside[:8])}{more} "
+              "— move into a content folder, commit by hand, or gitignore to silence")
     if not existing:
         print("vault-push: every content path is gitignored — nothing can be backed up")
         return 1
