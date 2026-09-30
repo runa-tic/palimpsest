@@ -28,6 +28,8 @@ VAULT = Path(__file__).resolve().parent.parent
 CONV_DIR = VAULT / "40 Resources" / "Claude Conversations"
 NOTES_DIR = VAULT / "10 Notes"
 STATE_FILE = Path(__file__).resolve().parent / ".extract_state.json"
+# Locks and temp files live in tools/logs/, which is gitignored: per machine, never committed.
+LOCK_DIR = Path(__file__).resolve().parent / "logs"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -81,16 +83,142 @@ def sanitize(name: str, maxlen: int = 90, maxbytes: int = 200) -> str:
     return name or "Untitled"
 
 
-def load_state() -> dict:
-    if STATE_FILE.exists():
+class StateCorrupt(ValueError):
+    pass
+
+
+def read_state(path: Path) -> dict:
+    """The checkpoint, or {} when there is none yet. An unreadable one RAISES: treating a file
+    truncated by a kill mid-write as {} re-sent every conversation to the model and wrote a fresh
+    near-duplicate of every note, and the run still exited 0."""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
+        raise StateCorrupt(f"{path.name} is unreadable ({e})") from None
+    if not isinstance(data, dict):
+        raise StateCorrupt(f"{path.name} is not a JSON object")
+    return data
+
+
+def write_state(path: Path, state: dict):
+    # Atomic: write a temp file, then rename over. Rewriting in place left a truncated file
+    # whenever sync.py's timeout killed the step mid-write. The temp file sits in the gitignored
+    # logs dir (same filesystem), so one orphaned by a kill is never committed.
+    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(LOCK_DIR), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(state, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
         try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def load_state() -> dict:
+    return read_state(STATE_FILE)
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    write_state(STATE_FILE, state)
+
+
+def open_state(load, path: Path, force: bool) -> dict:
+    """load() or a loud stop. With --force (which reprocesses everything anyway) the bad file is
+    moved aside, not deleted, and the run starts over."""
+    try:
+        return load()
+    except StateCorrupt as e:
+        if not force:
+            print(f"ERROR: {e}. Refusing to start from an empty checkpoint: that re-extracts every "
+                  f"conversation and duplicates their notes. Repair or remove {path}, or rerun with --force.")
+            sys.exit(1)
+        aside = path.with_name(path.name + ".corrupt")
+        os.replace(path, aside)
+        print(f"! {e}; moved it to {aside.name} and starting over (--force)")
+        return {}
+
+
+_LOCKS = []   # held open for the life of the process; the OS releases them if it is killed
+
+
+def hold_lock(name: str) -> bool:
+    """One extraction run of each kind at a time. Two overlapping runs (a manual one and the
+    scheduled sync) each sent every pending conversation to the model, wrote both wordings, and
+    the last save dropped the other run's checkpoints. An OS lock, not an O_EXCL file, so a run
+    that sync.py kills on timeout cannot leave a stale lock behind."""
+    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    fh = open(LOCK_DIR / name, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    _LOCKS.append(fh)
+    return True
+
+
+def content_sig(transcript: str) -> str:
+    """Checkpoint key: the text sent to the model, not the file's mtime. Git does not keep mtimes,
+    so a push-time rebase or a pull re-extracted conversations that had not changed; line endings
+    are normalised so a CRLF checkout hashes the same as the machine that wrote the note."""
+    norm = transcript.replace("\r\n", "\n").replace("\r", "\n")
+    return "sha1:" + hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def is_extracted(prev: dict, st: os.stat_result, sig: str, done_elsewhere: set) -> bool:
+    """Whether this content was already extracted, here or on another machine."""
+    if prev.get("sig") == sig or sig in done_elsewhere:
+        return True
+    # An entry from before content hashing holds "mtime_ns:size". The same size means only the
+    # mtime moved (a rebase, or a frontmatter-only re-import): adopt it instead of re-sending every
+    # conversation in the vault once on upgrade. Growth always changes the size.
+    old = str(prev.get("sig") or "")
+    return bool(re.fullmatch(r"\d+:\d+", old)) and old.split(":")[1] == str(st.st_size)
+
+
+def source_index(*dirs: Path) -> dict:
+    """{conversation stem: [(note stem, source_hash or "")]} from the notes' own frontmatter. These
+    travel with git, so a machine that never ran this conversation still sees what was taken from
+    it — the local checkpoint is per machine."""
+    out: dict = {}
+    for d in dirs:
+        for p in sorted(d.glob("*.md")) if d.exists() else []:
+            try:
+                head = p.read_text(encoding="utf-8", errors="ignore")[:4000]
+            except OSError:
+                continue
+            fm = re.match(r"---\n(.*?)\n---", head, re.DOTALL)
+            src = re.search(r'^source:\s*"?\[\[(.+?)\]\]', fm.group(1), re.M) if fm else None
+            if src:
+                h = re.search(r"^source_hash:\s*(\S+)", fm.group(1), re.M)
+                out.setdefault(src.group(1), []).append((p.stem, h.group(1) if h else ""))
+    return out
+
+
+def captured_block(titles) -> str:
+    """Tell the model what this conversation already yielded. A conversation that grows is sent
+    again in full, and without this the model restated its day-one insights under new titles,
+    which only an exact filename match could have caught."""
+    titles = [t for t in dict.fromkeys(titles) if t]
+    if not titles:
+        return ""
+    return ("\nALREADY CAPTURED from this conversation on an earlier pass. Do NOT return these again, "
+            "even reworded; return only what they do not cover:\n"
+            + "".join(f"- {t}\n" for t in titles))
+
 
 def as_text(v) -> str:
     """A model field as one line of text; a list or number where a string was asked for is
@@ -152,8 +280,8 @@ def run_claude(prompt: str, model: str) -> str:
 
 MAX_CHARS = 350_000  # keep a single request comfortably within the context window
 
-def call_claude(transcript: str, model: str) -> str:
-    return run_claude(PROMPT + "\n===CONVERSATION===\n" + transcript, model)
+def call_claude(transcript: str, model: str, captured=()) -> str:
+    return run_claude(PROMPT + captured_block(captured) + "\n===CONVERSATION===\n" + transcript, model)
 
 def _split_long(turn: str, max_chars: int) -> list[str]:
     """A single turn longer than the limit (a pasted log, a generated file), cut on paragraph,
@@ -191,14 +319,15 @@ def chunk_transcript(transcript: str, max_chars: int = MAX_CHARS) -> list[str]:
         chunks.append(cur)
     return chunks
 
-def extract_notes_from(transcript: str, model: str) -> list[dict]:
-    """Run extraction over one or more chunks and dedupe notes by title."""
+def extract_notes_from(transcript: str, model: str, captured=()) -> list[dict]:
+    """Run extraction over one or more chunks and dedupe notes by title. `captured` are titles
+    this conversation already yielded; each chunk also sees what the earlier chunks returned."""
     seen, out = set(), []
     chunks = chunk_transcript(transcript)
     for i, ch in enumerate(chunks):
         if len(chunks) > 1:
             print(f"  · chunk {i + 1}/{len(chunks)} ({len(ch):,} chars)")
-        raw = call_claude(ch, model)
+        raw = call_claude(ch, model, [*captured, *(n["title"] for n in out)])
         for n in parse_notes(raw):
             key = (n.get("title") or "").strip().lower()
             if key and key not in seen:
@@ -318,7 +447,7 @@ def remember_note(title: str, body: str, tags):
     stem = sanitize(title)
     _note_index().append((stem, _nwords(stem), _nwords(body), set(tags or [])))
 
-def write_atomic_note(note: dict, src: Path, date: str, dry: bool) -> str | None:
+def write_atomic_note(note: dict, src: Path, date: str, dry: bool, sig: str = "") -> str | None:
     title = as_text(note.get("title"))
     body = as_text(note.get("body"))
     if not title or not body:
@@ -349,7 +478,10 @@ def write_atomic_note(note: dict, src: Path, date: str, dry: bool) -> str | None
         f"created: {date}\n"
         f"volatility: {vol}\n"
         f"source: \"[[{conversation_link(src)}]]\"\n"
-        f"{sim_line}"
+        # Which version of the conversation this came from, so another machine (whose checkpoint
+        # is its own) can tell it was already extracted. See source_index().
+        + (f"source_hash: {sig}\n" if sig else "")
+        + f"{sim_line}"
         "tags:\n"
         f"{tag_lines}\n"
         "---\n\n"
@@ -387,28 +519,42 @@ def main():
         print(f"No conversation notes in {CONV_DIR}. Run import_claude.py first.")
         return
 
-    state = load_state()
+    if not hold_lock("extract_notes.lock"):
+        print("extract_notes: another extraction run holds the lock — skipping this one")
+        return
+    state = open_state(load_state, STATE_FILE, args.force)
+    by_source = source_index(NOTES_DIR)
     processed = 0
     failed: list[str] = []
     total_notes = 0
+    adopted = False
     for src in sources:
         key = str(src.relative_to(VAULT))
-        sig = f"{src.stat().st_mtime_ns}:{src.stat().st_size}"
-        if not args.force and state.get(key, {}).get("sig") == sig:
+        st = src.stat()
+        stat_sig = f"{st.st_mtime_ns}:{st.st_size}"
+        prev = state.get(key, {})
+        if not args.force and prev.get("stat") == stat_sig:
+            continue                     # untouched since it was checked: skip without reading it
+        transcript = src.read_text(encoding="utf-8")
+        # strip the frontmatter of the conversation note before sending
+        transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
+        sig = content_sig(transcript)
+        from_here = by_source.get(src.stem, [])
+        if not args.force and is_extracted(prev, st, sig, {h for _, h in from_here}):
+            if not args.dry_run:
+                state[key] = {**prev, "sig": sig, "stat": stat_sig}
+                adopted = True
             continue
         if args.limit and processed >= args.limit:
             break
         print(f"• {src.name}")
-        transcript = src.read_text(encoding="utf-8")
-        # strip the frontmatter of the conversation note before sending
-        transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
         date = re.search(r"\d{4}-\d{2}-\d{2}", src.name)
         date = date.group(0) if date else datetime.now().strftime("%Y-%m-%d")
         try:
-            notes = extract_notes_from(transcript, args.model)
+            notes = extract_notes_from(transcript, args.model, [n for n, _ in from_here])
             # Inside the try: one bad item (an unwritable name, an odd field) fails this
             # conversation, reported and retried, instead of killing the run before any checkpoint.
-            written = [w for n in notes if (w := write_atomic_note(n, src, date, args.dry_run))]
+            written = [w for n in notes if (w := write_atomic_note(n, src, date, args.dry_run, sig))]
         except Exception as e:
             print(f"  ! skipped ({e})")
             failed.append(src.name)      # not recorded in state, so the next run retries it
@@ -416,10 +562,14 @@ def main():
         total_notes += len(written)
         processed += 1
         if not args.dry_run:
-            state[key] = {"sig": sig, "notes": written}
+            by_source.setdefault(src.stem, []).extend((Path(w).stem, sig) for w in written)
+            state[key] = {"sig": sig, "stat": stat_sig,
+                          "notes": list(dict.fromkeys([*prev.get("notes", []), *written]))}
             save_state(state)
         if not notes:
             print("  (no durable insights)")
+    if adopted:
+        save_state(state)
 
     print(f"\nDone. Processed {processed} conversation(s), wrote {total_notes} atomic note(s).")
 
