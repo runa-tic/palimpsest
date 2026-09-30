@@ -180,7 +180,9 @@ than a chatbot standing next to it.
 ## Limitations, honestly
 
 Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
-assume that. The skills extractor is disabled in the default pipeline — it burned most of a
+assume that. The two-machine sync, the state ledger and the reranked retrieval in this release
+were tested on macOS only (the test suite in `tests/` and a clean install); their Windows paths —
+hidden console windows, the git hook — have not been run yet. The skills extractor is disabled in the default pipeline — it burned most of a
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
 absence takes several nightly runs to drain. Embeddings are opt-in and CPU-bound. The default
