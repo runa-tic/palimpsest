@@ -14,7 +14,7 @@ Usage (run from the vault root):
 Re-running is safe: a note is only rewritten if its source changed (tracked by id).
 """
 from __future__ import annotations
-import sys, os, re, json, argparse
+import sys, os, re, json, argparse, glob, hashlib, stat, tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -27,6 +27,7 @@ except Exception:
 
 VAULT = Path(__file__).resolve().parent.parent
 OUT_BASE = VAULT / "40 Resources" / "Claude Conversations"
+TMP_DIR = Path(__file__).resolve().parent / "logs"   # gitignored, same filesystem as the vault
 
 # ---------- helpers ----------
 
@@ -54,7 +55,9 @@ def clean_text(s: str) -> str:
     return s.strip()
 
 def sanitize(name: str, maxlen: int = 80) -> str:
-    name = INVALID.sub(" ", name or "").strip()
+    # A title cut mid-emoji holds a lone surrogate, which no filesystem path can encode.
+    name = (name or "").encode("utf-8", "replace").decode("utf-8")
+    name = INVALID.sub(" ", name).strip()
     name = re.sub(r"\s+", " ", name)
     return (name[:maxlen].rstrip() or "Untitled")
 
@@ -70,11 +73,14 @@ def redact_title(title: str) -> str:
     except Exception:
         return title
 
+# Transcripts stamp UTC ("...Z"); the vault's dates are local (daily notes, briefing, weekly
+# review), so convert before formatting. Unconverted, a UTC+8 session at 07:30 on the 1st was
+# filed under the 30th. A naive timestamp is already local and astimezone() leaves it alone.
 def iso_to_date(ts: str | None) -> str:
     if not ts:
         return ""
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d")
     except Exception:
         return ts[:10]
 
@@ -82,7 +88,7 @@ def iso_to_dt(ts: str | None) -> str:
     if not ts:
         return ""
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
     except Exception:
         return ts[:16]
 
@@ -114,8 +120,16 @@ def existing_note(folder: Path, sid: str) -> str | None:
     recorded (the first message, later an AI title), so building it afresh left one note per title
     for the same session; 23 sessions in the source vault had two (review, 2026-09-30). The first
     name is kept rather than renamed: atomic notes link to conversations by filename."""
-    hits = sorted(folder.glob(f"* ({sid}).md"), key=lambda q: q.stat().st_mtime, reverse=True) if folder.exists() else []
+    hits = sorted(folder.glob(f"* ({glob.escape(sid)}).md"), key=lambda q: q.stat().st_mtime, reverse=True) if folder.exists() else []
     return hits[0].name if hits else None
+
+def _plain_mode(path: Path) -> int:
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mask = os.umask(0)
+        os.umask(mask)
+        return 0o666 & ~mask
 
 def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
     folder.mkdir(parents=True, exist_ok=True)
@@ -138,11 +152,37 @@ def write_note(folder: Path, fname: str, frontmatter: dict, body: str):
     except Exception:
         pass
     dest = folder / fname
+    # One newline convention, compared as bytes: read_text() turns "\r\n" into "\n", so a note
+    # holding a pasted CRLF log never compared equal and was rewritten on every import. A lone
+    # surrogate (an emoji cut in half in tool output) cannot be encoded; replace it rather than fail.
+    data = out.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8", "replace")
     # Content-stable: don't rewrite an unchanged note, or its mtime would bust the
-    # extractor's cache and trigger needless re-extraction (and duplicate notes).
-    if dest.exists() and dest.read_text(encoding="utf-8") == out:
-        return
-    dest.write_text(out, encoding="utf-8")
+    # extractor's cache and trigger needless re-extraction (and duplicate notes). A note the box
+    # wrote before this change holds CRLF (write_text on Windows): the same text, so it is left as
+    # it is. Rewritten to LF, its size changed, the extractors' old "mtime:size" checkpoint no longer
+    # matched, and both re-sent every such conversation to the model once.
+    if dest.exists():
+        old = dest.read_bytes()
+        if old == data or old.replace(b"\r\n", b"\n") == data:
+            return
+    # Atomic: write_text() truncates first, so any failure part-way left the existing
+    # conversation note empty, and the next Stop hook failed the same way and kept it empty.
+    # The temp file goes in the gitignored tools/logs/, not the auto-committed content folder.
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(TMP_DIR), prefix="import-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        # mkstemp makes the file 0600; keep the mode a plain write would have left (the note's
+        # own, or 0666 less the umask), so a sync daemon or viewer running as another user can read it.
+        os.chmod(tmp, _plain_mode(dest))
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 # ---------- source 1: Claude Code JSONL ----------
 
@@ -249,9 +289,18 @@ def import_code(args):
         print(f"No transcripts found under {projects}"
               + ("" if getattr(args, "all_projects", False) else f"/{slug}"))
         return
-    count = sum(1 for f in files
-                if process_transcript(f, args.include_thinking, args.include_tools))
+    count, failed = 0, []
+    for f in files:
+        # One transcript that cannot be written must not abort the batch before the rest.
+        try:
+            count += bool(process_transcript(f, args.include_thinking, args.include_tools))
+        except Exception as e:
+            print(f"  ! {f.name}: {type(e).__name__}: {e}")
+            failed.append(f.name)
     print(f"Imported {count} Claude Code conversation(s) into {OUT_BASE / 'Claude Code'}")
+    if failed:
+        print(f"FAILED on {len(failed)} transcript(s): " + ", ".join(failed[:5]) + (" …" if len(failed) > 5 else ""))
+        sys.exit(1)
 
 def import_file(args):
     """Import a single transcript by path (used by the live-recording Stop hook)."""
@@ -276,7 +325,16 @@ def import_web(args):
         name = redact_title(conv.get("name") or "Untitled")
         created = conv.get("created_at")
         updated = conv.get("updated_at")
-        uuid = conv.get("uuid", "")
+        uuid = conv.get("uuid") or conv.get("id") or ""
+        if not uuid:
+            # The note is found again by its "(id).md" suffix, so an empty id made every
+            # uuid-less conversation match the first one's note and overwrite it. Derive a
+            # stable one from what identifies the conversation instead.
+            first = next((str(m.get("text") or m.get("content") or "") for m in
+                          (conv.get("chat_messages") or conv.get("messages") or []) if isinstance(m, dict)), "")
+            uuid = hashlib.sha1(json.dumps([created, conv.get("name"), first], default=str)
+                                .encode("utf-8", "replace")).hexdigest()
+        uuid = str(uuid)
         msgs = conv.get("chat_messages") or conv.get("messages") or []
         turns = []
         for m in msgs:
