@@ -70,11 +70,22 @@ def _load_deny() -> tuple[list[str], list[re.Pattern]]:
     return literals, regexes
 
 
+# A private key is a BLOCK: the header alone matched before (the scanner's pattern is only the
+# BEGIN line), so redaction replaced the header and left the base64 body, which the commit guard
+# then passed because no header remained; restoring the header gave a working key (review,
+# 2026-09-30). This consumes the header, every base64 line after it (also as literal \n inside
+# JSON tool output, also cut off before END), and the END line. Runs before the one-line patterns.
+_PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"
+    r"(?:(?:\s|\\[nr])+(?:Proc-Type:[^\n\\]*|DEK-Info:[^\n\\]*|[A-Za-z0-9+/=]{16,}))*"
+    r"(?:(?:\s|\\[nr])*[A-Za-z0-9+/=]{0,15}(?:\s|\\[nr])*-----END [A-Z0-9 ]*PRIVATE KEY-----)?")
+
+
 def redact_text(s: str) -> tuple[str, int]:
     """Return (redacted_text, number_of_substitutions)."""
     if not s:
         return s, 0
-    n = 0
+    s, n = _PEM_BLOCK.subn(MARK, s)
     for rx in _CRED:
         s, k = rx.subn(MARK, s)
         n += k
