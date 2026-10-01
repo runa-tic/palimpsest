@@ -41,7 +41,7 @@ def main() -> int:
     secret = home_tmp / "secret.txt"
     secret.write_text("TOPSECRET-VALUE\n")
     try:
-        r = subprocess.run([sys.executable, "-c", DRIVER, str(v / "tools" / "rlm.py"), str(secret)], cwd=v,
+        r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + DRIVER, str(v / "tools" / "rlm.py"), str(secret)], cwd=v,
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, env={**os.environ, "RLM_OS_SANDBOX": "0"})
         out = r.stdout + r.stderr
         c.ok("TOPSECRET-VALUE" not in out and "blocked by the RLM sandbox" in out,
@@ -82,7 +82,7 @@ def main() -> int:
                    "it = iter(['```python\\nprint(\"DOCS\", len(docs))\\n```', 'FINAL\\nx'])\n"
                    "rlm._claude = lambda prompt, model, timeout: next(it)\n"
                    "sys.argv = ['rlm.py', 'q', '--steps', '3']\nrlm.main()\n")
-            r = subprocess.run([sys.executable, "-c", drv, str(hv / "tools" / "rlm.py")], cwd=hv,
+            r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + drv, str(hv / "tools" / "rlm.py")], cwd=hv,
                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             c.ok("DOCS 1" in r.stdout + r.stderr and "worker died" not in (r.stdout + r.stderr).lower(),
                  "OS sandbox: a vault under the home dir starts and reads its notes", (r.stdout + r.stderr)[-300:])

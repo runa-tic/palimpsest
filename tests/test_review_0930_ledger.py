@@ -109,9 +109,9 @@ def check_future_since(c: Checks):
     r = st(v, "add", "my-api", "status", "down", "--since", ahead, "--future")
     c.ok(r.returncode == 0 and "added" in r.stdout, "2. ...--future records it deliberately", r.stdout + r.stderr)
     write(v, "palimpsest.json", json.dumps({"version": 1, "probes": [
-        {"name": "api", "entity": "my-api", "attr": "status", "cmd": ["sh", "-c", "echo up"], "network": False}]}))
+        {"name": "api", "entity": "my-api", "attr": "status", "cmd": [sys.executable, "-c", "print('up')"], "network": False}]}))
     r = st(v, "probe", "--only", "api")
-    c.ok("(was" not in r.stdout and "outranks" in r.stdout,
+    c.ok("(was" not in r.stdout and "outranks" in r.stdout and "observed my-api.status = up" in r.stdout,
          "2. a probe outranked by a later-dated fact says so instead of reporting a change", r.stdout)
     r = st(v, "lint")
     c.ok("future" in r.stdout, "2. lint flags the future-dated fact", r.stdout)
@@ -211,7 +211,7 @@ def check_tls_untrusted(c: Checks):
                     "-keyout", str(d / "k.pem"), "-out", str(d / "c.pem")], check=True, capture_output=True)
     out = {}
     for mode in ("tls", "close"):
-        p = subprocess.run([sys.executable, "-c", TLS_CLIENT, str(d / "c.pem"), str(d / "k.pem"), mode],
+        p = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + TLS_CLIENT, str(d / "c.pem"), str(d / "k.pem"), mode],
                            cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         out[mode] = p.stdout.strip() + p.stderr[-300:]
     c.ok(out["tls"].startswith("UP") and out["close"].startswith("DOWN"),

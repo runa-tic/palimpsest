@@ -61,8 +61,8 @@ def main() -> int:
     # `state.py show` with empty stdout, and the opener dropped the block without a word.
     v = make_vault()
     write(v, "State/entities.json", '{"entities": {"box": {"hot": true},}}\n')
-    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); "
-                        "import hook_session_start as h; sys.stdout.reconfigure(encoding=\"utf-8\"); print(repr(h.state_block()))"],
+    r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + "import sys; sys.path.insert(0, 'tools'); "
+                        "import hook_session_start as h; print(repr(h.state_block()))"],
                        cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace")
     c.ok("ledger unreadable" in r.stdout and "JSONDecodeError" in r.stdout,
          "1. a crashing state.py yields a visible '**State:** ledger unreadable' line", r.stdout + r.stderr)

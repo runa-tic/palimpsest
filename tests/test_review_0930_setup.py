@@ -52,7 +52,7 @@ def hint(v: Path, at: str, system: str = "") -> str:
     code = ("import sys, platform; sys.path.insert(0, sys.argv[1]); "
             + (f"platform.system = lambda: {system!r}; " if system else "")
             + "import setup; print(setup.scheduler_hint(sys.argv[2]))")
-    return subprocess.run([sys.executable, "-c", code, str(v / "tools"), at], capture_output=True,
+    return subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + code, str(v / "tools"), at], capture_output=True,
                           text=True, encoding="utf-8", errors="replace").stdout
 
 
@@ -90,13 +90,13 @@ def main() -> int:
     probe = ("import sys, json; sys.path.insert(0, sys.argv[1]); import config\n"
              "try:\n    print(json.dumps(config.load(strict=True)))\n"
              "except ValueError as e:\n    print('ERROR', e)")
-    out = subprocess.run([sys.executable, "-c", probe, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
+    out = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + probe, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     c.ok(out.startswith("ERROR") and "palimpsest.json" in out,
          "a trailing comma in palimpsest.json raises from a strict load", out[:200])
     soft = ("import sys, json; sys.path.insert(0, sys.argv[1]); import config\n"
             "cfg = config.load(); config.load()\n"
             "print(json.dumps({'pull': cfg['steps']['pull'], 'problem': config.problem()}))")
-    r = subprocess.run([sys.executable, "-c", soft, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + soft, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace")
     got = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
     c.ok(r.returncode == 0 and got.get("pull") is False and "palimpsest.json" in got.get("problem", "")
          and r.stderr.count("palimpsest.json") == 1,
@@ -185,7 +185,7 @@ def main() -> int:
     c.ok(r.returncode != 0 and (v / "palimpsest.json").read_text() == bad,
          "setup.py refuses to overwrite an unparseable palimpsest.json", (r.stdout + r.stderr)[-300:])
     (v / "palimpsest.json").write_bytes(b"\xef\xbb\xbf" + json.dumps({"push_remote": "backup"}).encode())
-    out = subprocess.run([sys.executable, "-c", probe, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
+    out = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + probe, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     c.ok(out.startswith("{") and json.loads(out).get("push_remote") == "backup",
          "a palimpsest.json saved with a BOM (Notepad) loads", out[:200])
 

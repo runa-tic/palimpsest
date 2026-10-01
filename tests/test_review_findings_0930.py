@@ -10,6 +10,7 @@
 5. ask.py's state block carries the same STALE / CONFLICT warnings `state.py show` prints.
 """
 import itertools, json, os, subprocess, sys
+import _util
 from _util import Checks, TOOLS_SRC, git, make_vault, run, write
 
 FAKE_KEY = "AKIA" + "QZXW" * 4                      # synthetic, AWS-shaped
@@ -78,7 +79,7 @@ def main() -> int:
          f"{t['push']} vs {vp.LOCK_WAIT_S}+2*{vp.NET_TIMEOUT}")
     c.ok('"VAULT_PUSH_LOCK_WAIT": "15"' in hook_src and '"VAULT_PUSH_NET_TIMEOUT": "35"' in hook_src
          and "timeout=60" in hook_src, "session-start hook passes budgets that fit its 60 s timeout")
-    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0,'tools'); import vault_push as v; "
+    r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + "import sys; sys.path.insert(0,'tools'); import vault_push as v; "
                         "print(v.LOCK_WAIT_S, v.NET_TIMEOUT)"], cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        env={**os.environ, "VAULT_PUSH_LOCK_WAIT": "15", "VAULT_PUSH_NET_TIMEOUT": "35"})
     c.ok(r.stdout.split() == ["15", "35"], "vault_push honours the budget overrides", r.stdout + r.stderr)
@@ -94,7 +95,7 @@ def main() -> int:
     tie = dict(old, value="down", id="old0000002")
     with (v / "State" / "facts.jsonl").open("a") as fh:
         fh.write(json.dumps(old) + "\n" + json.dumps(tie) + "\n")
-    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import ask; "
+    r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + "import sys; sys.path.insert(0, 'tools'); import ask; "
                         "print(ask.state_context('what is the status of my-api?')[0])"],
                        cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace")
     c.ok("STALE" in r.stdout and "CONFLICT" in r.stdout, "ask.py's state block carries STALE and CONFLICT",

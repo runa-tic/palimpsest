@@ -19,6 +19,7 @@ itself, which PALIMPSEST_TOOLS does not swap; it failed before the atexit cleanu
 import json, os, stat, subprocess, sys, textwrap
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+import _util
 from _util import Checks, REPO, git, make_vault, run, stub, stub_path, write
 
 BAD_CFG = '{"steps": {"pull": true, "push": true},\n "push_remote": "backup",}\n'
@@ -185,7 +186,7 @@ def check_util_cleanup(c: Checks) -> None:
         v = _util.make_vault()
         print(v)
     """)
-    r = subprocess.run([sys.executable, "-c", code, str(REPO / "tests")], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + code, str(REPO / "tests")], capture_output=True, text=True, encoding="utf-8", errors="replace")
     made = Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
     c.ok(made is not None and not made.exists(),
          "a vault made by _util.make_vault is removed when the test script exits", f"{made} {r.stderr[-300:]}")
