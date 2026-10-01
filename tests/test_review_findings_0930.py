@@ -30,7 +30,7 @@ def main() -> int:
     # The symlink is committed straight into the index (mode 120000), which needs no symlink
     # rights: a Windows account without them cannot os.symlink, but its vault can hold links.
     target = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=v, input="real.md",
-                            capture_output=True, text=True, check=True).stdout.strip()
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout.strip()
     # Git for Windows defaults to core.symlinks=false, under which a file replacing a link keeps
     # the link's mode and stages as M (still scanned); the T path needs links to be real.
     git(v, "config", "core.symlinks", "true")
@@ -79,7 +79,7 @@ def main() -> int:
     c.ok('"VAULT_PUSH_LOCK_WAIT": "15"' in hook_src and '"VAULT_PUSH_NET_TIMEOUT": "35"' in hook_src
          and "timeout=60" in hook_src, "session-start hook passes budgets that fit its 60 s timeout")
     r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0,'tools'); import vault_push as v; "
-                        "print(v.LOCK_WAIT_S, v.NET_TIMEOUT)"], cwd=v, capture_output=True, text=True,
+                        "print(v.LOCK_WAIT_S, v.NET_TIMEOUT)"], cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        env={**os.environ, "VAULT_PUSH_LOCK_WAIT": "15", "VAULT_PUSH_NET_TIMEOUT": "35"})
     c.ok(r.stdout.split() == ["15", "35"], "vault_push honours the budget overrides", r.stdout + r.stderr)
 
@@ -96,7 +96,7 @@ def main() -> int:
         fh.write(json.dumps(old) + "\n" + json.dumps(tie) + "\n")
     r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import ask; "
                         "print(ask.state_context('what is the status of my-api?')[0])"],
-                       cwd=v, capture_output=True, text=True)
+                       cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace")
     c.ok("STALE" in r.stdout and "CONFLICT" in r.stdout, "ask.py's state block carries STALE and CONFLICT",
          r.stdout + r.stderr)
     return c.done()

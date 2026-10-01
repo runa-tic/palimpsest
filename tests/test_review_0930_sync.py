@@ -51,7 +51,7 @@ def two_machines() -> tuple[Path, Path, Path]:
 
 
 def remote_show(remote: Path, spec: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "--git-dir", str(remote), "show", spec], capture_output=True, text=True)
+    return subprocess.run(["git", "--git-dir", str(remote), "show", spec], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def main() -> int:
@@ -62,8 +62,8 @@ def main() -> int:
     v = make_vault()
     write(v, "State/entities.json", '{"entities": {"box": {"hot": true},}}\n')
     r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); "
-                        "import hook_session_start as h; print(repr(h.state_block()))"],
-                       cwd=v, capture_output=True, text=True)
+                        "import hook_session_start as h; sys.stdout.reconfigure(encoding=\"utf-8\"); print(repr(h.state_block()))"],
+                       cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace")
     c.ok("ledger unreadable" in r.stdout and "JSONDecodeError" in r.stdout,
          "1. a crashing state.py yields a visible '**State:** ledger unreadable' line", r.stdout + r.stderr)
 
@@ -76,7 +76,7 @@ def main() -> int:
     write(v, "10 Notes/leak.md", "key: " + "AKIA" + "QZXW" * 4 + "\n")
     r = run(v, "vault_push.py")
     on_remote = subprocess.run(["git", "--git-dir", str(remote), "rev-parse", "--verify", "-q", "main"],
-                               capture_output=True, text=True).stdout.strip()
+                               capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
     h = make_vault(with_hooks=True)                         # with the hook: no second scan, true message
     write(h, "10 Notes/fine.md", "nothing secret\n")
     rh = run(h, "vault_push.py", "--no-push")

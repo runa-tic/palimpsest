@@ -70,12 +70,12 @@ def make_vault(with_hooks: bool = False) -> Path:
 
 
 def git(v: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=v, capture_output=True, text=True, check=check)
+    return subprocess.run(["git", *args], cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace", check=check)
 
 
 def run(v: Path, script: str, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(v / "tools" / script), *args], cwd=v, capture_output=True,
-                          text=True, env={**os.environ, **(env or {})})
+                          text=True, encoding="utf-8", errors="replace", env={**os.environ, **(env or {})})
 
 
 _STUBS: dict[Path, set[str]] = {}

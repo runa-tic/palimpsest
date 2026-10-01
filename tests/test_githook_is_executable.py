@@ -18,9 +18,9 @@ FAKE_KEY = "AKIA" + "QZXW" * 4
 def main() -> int:
     c = Checks("git hook runs on a fresh clone")
     ref = os.environ.get("PALIMPSEST_REF") or subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip()
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
     mode = subprocess.run(["git", "ls-tree", ref, "tools/githooks/pre-commit"], cwd=REPO,
-                          capture_output=True, text=True).stdout.split()[:1]
+                          capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.split()[:1]
     c.ok(mode == ["100755"], f"pre-commit is committed executable on {ref}", str(mode))
     if os.name == "nt":
         print("  (Windows ignores the executable bit; the clone check below is for macOS/Linux)")
@@ -32,7 +32,7 @@ def main() -> int:
     (d / "10 Notes").mkdir(exist_ok=True)
     (d / "10 Notes" / "leak.md").write_text(f"key {FAKE_KEY}\n")
     subprocess.run(["git", "add", "10 Notes/leak.md"], cwd=d, check=True)
-    r = subprocess.run(["git", "commit", "-m", "leak"], cwd=d, capture_output=True, text=True)
+    r = subprocess.run(["git", "commit", "-m", "leak"], cwd=d, capture_output=True, text=True, encoding="utf-8", errors="replace")
     c.ok(r.returncode != 0 and "secret-scan" in (r.stdout + r.stderr),
          "a commit carrying a key is BLOCKED by the hook on a fresh clone", (r.stdout + r.stderr)[-400:])
     return c.done()

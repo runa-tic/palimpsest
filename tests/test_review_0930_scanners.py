@@ -342,7 +342,7 @@ def main() -> int:
     for script in ("scan_secrets.py", "scan_pii.py"):
         (shim / "log").write_text("")
         r = subprocess.run([sys.executable, "-c", count_git, str(v20 / "tools" / script)], cwd=v20,
-                           capture_output=True, text=True, env={**os.environ, "GIT_CALLS": str(shim / "log")})
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", env={**os.environ, "GIT_CALLS": str(shim / "log")})
         calls.append((script, r.returncode, (shim / "log").read_text().split()))
     c.ok(all(rc == 0 and 0 < len(log) <= 3 for _, rc, log in calls),
          "the staged scan runs a fixed number of git processes, not one or two per file",

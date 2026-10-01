@@ -51,9 +51,9 @@ def main() -> int:
          "the rebase was aborted (no rebase left in progress)")
     c.ok("EDITED ON B" in (b / "10 Notes" / "shared.md").read_text(), "b's own edit is intact in its tree")
     remote_log = subprocess.run(["git", "--git-dir", str(remote), "log", "--format=%s", "main"],
-                                capture_output=True, text=True).stdout
+                                capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     shared_on_remote = subprocess.run(["git", "--git-dir", str(remote), "show", "main:10 Notes/shared.md"],
-                                      capture_output=True, text=True).stdout
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     c.ok("EDITED ON A" in shared_on_remote, "nothing was forced over a's version on the remote", shared_on_remote)
 
     n = clone(remote, "noremote")

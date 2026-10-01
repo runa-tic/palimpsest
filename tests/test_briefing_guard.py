@@ -31,7 +31,7 @@ def main() -> int:
     c.ok(not daily.exists(), "no daily note was created on the stale tree")
 
     r = subprocess.run([sys.executable, str(v / "tools" / "hook_session_start.py")], cwd=v,
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else ""
     c.ok("briefing not refreshed" in ctx and "⚠️" in ctx, "the session opener says the briefing was not refreshed", ctx[-400:])
     c.ok(not daily.exists(), "the hook did not render on the stale tree either")

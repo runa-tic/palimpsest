@@ -42,7 +42,7 @@ def main() -> int:
     secret.write_text("TOPSECRET-VALUE\n")
     try:
         r = subprocess.run([sys.executable, "-c", DRIVER, str(v / "tools" / "rlm.py"), str(secret)], cwd=v,
-                           capture_output=True, text=True, timeout=120, env={**os.environ, "RLM_OS_SANDBOX": "0"})
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, env={**os.environ, "RLM_OS_SANDBOX": "0"})
         out = r.stdout + r.stderr
         c.ok("TOPSECRET-VALUE" not in out and "blocked by the RLM sandbox" in out,
              "in-process hook: rebinding its globals does not open reads outside the vault", out[-700:])
@@ -56,17 +56,17 @@ def main() -> int:
         rlm = importlib.import_module("rlm")
         scratch = v / "tools" / ".rlm_scratch"; scratch.mkdir(parents=True, exist_ok=True)
         wrap = lambda code: rlm._os_sandbox([sys.executable, "-c", code], scratch)[0]
-        r = subprocess.run(wrap(f"print(open({str(secret)!r}).read())"), capture_output=True, text=True, timeout=60)
+        r = subprocess.run(wrap(f"print(open({str(secret)!r}).read())"), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         c.ok(r.returncode != 0 and "TOPSECRET-VALUE" not in r.stdout and "Operation not permitted" in r.stderr,
              "OS sandbox: a bare interpreter (no hook) cannot read a file under the home dir", r.stderr[-300:])
         r = subprocess.run(wrap(f"print(open({str(v / '10 Notes' / 'n.md')!r}).read())"), capture_output=True,
-                           text=True, timeout=60, cwd=v)     # `-c` puts the cwd on sys.path; the worker runs from the vault
+                           text=True, encoding="utf-8", errors="replace", timeout=60, cwd=v)     # `-c` puts the cwd on sys.path; the worker runs from the vault
         c.ok(r.returncode == 0 and "a note" in r.stdout, "OS sandbox: the vault stays readable", r.stderr[-300:])
         r = subprocess.run(wrap("import socket; socket.create_connection(('1.1.1.1', 443), timeout=3)"),
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         c.ok(r.returncode != 0, "OS sandbox: no network", r.stderr[-200:])
         r = subprocess.run(wrap(f"open({str(home_tmp / 'w.txt')!r}, 'w').write('x')"), capture_output=True,
-                           text=True, timeout=60)
+                           text=True, encoding="utf-8", errors="replace", timeout=60)
         c.ok(r.returncode != 0 and not (home_tmp / "w.txt").exists(), "OS sandbox: no writes outside scratch",
              r.stderr[-200:])
         # A vault under the home dir (the usual place on a Mac) must still start: the allow-list
@@ -83,7 +83,7 @@ def main() -> int:
                    "rlm._claude = lambda prompt, model, timeout: next(it)\n"
                    "sys.argv = ['rlm.py', 'q', '--steps', '3']\nrlm.main()\n")
             r = subprocess.run([sys.executable, "-c", drv, str(hv / "tools" / "rlm.py")], cwd=hv,
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             c.ok("DOCS 1" in r.stdout + r.stderr and "worker died" not in (r.stdout + r.stderr).lower(),
                  "OS sandbox: a vault under the home dir starts and reads its notes", (r.stdout + r.stderr)[-300:])
         finally:

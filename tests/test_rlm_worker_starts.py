@@ -28,7 +28,7 @@ def main() -> int:
     for i in range(3):
         write(v, f"10 Notes/note {i}.md", f"note {i}\n")
     r = subprocess.run([sys.executable, "-c", DRIVER, str(v / "tools" / "rlm.py")], cwd=v,
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     out = r.stdout + r.stderr
     c.ok("REPL worker died" not in out and r.returncode == 0, "rlm.py gets past worker start", out[-600:])
     c.ok("DOCS 3" in out, "the sandboxed exec ran against the corpus (3 notes)", out[-600:])
