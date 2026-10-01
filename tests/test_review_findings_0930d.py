@@ -11,6 +11,7 @@
 """
 import json, shutil, subprocess, sys, tempfile
 from pathlib import Path
+import _util
 from _util import Checks, make_vault, run, write
 
 
@@ -30,7 +31,7 @@ def main() -> int:
         d = Path(tempfile.mkdtemp())
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(d / "k")], check=True)
         key = (d / "k").read_text()
-        shutil.rmtree(d)
+        _util.rmtree(d)
         body = [l for l in key.splitlines() if l and not l.startswith("-----") and len(l) >= 16]
         for name, text in (("plain", f"my key:\n{key}\nafter"), ("json", json.dumps({"out": key})),
                            ("truncated", key[: len(key) // 2])):

@@ -27,9 +27,14 @@ def main() -> int:
     # 1. type change
     v = make_vault()
     write(v, "10 Notes/real.md", "note\n")
-    os.symlink("real.md", v / "10 Notes" / "link.md")
-    git(v, "add", "-A"); git(v, "commit", "-q", "-m", "seed")
-    (v / "10 Notes" / "link.md").unlink()
+    # The symlink is committed straight into the index (mode 120000), which needs no symlink
+    # rights: a Windows account without them cannot os.symlink, but its vault can hold links.
+    target = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=v, input="real.md",
+                            capture_output=True, text=True, check=True).stdout.strip()
+    git(v, "add", "-A")
+    git(v, "update-index", "--add", "--cacheinfo", f"120000,{target},10 Notes/link.md")
+    git(v, "commit", "-q", "-m", "seed")
+    (v / "10 Notes" / "link.md").unlink(missing_ok=True)
     write(v, "10 Notes/link.md", f"key {FAKE_KEY}\n")
     git(v, "add", "-A")
     st_line = git(v, "diff", "--cached", "--name-status").stdout.strip()

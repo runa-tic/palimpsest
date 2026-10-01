@@ -20,7 +20,7 @@ bag-of-words encoder), and `claude` is a stub on PATH that records the prompt it
 """
 import json, os, shutil, stat, subprocess, sys, tempfile, time
 from pathlib import Path
-from _util import Checks, make_vault as _make_vault, run, write
+from _util import Checks, can_symlink, make_vault as _make_vault, rmtree, run, stub, stub_path, write
 
 _TMP: list[Path] = []
 
@@ -56,16 +56,15 @@ class CrossEncoder:
         raise OSError("stub: no cross-encoder offline")
 '''
 TORCH_STUB = "def set_num_threads(n): pass\ndef get_num_threads(): return 1\n"
-CLAUDE_STUB = f"#!{sys.executable}\nimport os, sys\nopen(os.environ['STUB_PROMPT_OUT'], 'w', encoding='utf-8').write(sys.stdin.read())\nprint('stub answer')\n"
+CLAUDE_STUB = f"import os, sys\nopen(os.environ['STUB_PROMPT_OUT'], 'w', encoding='utf-8').write(sys.stdin.read())\nprint('stub answer')\n"
 
 
 def stubs(v: Path) -> dict:
     d = v / ".stubs"
     write(v, ".stubs/py/sentence_transformers/__init__.py", ST_STUB)
     write(v, ".stubs/py/torch/__init__.py", TORCH_STUB)
-    claude = write(v, ".stubs/bin/claude", CLAUDE_STUB)
-    claude.chmod(claude.stat().st_mode | stat.S_IEXEC)
-    return {"PYTHONPATH": str(d / "py"), "PATH": f"{d / 'bin'}{os.pathsep}{os.environ['PATH']}",
+    stub(d / "bin", "claude", CLAUDE_STUB)
+    return {"PYTHONPATH": str(d / "py"), "PATH": stub_path(d / "bin"),
             "STUB_PROMPT_OUT": str(d / "prompt.txt"), "CLAUDE_BRAIN_NO_HOOK": "1"}
 
 
@@ -96,6 +95,10 @@ def check_crlf_excerpt(c: Checks):
 
 
 def check_symlinks(c: Checks):
+    if not can_symlink():
+        c.skip("symlinks: a dangling one and one leaving the vault are skipped, not a crash",
+               "this process may not create symlinks: on Windows that needs admin or Developer Mode")
+        return
     v = make_vault()
     env = stubs(v)
     write(v, "10 Notes/Inside.md", "# Inside\n\nthe vault's own note about zebras\n")
@@ -260,7 +263,7 @@ def main() -> int:
         check_concurrent_save(c)
     finally:
         for d in _TMP:
-            shutil.rmtree(d, ignore_errors=True)
+            rmtree(d)
     return c.done()
 
 

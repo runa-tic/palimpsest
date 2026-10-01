@@ -19,6 +19,7 @@ maintenance, weekly_review, briefing). One check per finding; each fails on ba54
 import os, re, shutil, subprocess, sys, tempfile
 from datetime import date, timedelta
 from pathlib import Path
+import _util
 from _util import Checks, make_vault, run, write, git
 
 NO_MEMORY = {"PALIMPSEST_MEMORY_DIR": "/nonexistent/palimpsest-test-memory"}
@@ -232,7 +233,7 @@ def main() -> int:
          "dedupe reads inline tags and ignores aliases", str({k: n["tags"] for k, n in notes.items()}))
 
     for p in made:
-        shutil.rmtree(p, ignore_errors=True)
+        _util.rmtree(p, ignore_errors=True)
     return c.done()
 
 

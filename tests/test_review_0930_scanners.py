@@ -39,7 +39,7 @@ Second review of fix/scanners (2026-09-30):
 import os, shutil, subprocess, sys, tempfile
 from pathlib import Path
 import _util
-from _util import Checks, git, run, write
+from _util import Checks, git, rmtree, run, write
 
 AKIA = "AKIA" + "QZXW" * 4                               # synthetic, AWS-shaped
 B64 = "Ab3dEf9hIj" * 8                                   # synthetic key body
@@ -323,15 +323,26 @@ def main() -> int:
     for i in range(30):
         write(v20, f"10 Notes/n{i}.md", f"note {i}\n")
     git(v20, "add", "-A")
+    # Counted inside the scanner's own process: a git shim on PATH is never found on Windows,
+    # where a bare "git" argv only ever resolves to git.exe.
     shim = Path(tempfile.mkdtemp(prefix="palimpsest-shim-"))
     VAULTS.append(shim)
-    (shim / "git").write_text(f'#!/bin/sh\necho "$1" >> "{shim}/log"\nexec "{shutil.which("git")}" "$@"\n')
-    (shim / "git").chmod(0o755)
-    env = {"PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"}
+    count_git = ("import os, runpy, subprocess, sys\n"
+                 "log = open(os.environ['GIT_CALLS'], 'a')\n"
+                 "_init = subprocess.Popen.__init__\n"
+                 "def counted(self, args, *a, **k):\n"
+                 "    argv = [args] if isinstance(args, (str, bytes, os.PathLike)) else list(args)\n"
+                 "    if argv and os.path.basename(str(argv[0])).lower() in ('git', 'git.exe'):\n"
+                 "        log.write((str(argv[1]) if len(argv) > 1 else '-') + '\\n'); log.flush()\n"
+                 "    _init(self, args, *a, **k)\n"
+                 "subprocess.Popen.__init__ = counted\n"
+                 "sys.argv = sys.argv[1:]\n"
+                 "runpy.run_path(sys.argv[0], run_name='__main__')\n")
     calls = []
     for script in ("scan_secrets.py", "scan_pii.py"):
         (shim / "log").write_text("")
-        r = run(v20, script, env=env)
+        r = subprocess.run([sys.executable, "-c", count_git, str(v20 / "tools" / script)], cwd=v20,
+                           capture_output=True, text=True, env={**os.environ, "GIT_CALLS": str(shim / "log")})
         calls.append((script, r.returncode, (shim / "log").read_text().split()))
     c.ok(all(rc == 0 and 0 < len(log) <= 3 for _, rc, log in calls),
          "the staged scan runs a fixed number of git processes, not one or two per file",
@@ -352,7 +363,7 @@ def main() -> int:
          f"{out}\n{p21.returncode} {p21.stdout[-300:]}\n{out_b}")
 
     for d in VAULTS:
-        shutil.rmtree(d, ignore_errors=True)
+        rmtree(d)
     # 22. A large file whose head merely LOOKS binary is scanned unless its name is media too:
     # a NUL-padded log over 5MB holding a key used to be skipped and pushed unscanned.
     v = make_vault()

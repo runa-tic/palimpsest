@@ -12,6 +12,7 @@ The secret file lives under the home directory, which is what the OS profile pro
 """
 import os, shutil, subprocess, sys, tempfile
 from pathlib import Path
+import _util
 from _util import Checks, make_vault, write
 
 DRIVER = r'''
@@ -86,7 +87,7 @@ def main() -> int:
             c.ok("DOCS 1" in r.stdout + r.stderr and "worker died" not in (r.stdout + r.stderr).lower(),
                  "OS sandbox: a vault under the home dir starts and reads its notes", (r.stdout + r.stderr)[-300:])
         finally:
-            shutil.rmtree(hv, ignore_errors=True)
+            _util.rmtree(hv, ignore_errors=True)
         cmd, note = rlm._os_sandbox(["true"], scratch)
         os.environ["RLM_OS_SANDBOX"] = "0"
         cmd0, note0 = rlm._os_sandbox(["true"], scratch)

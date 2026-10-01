@@ -18,6 +18,7 @@
 import json, os, shutil, subprocess, sys, tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import _util
 from _util import Checks, TOOLS_SRC, make_vault, git, run, write
 
 GITIGNORE = "__pycache__/\nState/Register.md\nState/current.json\nState/.observed.json\n"
@@ -241,7 +242,7 @@ def main() -> int:
                 c.ok(False, f"{fn.__name__} raised", f"{type(e).__name__}: {e}")
     finally:
         for d in TMP:
-            shutil.rmtree(d, ignore_errors=True)
+            _util.rmtree(d, ignore_errors=True)
     return c.done()
 
 

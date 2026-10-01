@@ -7,12 +7,14 @@ conversation failed, and sync.py marks the step failed.
 
 A fake `claude` on PATH fails any conversation containing FAILME and returns [] otherwise.
 """
-import json, os, stat, sys
-from _util import Checks, make_vault, run, write
+import json, sys
+from _util import Checks, make_vault, run, stub, stub_path, write
 
-FAKE_CLAUDE = """#!/bin/sh
-input=$(cat)
-case "$input" in *FAILME*) echo "usage limit reached"; exit 1;; *) echo "[]";; esac
+FAKE_CLAUDE = """import sys
+if "FAILME" in sys.stdin.read():
+    print("usage limit reached")
+    sys.exit(1)
+print("[]")
 """
 
 
@@ -20,9 +22,8 @@ def main() -> int:
     c = Checks("extractors: failures are reported")
     v = make_vault()
     bindir = v / "fakebin"
-    fc = write(v, "fakebin/claude", FAKE_CLAUDE)
-    fc.chmod(fc.stat().st_mode | stat.S_IEXEC)
-    env = {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+    stub(bindir, "claude", FAKE_CLAUDE)
+    env = {"PATH": stub_path(bindir)}
     conv = "40 Resources/Claude Conversations/Claude Code/demo"
     write(v, f"{conv}/2026-09-01 good (aaaaaaaa).md", "---\ntype: x\n---\n\n# good\n\nfine talk\n")
     write(v, f"{conv}/2026-09-01 bad (bbbbbbbb).md", "---\ntype: x\n---\n\n# bad\n\nFAILME please\n")
@@ -38,9 +39,8 @@ def main() -> int:
              keys)
 
     v2 = make_vault()
-    fc2 = write(v2, "fakebin/claude", FAKE_CLAUDE)
-    fc2.chmod(fc2.stat().st_mode | stat.S_IEXEC)
-    env2 = {"PATH": f"{v2 / 'fakebin'}{os.pathsep}{os.environ['PATH']}"}
+    stub(v2 / "fakebin", "claude", FAKE_CLAUDE)
+    env2 = {"PATH": stub_path(v2 / "fakebin")}
     write(v2, f"{conv}/2026-09-01 bad (bbbbbbbb).md", "---\ntype: x\n---\n\n# bad\n\nFAILME\n")
     steps = {k: False for k in ("import", "extract", "skills", "link", "maintenance", "dedupe", "triage",
                                 "weekly", "embed", "briefing", "push", "pull")}
