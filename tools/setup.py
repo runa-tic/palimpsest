@@ -259,6 +259,13 @@ def interview(cfg: dict) -> int:
 
 
 if __name__ == "__main__":
+    # The house convention (state.py, scan_secrets.py): output is UTF-8 whatever the code page, so
+    # a piped or logged run on a Windows ANSI code page neither crashes nor writes mojibake.
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     if any(a in ("-h", "--help") for a in sys.argv[1:]):
         print(__doc__.strip())
         sys.exit(0)
