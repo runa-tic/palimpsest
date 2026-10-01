@@ -31,6 +31,9 @@ def main() -> int:
     # rights: a Windows account without them cannot os.symlink, but its vault can hold links.
     target = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=v, input="real.md",
                             capture_output=True, text=True, check=True).stdout.strip()
+    # Git for Windows defaults to core.symlinks=false, under which a file replacing a link keeps
+    # the link's mode and stages as M (still scanned); the T path needs links to be real.
+    git(v, "config", "core.symlinks", "true")
     git(v, "add", "-A")
     git(v, "update-index", "--add", "--cacheinfo", f"120000,{target},10 Notes/link.md")
     git(v, "commit", "-q", "-m", "seed")
