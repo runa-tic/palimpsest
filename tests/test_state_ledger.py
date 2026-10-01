@@ -32,7 +32,7 @@ def main() -> int:
     c.ok(len(facts) == 2, "append-only: both facts are kept", str(len(facts)))
     r = __import__("subprocess").run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import ask; "
                                       "print(ask.state_context('where does the api run now?')[0])"],
-                                     cwd=v, capture_output=True, text=True)
+                                     cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace")
     c.ok("my-api.host = server-1" in r.stdout, "ask.py's state hop puts the current fact in the prompt (by alias)",
          r.stdout + r.stderr)
     r = st(v, "show", "--hot", "--opener")
@@ -67,7 +67,7 @@ def main() -> int:
     # TEST-NET-1: nothing answers it. A plain TCP connect "succeeds" behind a TUN-mode proxy, which
     # is exactly the case the verified-TLS control exists for.
     cfg = {"version": 1, "network_control": ["192.0.2.1"],
-           "probes": [{"name": "api", "entity": "my-api", "attr": "status", "cmd": ["false"], "timeout": 5}]}
+           "probes": [{"name": "api", "entity": "my-api", "attr": "status", "cmd": [sys.executable, "-c", "raise SystemExit(1)"], "timeout": 5}]}
     write(v, "palimpsest.json", json.dumps(cfg))
     before = len((v / "State" / "facts.jsonl").read_text().splitlines())
     r = st(v, "probe", "--only", "api")
@@ -76,7 +76,14 @@ def main() -> int:
          "a failed probe records NOTHING when this machine's own network is down", r.stdout)
     obs = json.loads((v / "State" / ".observed.json").read_text())
     c.ok("probe:api" not in obs, "...and leaves the throttle open to retry next run", str(obs))
-    cfg["probes"][0]["cmd"] = ["sh", "-c", "echo active"]
+    # A command that cannot start is this machine's fault, not the network's: it is recorded.
+    cfg["probes"][0]["cmd"] = ["palimpsest-no-such-command-x"]
+    write(v, "palimpsest.json", json.dumps(cfg))
+    r = st(v, "probe", "--only", "api")
+    c.ok("my-api.status = probe error (FileNotFoundError)" in r.stdout and "network is down" not in r.stdout,
+         "a probe whose command cannot start is recorded as a probe error, not as the network being down",
+         r.stdout)
+    cfg["probes"][0]["cmd"] = [sys.executable, "-c", "print('active')"]
     write(v, "palimpsest.json", json.dumps(cfg))
     r = st(v, "probe", "--only", "api")
     c.ok("my-api.status = active" in r.stdout, "a command probe records its first line of output", r.stdout)

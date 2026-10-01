@@ -9,7 +9,7 @@
 """
 import json, os, subprocess, sys
 from pathlib import Path
-from _util import Checks, git, make_vault, run, tempdir, write
+from _util import Checks, git, make_vault, rmtree, run, tempdir, write
 
 
 def load(v, name):
@@ -76,7 +76,7 @@ def main() -> int:
     write(v, ".gitignore", "tools/__pycache__/\n")
     git(v, "add", "-A"); git(v, "commit", "-q", "-m", "seed")
     git(v, "remote", "add", "origin", str(remote)); git(v, "push", "-q", "-u", "origin", "main")
-    subprocess.run(["rm", "-rf", str(v / "10 Notes")], check=True)
+    rmtree(v / "10 Notes", ignore_errors=False)
     r = run(v, "vault_push.py")
     tracked = git(v, "ls-files", "--", "10 Notes").stdout.strip()
     c.ok(tracked == "" and "nothing new to commit" not in r.stdout, "deleting a whole content dir is committed",

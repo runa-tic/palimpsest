@@ -45,7 +45,7 @@ def vault_at(name: str) -> Path:
 
 def setup(v: Path, answers: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(v / "tools" / "setup.py")], cwd=v, capture_output=True,
-                          text=True, input="".join(a + "\n" for a in answers))
+                          text=True, encoding="utf-8", errors="replace", input="".join(a + "\n" for a in answers))
 
 
 def hint(v: Path, at: str, system: str = "") -> str:
@@ -53,7 +53,7 @@ def hint(v: Path, at: str, system: str = "") -> str:
             + (f"platform.system = lambda: {system!r}; " if system else "")
             + "import setup; print(setup.scheduler_hint(sys.argv[2]))")
     return subprocess.run([sys.executable, "-c", code, str(v / "tools"), at], capture_output=True,
-                          text=True).stdout
+                          text=True, encoding="utf-8", errors="replace").stdout
 
 
 def ps_literal(text: str, flag: str) -> str | None:
@@ -90,13 +90,13 @@ def main() -> int:
     probe = ("import sys, json; sys.path.insert(0, sys.argv[1]); import config\n"
              "try:\n    print(json.dumps(config.load(strict=True)))\n"
              "except ValueError as e:\n    print('ERROR', e)")
-    out = subprocess.run([sys.executable, "-c", probe, str(v / "tools")], capture_output=True, text=True).stdout
+    out = subprocess.run([sys.executable, "-c", probe, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     c.ok(out.startswith("ERROR") and "palimpsest.json" in out,
          "a trailing comma in palimpsest.json raises from a strict load", out[:200])
     soft = ("import sys, json; sys.path.insert(0, sys.argv[1]); import config\n"
             "cfg = config.load(); config.load()\n"
             "print(json.dumps({'pull': cfg['steps']['pull'], 'problem': config.problem()}))")
-    r = subprocess.run([sys.executable, "-c", soft, str(v / "tools")], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, "-c", soft, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace")
     got = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
     c.ok(r.returncode == 0 and got.get("pull") is False and "palimpsest.json" in got.get("problem", "")
          and r.stderr.count("palimpsest.json") == 1,
@@ -109,7 +109,7 @@ def main() -> int:
         write(v, f"tools/{script}", "print('stub')\n")
     env = {k: val for k, val in os.environ.items() if k != "CLAUDE_BRAIN_NO_HOOK"}
     r = subprocess.run([sys.executable, str(v / "tools" / "hook_session_start.py")], cwd=v,
-                       capture_output=True, text=True, env=env, timeout=120)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=120)
     try:
         ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
     except Exception:
@@ -118,7 +118,7 @@ def main() -> int:
          "the session opener still opens with an unparseable palimpsest.json",
          f"exit={r.returncode}\n{(r.stdout + r.stderr)[-400:]}")
     r = subprocess.run([sys.executable, str(v / "tools" / "sync.py")], cwd=v, capture_output=True,
-                       text=True, timeout=300)
+                       text=True, encoding="utf-8", errors="replace", timeout=300)
     status, log = v / "tools" / ".sync_status.json", v / "tools" / "sync.log"
     c.ok(status.exists() and log.exists(),
          "sync.py still runs and writes .sync_status.json and sync.log with an unparseable config",
@@ -134,7 +134,7 @@ def main() -> int:
          f"exit={r.returncode} receipt={receipt}\nlog tail={logged[-300:]!r}\nstdout={r.stdout[-300:]!r}")
     before = status.read_bytes() if status.exists() else b""
     r = subprocess.run([sys.executable, str(v / "tools" / "hook_session_start.py")], cwd=v,
-                       capture_output=True, text=True, env=env, timeout=120)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=120)
     try:
         ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
     except Exception:
@@ -154,7 +154,7 @@ def main() -> int:
         shutil.copy2(REPO / "claude-code.sh", v / "claude-code.sh")
         lenv = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}"}
         r = subprocess.run(["sh", str(v / "claude-code.sh"), "--continue"], capture_output=True,
-                           text=True, input="", env=lenv, timeout=60)
+                           text=True, encoding="utf-8", errors="replace", input="", env=lenv, timeout=60)
         ran = (stub / "CLAUDE_RAN").read_text().strip() if (stub / "CLAUDE_RAN").exists() else None
         c.ok(r.returncode == 0 and "palimpsest.json" in r.stderr and "DEFAULTS" in r.stderr
              and ran == "--continue",
@@ -162,7 +162,7 @@ def main() -> int:
              f"exit={r.returncode} ran={ran!r} stderr={r.stderr[-300:]!r}")
         (stub / "CLAUDE_RAN").unlink(missing_ok=True)
         write(v, "palimpsest.json", json.dumps({"push_remote": "backup"}))
-        r = subprocess.run(["sh", str(v / "claude-code.sh")], capture_output=True, text=True,
+        r = subprocess.run(["sh", str(v / "claude-code.sh")], capture_output=True, text=True, encoding="utf-8", errors="replace",
                            input="", env=lenv, timeout=60)
         c.ok(r.returncode == 0 and not r.stderr.strip() and (stub / "CLAUDE_RAN").exists(),
              "claude-code.sh is silent with a readable palimpsest.json",
@@ -177,7 +177,7 @@ def main() -> int:
     subprocess.run([sys.executable, str(w / "tools" / "sync.py")], cwd=w, capture_output=True, timeout=300)
     write(w, "palimpsest.json", json.dumps({"push_remote": "backup"}))
     r = subprocess.run([sys.executable, str(w / "tools" / "sync.py")], cwd=w, capture_output=True,
-                       text=True, timeout=300)
+                       text=True, encoding="utf-8", errors="replace", timeout=300)
     receipt = json.loads((w / "tools" / ".sync_status.json").read_text())
     c.ok(r.returncode == 0 and receipt.get("ok") is True and not receipt.get("failures"),
          "after palimpsest.json is fixed, the next sync's receipt is clean", f"{receipt}\n{r.stdout[-200:]}")
@@ -185,7 +185,7 @@ def main() -> int:
     c.ok(r.returncode != 0 and (v / "palimpsest.json").read_text() == bad,
          "setup.py refuses to overwrite an unparseable palimpsest.json", (r.stdout + r.stderr)[-300:])
     (v / "palimpsest.json").write_bytes(b"\xef\xbb\xbf" + json.dumps({"push_remote": "backup"}).encode())
-    out = subprocess.run([sys.executable, "-c", probe, str(v / "tools")], capture_output=True, text=True).stdout
+    out = subprocess.run([sys.executable, "-c", probe, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     c.ok(out.startswith("{") and json.loads(out).get("push_remote") == "backup",
          "a palimpsest.json saved with a BOM (Notepad) loads", out[:200])
 
@@ -255,7 +255,7 @@ def main() -> int:
     stale = b"\r\n" in (d / "tools/githooks/pre-commit").read_bytes()
     dirty = git(d, "status", "--short").stdout
     r = subprocess.run([sys.executable, str(d / "tools" / "setup.py"), "--fix-line-endings"], cwd=d,
-                       capture_output=True, text=True, input="")
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", input="")
     hook = d / "tools/githooks/pre-commit"
     c.ok(stale and not dirty and b"\r" not in hook.read_bytes() and not git(d, "status", "--short").stdout
          and (os.name == "nt" or os.access(hook, os.X_OK)),
@@ -267,7 +267,7 @@ def main() -> int:
     readme_crlf = b"\r" in (d / "README.md").read_bytes()
     (d / "README.md").write_bytes((d / "README.md").read_bytes().replace(b"\n", b"\r\n"))
     r = subprocess.run([sys.executable, str(d / "tools" / "setup.py"), "--fix-line-endings"], cwd=d,
-                       capture_output=True, text=True, input="")
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", input="")
     c.ok(eol_rule and not readme_crlf and b"\r" not in (d / "README.md").read_bytes()
          and not git(d, "status", "--short").stdout,
          "notes check out LF under core.autocrlf=true, and --fix-line-endings rewrites a CRLF one",

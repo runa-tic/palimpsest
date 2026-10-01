@@ -58,7 +58,7 @@ def vault() -> Path:
 
 def drive(v: Path, replies: list[str], *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-c", DRIVER, str(v / "tools" / "rlm.py"), json.dumps(replies), *args],
-                          cwd=v, capture_output=True, text=True, timeout=120, env={**os.environ, **(env or {})})
+                          cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, env={**os.environ, **(env or {})})
 
 
 def qa_log(v: Path) -> str:
@@ -82,7 +82,7 @@ def check_root_failure(c: Checks) -> None:
     stub(fakebin, "claude", f"import sys\nopen({str(calls)!r}, 'a').write('x\\n')\n"
                             "sys.stderr.write('rate limited (529)\\n')\nsys.exit(1)\n")
     r = subprocess.run([sys.executable, str(v / "tools" / "rlm.py"), "--log", "q"], cwd=v, capture_output=True,
-                       text=True, timeout=120, env={**os.environ, "PATH": stub_path(fakebin)})
+                       text=True, encoding="utf-8", errors="replace", timeout=120, env={**os.environ, "PATH": stub_path(fakebin)})
     ncalls = len(calls.read_text().splitlines()) if calls.exists() else 0
     failed_ok = (r.returncode != 0 and "claude CLI failed" not in qa_log(v) and ncalls == 2
                  and not any(t["t"] == "final" for t in traces(v)))
@@ -266,11 +266,11 @@ def check_hook_and_profile(c: Checks) -> None:
                 leaks = []
                 for f in (secret, tmpd / "s.txt"):      # $TMPDIR (/private/var/folders) and /private/tmp
                     rr = subprocess.run(rlm._os_sandbox([sys.executable, "-c", f"print(open({str(f)!r}).read())"],
-                                                        scratch)[0], capture_output=True, text=True, timeout=60, cwd=v)
+                                                        scratch)[0], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, cwd=v)
                     leaks.append(rr.returncode == 0 or "SECRET" in rr.stdout)
                 rr = subprocess.run(rlm._os_sandbox([sys.executable, "-c",
                                                      f"print(open({str(v / '10 Notes' / 'n.md')!r}).read())"],
-                                                    scratch)[0], capture_output=True, text=True, timeout=60, cwd=v)
+                                                    scratch)[0], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, cwd=v)
                 prof_ok = not any(leaks) and rr.returncode == 0 and "a note" in rr.stdout
                 detail += f" | leaks={leaks} vault_rc={rr.returncode} {rr.stderr[-200:]}"
             finally:
@@ -375,14 +375,14 @@ def check_profile_libs(c: Checks) -> None:
                  "s = Path(sys.argv[2])\n"
                  "code = 'import sqlite3, lzma, ssl, _decimal, bz2, zlib, hashlib, ctypes; print(\"IMPORTS-OK\")'\n"
                  "r = subprocess.run(rlm._os_sandbox([sys.executable, '-c', code], s)[0], capture_output=True, "
-                 "text=True, cwd=s)\nprint(r.stdout.strip(), r.returncode, r.stderr[-300:])\n"
+                 "text=True, encoding='utf-8', errors='replace', cwd=s)\nprint(r.stdout.strip(), r.returncode, r.stderr[-300:])\n"
                  "if Path('/opt/homebrew/bin/brew').exists():\n"
                  "    r = subprocess.run(rlm._os_sandbox([sys.executable, '-c', \"open('/opt/homebrew/bin/brew').read()\"],"
-                 " s)[0], capture_output=True, text=True, cwd=s)\n"
+                 " s)[0], capture_output=True, text=True, encoding='utf-8', errors='replace', cwd=s)\n"
                  "    print('BREW-READ', r.returncode)\n")
         outs = []
         for py in (sys.executable, str(t / "venv" / "bin" / "python")):
-            r = subprocess.run([py, "-c", probe, str(v / "tools"), str(scratch)], capture_output=True, text=True,
+            r = subprocess.run([py, "-c", probe, str(v / "tools"), str(scratch)], capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=120, cwd=scratch)
             outs.append(r.stdout + r.stderr)
         c.ok(all("IMPORTS-OK 0" in o and "BREW-READ 0" not in o for o in outs),

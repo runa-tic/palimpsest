@@ -200,6 +200,10 @@ print("UP" if state.local_network_up(["localhost"]) else "DOWN")
 
 
 def check_tls_untrusted(c: Checks):
+    if not shutil.which("openssl"):
+        c.skip("a TLS peer with an unverifiable certificate counts as network up; a dropped connect does not",
+               "needs the openssl CLI to make a throwaway certificate (Git Bash or macOS/Linux have one)")
+        return
     v = vault()
     d = Path(tempfile.mkdtemp(prefix="palimpsest-tls-"))
     TMP.append(d)
@@ -208,7 +212,7 @@ def check_tls_untrusted(c: Checks):
     out = {}
     for mode in ("tls", "close"):
         p = subprocess.run([sys.executable, "-c", TLS_CLIENT, str(d / "c.pem"), str(d / "k.pem"), mode],
-                           cwd=v, capture_output=True, text=True, timeout=60)
+                           cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         out[mode] = p.stdout.strip() + p.stderr[-300:]
     c.ok(out["tls"].startswith("UP") and out["close"].startswith("DOWN"),
          "10. a TLS peer with an unverifiable certificate counts as network up; a dropped connect does not",

@@ -46,7 +46,7 @@ def main() -> int:
     v = make_vault()
     write(v, "10 Notes/A/Status.md", "alpha\n")
     write(v, "10 Notes/B/Status.md", "beta\n")
-    r = subprocess.run([sys.executable, "-c", CORPUS, str(v)], cwd=v, capture_output=True, text=True, timeout=60)
+    r = subprocess.run([sys.executable, "-c", CORPUS, str(v)], cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     out = r.stdout + r.stderr
     c.ok("GREP ['10 Notes/B/Status.md']" in out, "grep finds text in the second same-named note", out[-400:])
     c.ok("CHUNKS True True" in out, "chunks carry both same-named notes' text", out[-400:])
@@ -66,7 +66,7 @@ def main() -> int:
     t0 = time.monotonic()
     try:
         r = subprocess.run([sys.executable, "-c", TIMEOUT, str(v / "tools" / "rlm.py")], cwd=v,
-                           capture_output=True, text=True, timeout=90)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
         out, hung = r.stdout + r.stderr, False
     except subprocess.TimeoutExpired:
         out, hung = "", True

@@ -32,7 +32,7 @@ CLAUDE_STUB = ("import os, sys\n"
 def opener(v: Path) -> str:
     env = {k: val for k, val in os.environ.items() if k != "CLAUDE_BRAIN_NO_HOOK"}
     r = subprocess.run([sys.executable, str(v / "tools" / "hook_session_start.py")], cwd=v,
-                       capture_output=True, text=True, env=env, timeout=120)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=120)
     try:
         return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
     except Exception:
@@ -56,7 +56,7 @@ def check_sync_config(c: Checks) -> None:
     for s in STEP_SCRIPTS:
         write(v, f"tools/{s}", "print('stub')\n")
     r = subprocess.run([sys.executable, str(v / "tools" / "sync.py")], cwd=v, capture_output=True,
-                       text=True, timeout=300)
+                       text=True, encoding="utf-8", errors="replace", timeout=300)
     log = (v / "tools" / "sync.log").read_text(encoding="utf-8") if (v / "tools" / "sync.log").exists() else ""
     first_step = log.find("] === ")      # the first step header
     at = log.find("!! config: ")
@@ -185,7 +185,7 @@ def check_util_cleanup(c: Checks) -> None:
         v = _util.make_vault()
         print(v)
     """)
-    r = subprocess.run([sys.executable, "-c", code, str(REPO / "tests")], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, "-c", code, str(REPO / "tests")], capture_output=True, text=True, encoding="utf-8", errors="replace")
     made = Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
     c.ok(made is not None and not made.exists(),
          "a vault made by _util.make_vault is removed when the test script exits", f"{made} {r.stderr[-300:]}")

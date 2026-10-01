@@ -70,7 +70,7 @@ def stubs(v: Path) -> dict:
 
 def py(v: Path, code: str, env: dict, timeout: int = 60) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run([sys.executable, "-c", code], cwd=v / "tools", capture_output=True, text=True,
+        return subprocess.run([sys.executable, "-c", code], cwd=v / "tools", capture_output=True, text=True, encoding="utf-8", errors="replace",
                               env={**os.environ, **env}, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         return subprocess.CompletedProcess(e.cmd, -9, "", f"TIMEOUT after {timeout}s")
@@ -205,7 +205,7 @@ with embed._WriterLock(idx.cache_dir) as held:
     other = subprocess.run([sys.executable, "-c",
         "import embed, pathlib; embed.LOCK_WAIT = 2\n"
         "l = embed._WriterLock(pathlib.Path('cache/embed-x')).__enter__()\n"
-        "print('STOLE' if l.fd is not None else 'WAITED')"], capture_output=True, text=True, timeout=30)
+        "print('STOLE' if l.fd is not None else 'WAITED')"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     print(other.stdout.strip())
 '''
     r = py(v, code, {}, timeout=60)
