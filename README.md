@@ -196,12 +196,13 @@ than a chatbot standing next to it.
 
 Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
 assume that. This release was tested on macOS and on Windows 11 (Python 3.13, Git for Windows,
-`core.autocrlf=true`, a non-ASCII user profile): the full suite passes on both, the git hook
-blocks a staged key, and the ledger, retrieval with the reranker and the line-ending repair run
-from a fresh clone. On Windows the symlink checks skip unless the account may create symlinks
-(admin or Developer Mode), and two things have not been run there yet: the scheduled nightly sync
-with its hidden console windows, and extraction against the real `claude` CLI (the tests stand in
-a stub for it). A vault cloned before `.gitattributes` pinned every text file to LF keeps its
+`core.autocrlf=true`, a Cyrillic user profile), on Windows both as installed — UTF-8 mode off, a
+cp1251 code page, no Unix tools on PATH — and from Git Bash: the full suite passes in each, the
+git hook blocks a staged key, and the ledger, retrieval with the reranker and the line-ending
+repair run from a fresh clone. On Windows the symlink checks skip unless the account may create
+symlinks (admin or Developer Mode), and one TLS check skips without the `openssl` CLI (Git Bash
+has it). Two things have not been run there yet: the scheduled nightly sync with its hidden
+console windows, and extraction against the real `claude` CLI (the tests stand in a stub for it). A vault cloned before `.gitattributes` pinned every text file to LF keeps its
 CRLF working files, including a CRLF `pre-commit` that refuses every commit on Windows: after
 pulling those rules, run `python tools/setup.py --fix-line-endings` once (it rewrites only files
 the rules pin to LF, and only their line endings). `rlm.py`'s read confinement is
