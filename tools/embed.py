@@ -412,6 +412,21 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    # Every word after the script is a query, so a flag would be searched for, after a build
+    # that can take hours: `embed.py --help` started one. Options are refused before any work.
+    words = sys.argv[1:]
+    if words[:1] == ["--"]:
+        words = words[1:]
+    elif any(w.startswith("-") for w in words):
+        usage = ("usage: python tools/embed.py [query ...]\n"
+                 "  builds or refreshes the embedding index (resumable; the first e5-base build takes\n"
+                 "  hours on CPU), then searches for the query if one is given. No options;\n"
+                 "  `python tools/embed.py -- -word` searches for a word that starts with '-'.")
+        if any(w in ("-h", "--help") for w in words):
+            print(usage)
+            sys.exit(0)
+        print(f"embed: unknown option {next(w for w in words if w.startswith('-'))!r}\n{usage}", file=sys.stderr)
+        sys.exit(2)
     if importlib.util.find_spec("sentence_transformers") is None:
         # The nightly sync runs this unconditionally; without the optional package it is a no-op,
         # not a failure, so the sync stays green on a vault that never opted in.
@@ -422,6 +437,6 @@ if __name__ == "__main__":
     idx = Index.open(gather())
     dim = idx.vec.shape[1] if idx.vec.size else 0
     print(f"index: {len(idx.files)} files, {len(idx.rows)} chunks, dim {dim}")
-    if len(sys.argv) > 1:
-        for h in idx.search(" ".join(sys.argv[1:]), top=10):
+    if words:
+        for h in idx.search(" ".join(words), top=10):
             print(f"{h.score:.3f}  {h.path.relative_to(VAULT)}")
