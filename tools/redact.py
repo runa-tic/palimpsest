@@ -269,4 +269,4 @@ if __name__ == "__main__":
         pass
     out, hits = redact_text(data)
     sys.stderr.write(f"redact: {hits} substitution(s)\n")
-    sys.stdout.write(out)
+    sys.stdout.buffer.write(out.encode("utf-8"))   # bytes: no newline translation on Windows

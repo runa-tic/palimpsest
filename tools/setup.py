@@ -123,7 +123,7 @@ def fix_line_endings() -> list[str]:
     the nightly backup's too. Only the line endings change, so local edits survive."""
     try:
         p = subprocess.run(["git", "ls-files", "--eol", "-z"], cwd=str(cfgmod.VAULT),
-                           capture_output=True, text=True, encoding="utf-8", timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", timeout=60, errors="replace")
     except (OSError, subprocess.SubprocessError):
         return []
     fixed = []
@@ -144,7 +144,7 @@ def fix_line_endings() -> list[str]:
         # without reading the content, so the tree would show ' M' with an empty diff. When the
         # content is exactly the staged blob, re-staging it only refreshes that stat.
         git = lambda *a: subprocess.run(["git", *a], cwd=str(cfgmod.VAULT), capture_output=True,
-                                        text=True).stdout.strip()
+                                        text=True, errors="replace").stdout.strip()
         if git("hash-object", "--", path) == git("rev-parse", f":{path}"):
             git("update-index", "-q", "--", path)
     return fixed
@@ -235,7 +235,7 @@ def interview(cfg: dict) -> int:
             # Asked every time, even when origin was already saved: the setup that preceded this
             # one defaulted to origin, so a saved origin may be an Enter, not a decision.
             url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(cfgmod.VAULT),
-                                 capture_output=True, text=True).stdout.strip() or "no URL"
+                                 capture_output=True, text=True, errors="replace").stdout.strip() or "no URL"
             print(f"   `origin` is {url} — the repo this clone came from, unless you changed it.")
             if not yes("   push your notes THERE", False):
                 remote = ""

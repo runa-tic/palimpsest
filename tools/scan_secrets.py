@@ -133,7 +133,7 @@ def staged_files() -> list[str]:
     # a file holding a key sailed through (external review, 2026-09-30).
     out = subprocess.run(
         ["git", "diff", "--cached", "-z", "--name-only", "--diff-filter=d"],
-        cwd=VAULT, capture_output=True, text=True, encoding="utf-8",
+        cwd=VAULT, capture_output=True, text=True, encoding="utf-8", errors="replace"
     ).stdout
     return [p for p in out.split("\0") if p]
 

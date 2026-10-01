@@ -77,7 +77,7 @@ def gen(n: int, seed: int):
             prompt = GEN_PROMPT + "\n\n".join(f"### id={i}\nTITLE: {t}\nBODY: {b}" for i, (_, t, b) in enumerate(batch))
             # shutil.which honours PATHEXT, so npm's claude.cmd is found on Windows too.
             proc = subprocess.run([shutil.which("claude") or "claude", "-p", "--model", GEN_MODEL], input=prompt, capture_output=True,
-                                  text=True, encoding="utf-8", env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"})
+                                  text=True, encoding="utf-8", env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"}, errors="replace")
             out = proc.stdout or ""
             if proc.returncode != 0 or "[" not in out:
                 print(f"  batch {k // BATCH}: claude failed: {(proc.stderr or out).strip()[:200]}")

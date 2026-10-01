@@ -359,7 +359,7 @@ def main():
     # shutil.which honours PATHEXT: a bare "claude" argv does not find npm's claude.cmd on Windows.
     proc = subprocess.run([shutil.which("claude") or "claude", "-p", "--model", args.model],
                           input=prompt, capture_output=True, text=True, encoding="utf-8",
-                          env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"})  # don't trigger vault hooks
+                          env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"}, errors="replace")  # don't trigger vault hooks
     if proc.returncode != 0:
         print("claude CLI failed:", (proc.stderr or "").strip()[:300])
         sys.exit(1)

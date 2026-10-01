@@ -41,6 +41,7 @@ from datetime import datetime
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")   # tracebacks too: a caller reads them as UTF-8
 except Exception:
     pass
 
