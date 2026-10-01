@@ -166,8 +166,10 @@ t0 = time.time()
 with embed._WriterLock(d):
     pass
 print("RETURNED", round(time.time() - t0))
-# a holder whose lock was taken over must not remove the new holder's lock on exit
 pathlib.Path.unlink = real
+if os.name == "nt":
+    raise SystemExit   # a held lock cannot be deleted on Windows, so it is never taken over
+# a holder whose lock was taken over must not remove the new holder's lock on exit
 lock.unlink()
 a = embed._WriterLock(d).__enter__()
 os.utime(lock, (old, old))
@@ -176,9 +178,14 @@ a.__exit__(None, None, None)
 print("KEPT", lock.exists() and lock.read_text() == "12345")
 '''
     r = py(v, code, {}, timeout=30)
-    c.ok("RETURNED" in r.stdout and "KEPT True" in r.stdout,
-         "_WriterLock: an unremovable stale lock waits LOCK_WAIT then proceeds; exit never removes another's lock",
+    c.ok("RETURNED" in r.stdout, "_WriterLock: an unremovable stale lock waits LOCK_WAIT then proceeds",
          (r.stdout + r.stderr)[-400:])
+    if os.name == "nt":
+        c.skip("_WriterLock: exit never removes the lock of a writer that took it over",
+               "Windows cannot delete a lock file its holder keeps open, so no writer can take it over")
+    else:
+        c.ok("KEPT True" in r.stdout, "_WriterLock: exit never removes the lock of a writer that took it over",
+             (r.stdout + r.stderr)[-400:])
 
 
 def check_lock_refreshed(c: Checks):
