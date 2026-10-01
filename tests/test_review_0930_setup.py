@@ -24,6 +24,7 @@ Set PALIMPSEST_REF to test another committed ref for 5 and 6 (default: the curre
 """
 import json, os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
+import _util
 from _util import Checks, REPO, TOOLS_SRC, git, make_vault as _make_vault, write
 
 MADE: list[Path] = []
@@ -204,7 +205,7 @@ def main() -> int:
         slog = v / "tools" / "sync.log"
         c.ok("crashed at import" in (slog.read_text() if slog.exists() else ""),
              "the printed cron line appends sync.py's stderr to sync.log instead of discarding it", line)
-        shutil.rmtree(v.parent)
+        _util.rmtree(v.parent)
     w = vault_at("John Smith's Vault")
     out = hint(w, "06:00", "Windows")
     arg, exe, wd = (ps_literal(out, f) for f in ("Argument", "Execute", "WorkingDirectory"))
@@ -212,7 +213,7 @@ def main() -> int:
     c.ok(arg == f'"{script}"' and exe == sys.executable and wd == str(w.resolve()),
          "the Windows task quotes the script path for python.exe and PowerShell",
          f"Argument={arg!r} Execute={exe!r} WorkingDirectory={wd!r}")
-    shutil.rmtree(w.parent)
+    _util.rmtree(w.parent)
 
     # 1b. a saved push to origin is not dropped without saying so, and the prompts read cleanly
     v = make_vault()
@@ -260,11 +261,23 @@ def main() -> int:
          and (os.name == "nt" or os.access(hook, os.X_OK)),
          "setup.py --fix-line-endings rewrites a CRLF hook left by an older checkout (tree stays clean)",
          f"CRLF before={stale} status before={dirty!r}\n{(r.stdout + r.stderr)[-300:]}")
-    shutil.rmtree(d)
+    # 7. notes too: LF at checkout under core.autocrlf=true, and a CRLF note left by an older
+    # checkout is rewritten with LF while the tree stays clean
+    eol_rule = "* text=auto eol=lf" in (d / ".gitattributes").read_text()
+    readme_crlf = b"\r" in (d / "README.md").read_bytes()
+    (d / "README.md").write_bytes((d / "README.md").read_bytes().replace(b"\n", b"\r\n"))
+    r = subprocess.run([sys.executable, str(d / "tools" / "setup.py"), "--fix-line-endings"], cwd=d,
+                       capture_output=True, text=True, input="")
+    c.ok(eol_rule and not readme_crlf and b"\r" not in (d / "README.md").read_bytes()
+         and not git(d, "status", "--short").stdout,
+         "notes check out LF under core.autocrlf=true, and --fix-line-endings rewrites a CRLF one",
+         f"rule={eol_rule} crlf-at-checkout={readme_crlf} status={git(d, 'status', '--short').stdout!r}\n"
+         f"{(r.stdout + r.stderr)[-300:]}")
+    _util.rmtree(d)
     mode = git(REPO, "ls-tree", ref, "claude-code.sh").stdout.split()[:1]
     c.ok(mode == ["100755"], f"claude-code.sh is committed executable on {ref[:12]}", str(mode))
     for v in MADE:
-        shutil.rmtree(v, ignore_errors=True)
+        _util.rmtree(v, ignore_errors=True)
     return c.done()
 
 
