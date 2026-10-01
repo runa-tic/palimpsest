@@ -12,7 +12,7 @@ Usage (from vault root):
 No API key needed; uses your Claude Code login.
 """
 from __future__ import annotations
-import sys, os, re, math, subprocess, argparse, importlib.util
+import sys, os, re, math, shutil, subprocess, argparse, importlib.util
 from pathlib import Path
 from datetime import datetime
 
@@ -356,7 +356,8 @@ def main():
         "say so and mark any answer about current state as unverified.\n\n"
         f"QUESTION: {q}\n\n===NOTES===\n" + "\n".join(ctx)
     )
-    proc = subprocess.run(["claude", "-p", "--model", args.model],
+    # shutil.which honours PATHEXT: a bare "claude" argv does not find npm's claude.cmd on Windows.
+    proc = subprocess.run([shutil.which("claude") or "claude", "-p", "--model", args.model],
                           input=prompt, capture_output=True, text=True, encoding="utf-8",
                           env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"})  # don't trigger vault hooks
     if proc.returncode != 0:
