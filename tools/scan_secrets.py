@@ -25,8 +25,10 @@ import codecs, re, sys, subprocess
 from pathlib import Path
 
 try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    # backslashreplace: a staged path that is not UTF-8 is carried losslessly (surrogateescape,
+    # see staged_files) and must print as escapes, not crash the report about it.
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
 except Exception:
     pass
 
@@ -133,8 +135,11 @@ def staged_files() -> list[str]:
     # a file holding a key sailed through (external review, 2026-09-30).
     out = subprocess.run(
         ["git", "diff", "--cached", "-z", "--name-only", "--diff-filter=d"],
-        cwd=VAULT, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        cwd=VAULT, capture_output=True, text=True, encoding="utf-8", errors="surrogateescape"
     ).stdout
+    # surrogateescape, never "replace": two staged names differing only in non-UTF-8 bytes both
+    # decoded to the same U+FFFD string, so one blob was read twice and the other never — a staged
+    # key passed as clean where the strict decode had crashed and blocked (overnight review, 10-02).
     return [p for p in out.split("\0") if p]
 
 
@@ -292,7 +297,7 @@ def staged_blobs(paths: list[str]):
         meta, tab, name = rec.partition(b"\t")
         if tab:
             mode, oid, stage = meta.decode().split()
-            index[name.decode("utf-8", errors="replace")] = (mode, oid)
+            index[name.decode("utf-8", errors="surrogateescape")] = (mode, oid)   # lossless, as staged_files
     cat = None
     try:
         for path in paths:
