@@ -13,7 +13,7 @@ real use case: a bilingual operator asking in either language against mostly-Eng
 The report goes to `40 Resources/Retrieval benchmark — lexical vs embeddings.md`.
 """
 from __future__ import annotations
-import sys, os, re, json, random, argparse, subprocess, time, importlib.util
+import sys, os, re, json, random, argparse, shutil, subprocess, time, importlib.util
 from pathlib import Path
 
 try:
@@ -75,7 +75,8 @@ def gen(n: int, seed: int):
         for k in range(0, len(picked), BATCH):
             batch = picked[k:k + BATCH]
             prompt = GEN_PROMPT + "\n\n".join(f"### id={i}\nTITLE: {t}\nBODY: {b}" for i, (_, t, b) in enumerate(batch))
-            proc = subprocess.run(["claude", "-p", "--model", GEN_MODEL], input=prompt, capture_output=True,
+            # shutil.which honours PATHEXT, so npm's claude.cmd is found on Windows too.
+            proc = subprocess.run([shutil.which("claude") or "claude", "-p", "--model", GEN_MODEL], input=prompt, capture_output=True,
                                   text=True, encoding="utf-8", env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"})
             out = proc.stdout or ""
             if proc.returncode != 0 or "[" not in out:
