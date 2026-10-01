@@ -100,6 +100,25 @@ def main() -> int:
                        cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace")
     c.ok("STALE" in r.stdout and "CONFLICT" in r.stdout, "ask.py's state block carries STALE and CONFLICT",
          r.stdout + r.stderr)
+
+    # Two staged names that differ only in non-UTF-8 bytes (Linux allows them) must stay two names:
+    # a lossy decode made both one string, so the guards read one blob twice and passed the other.
+    # Index-only paths, so the check runs on filesystems that refuse such names too.
+    for script, payload, setup_terms in (("scan_secrets.py", f"aws {FAKE_KEY}\n", None),
+                                         ("scan_pii.py", "met Quintanilla today\n", b"Quintanilla\n")):
+        v = make_vault()
+        if setup_terms:
+            write(v, ".gitignore", "tools/.redact_terms.txt\n")
+            (v / "tools" / ".redact_terms.txt").write_bytes(setup_terms)
+        blob = lambda data: subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=v, input=data,
+                                           capture_output=True, check=True).stdout.strip()
+        bad, good = blob(payload.encode()), blob(b"nothing here\n")
+        info = (b"100644 " + bad + b"\tnotes/n\xfe.md\0" + b"100644 " + good + b"\tnotes/n\xff.md\0")
+        subprocess.run(["git", "update-index", "--add", "-z", "--index-info"], cwd=v, input=info, check=True)
+        r = run(v, script)
+        c.ok(r.returncode == 1 and "Traceback" not in r.stdout + r.stderr,
+             f"{script} blocks a finding in one of two staged names that differ only in non-UTF-8 bytes",
+             f"rc={r.returncode} {(r.stdout + r.stderr)[-300:]}")
     return c.done()
 
 
