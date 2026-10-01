@@ -76,7 +76,7 @@ def pull_line() -> str:
         # cleanup (rebase --abort, lock release) instead of being killed inside it.
         env = {**os.environ, "VAULT_PUSH_LOCK_WAIT": "15", "VAULT_PUSH_NET_TIMEOUT": "35"}
         p = subprocess.run([PY, str(TOOLS / "vault_push.py"), "--pull-only"], cwd=str(VAULT), env=env,
-                           capture_output=True, text=True, encoding="utf-8", timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", timeout=60, errors="replace")
         out = (p.stdout or "").strip().splitlines()
         msg = out[-1].replace("vault-push: ", "") if out else f"exit {p.returncode}, no output"
     except subprocess.TimeoutExpired:
@@ -99,7 +99,7 @@ def state_block() -> str:
         return ""
     try:
         p = subprocess.run([PY, str(TOOLS / "state.py"), "show", "--hot", "--opener"], cwd=str(VAULT),
-                           capture_output=True, text=True, encoding="utf-8", timeout=30)
+                           capture_output=True, text=True, encoding="utf-8", timeout=30, errors="replace")
         # A crash (a hand-edited entities.json that no longer parses) leaves stdout empty, and an
         # empty block reads as "no ledger" — exactly the silence sync_line() refuses to emit.
         if p.returncode != 0:
@@ -114,7 +114,7 @@ def state_block() -> str:
 def run(script: str) -> str:
     try:
         return subprocess.run([PY, str(TOOLS / script)], cwd=str(VAULT),
-                              capture_output=True, text=True, encoding="utf-8", timeout=90).stdout or ""
+                              capture_output=True, text=True, encoding="utf-8", timeout=90, errors="replace").stdout or ""
     except Exception:
         return ""
 

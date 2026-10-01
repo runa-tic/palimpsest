@@ -377,7 +377,7 @@ def run_claude(prompt: str, model: str) -> str:
         proc = subprocess.run(
             claude_argv(exe, model, legacy),
             input=prompt, capture_output=True, text=True, encoding="utf-8", cwd=str(cwd), env=env,
-            creationflags=creationflags,
+            creationflags=creationflags, errors="replace"
         )
         if legacy or proc.returncode == 0 or "unknown option" not in proc.stderr:
             break

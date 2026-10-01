@@ -17,6 +17,7 @@ from link_notes import frontmatter_tags, read_note
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")   # tracebacks too: a caller reads them as UTF-8
 except Exception:
     pass
 
