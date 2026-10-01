@@ -135,7 +135,7 @@ python tools/state.py add my-api host server-1 --source "[[Deploy notes]]"
 python tools/state.py show my-api                  # current value, when, who, why, what it superseded
 python tools/state.py probe                         # built-in probes + any declared in palimpsest.json
 
-for t in tests/test_*.py; do python "$t"; done      # regression tests: throwaway vaults, no model calls
+python tests/run_all.py                    # regression tests on any OS: throwaway vaults, no model calls
 ```
 
 You can skip `setup.py` entirely: with the hooks registered, an unconfigured vault makes the
@@ -195,12 +195,16 @@ than a chatbot standing next to it.
 ## Limitations, honestly
 
 Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
-assume that. The two-machine sync, the state ledger and the reranked retrieval in this release
-were tested on macOS only (the test suite in `tests/` and a clean install); their Windows paths —
-hidden console windows, the git hook — have not been run yet. A Windows vault cloned with
-`core.autocrlf=true` before `.gitattributes` pinned LF endings keeps its CRLF `pre-commit`, which
-refuses every commit: after pulling those rules, run `python tools/setup.py --fix-line-endings`
-once (it rewrites only files the rules pin to LF, and only their line endings). `rlm.py`'s read confinement is
+assume that. This release was tested on macOS and on Windows 11 (Python 3.13, Git for Windows,
+`core.autocrlf=true`, a non-ASCII user profile): the full suite passes on both, the git hook
+blocks a staged key, and the ledger, retrieval with the reranker and the line-ending repair run
+from a fresh clone. On Windows the symlink checks skip unless the account may create symlinks
+(admin or Developer Mode), and two things have not been run there yet: the scheduled nightly sync
+with its hidden console windows, and extraction against the real `claude` CLI (the tests stand in
+a stub for it). A vault cloned before `.gitattributes` pinned every text file to LF keeps its
+CRLF working files, including a CRLF `pre-commit` that refuses every commit on Windows: after
+pulling those rules, run `python tools/setup.py --fix-line-endings` once (it rewrites only files
+the rules pin to LF, and only their line endings). `rlm.py`'s read confinement is
 OS-enforced on macOS only; elsewhere, treat the REPL as able to read what your user can. The skills extractor is disabled in the default pipeline — it burned most of a
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
