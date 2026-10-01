@@ -804,7 +804,10 @@ def probe_command(spec: dict) -> tuple[list[tuple[str, str, str]], dict]:
     except subprocess.TimeoutExpired:
         detail, fail = "timed out", "unreachable (timeout)"
     except Exception as e:
-        detail, fail = f"{type(e).__name__}: {e}"[:200], f"probe error ({type(e).__name__})"
+        # The command never started (not installed, not on PATH, not executable): a fault on this
+        # machine, whatever the network is doing. Checking the network here reported a missing
+        # executable as "this machine's network is down" and recorded nothing, run after run.
+        return [(eid, attr, f"probe error ({type(e).__name__})")], {"detail": f"{type(e).__name__}: {e}"[:200]}
     if spec.get("network", True) and not local_network_up():
         return [], {"detail": detail, "local_network_down": True}
     return [(eid, attr, fail)], {"detail": detail}

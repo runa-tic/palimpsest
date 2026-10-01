@@ -260,7 +260,13 @@ def redact_text(s: str) -> tuple[str, int]:
 if __name__ == "__main__":
     # Quick self-check / manual scrub: `python tools/redact.py < file` prints redacted.
     import sys
-    data = sys.stdin.read()
+    # Bytes in and out as UTF-8, like the vault's files: a text stdin on a Windows ANSI code page
+    # misread a UTF-8 note, so a deny-listed term in it went through unredacted.
+    data = sys.stdin.buffer.read().decode("utf-8", "replace")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     out, hits = redact_text(data)
     sys.stderr.write(f"redact: {hits} substitution(s)\n")
     sys.stdout.write(out)
