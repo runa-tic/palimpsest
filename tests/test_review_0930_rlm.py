@@ -27,6 +27,7 @@ executable that never talks to anything is put first on PATH.
 """
 import json, os, shutil, subprocess, sys, tempfile
 from pathlib import Path
+import _util
 from _util import TOOLS_SRC, Checks, can_symlink, make_vault, rmtree, stub, stub_path, write
 
 DRIVER = r'''
@@ -57,7 +58,7 @@ def vault() -> Path:
 
 
 def drive(v: Path, replies: list[str], *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, "-c", DRIVER, str(v / "tools" / "rlm.py"), json.dumps(replies), *args],
+    return subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + DRIVER, str(v / "tools" / "rlm.py"), json.dumps(replies), *args],
                           cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, env={**os.environ, **(env or {})})
 
 
@@ -382,7 +383,7 @@ def check_profile_libs(c: Checks) -> None:
                  "    print('BREW-READ', r.returncode)\n")
         outs = []
         for py in (sys.executable, str(t / "venv" / "bin" / "python")):
-            r = subprocess.run([py, "-c", probe, str(v / "tools"), str(scratch)], capture_output=True, text=True, encoding="utf-8", errors="replace",
+            r = subprocess.run([py, "-c", _util.UTF8_STDIO + probe, str(v / "tools"), str(scratch)], capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=120, cwd=scratch)
             outs.append(r.stdout + r.stderr)
         c.ok(all("IMPORTS-OK 0" in o and "BREW-READ 0" not in o for o in outs),

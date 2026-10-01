@@ -20,6 +20,7 @@ bag-of-words encoder), and `claude` is a stub on PATH that records the prompt it
 """
 import json, os, shutil, stat, subprocess, sys, tempfile, time
 from pathlib import Path
+import _util
 from _util import Checks, can_symlink, make_vault as _make_vault, rmtree, run, stub, stub_path, write
 
 _TMP: list[Path] = []
@@ -70,7 +71,7 @@ def stubs(v: Path) -> dict:
 
 def py(v: Path, code: str, env: dict, timeout: int = 60) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run([sys.executable, "-c", code], cwd=v / "tools", capture_output=True, text=True, encoding="utf-8", errors="replace",
+        return subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + code], cwd=v / "tools", capture_output=True, text=True, encoding="utf-8", errors="replace",
                               env={**os.environ, **env}, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         return subprocess.CompletedProcess(e.cmd, -9, "", f"TIMEOUT after {timeout}s")

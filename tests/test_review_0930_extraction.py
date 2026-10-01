@@ -406,7 +406,7 @@ def main() -> int:
         v = make_vault()
         code = ("import sys; sys.path.insert(0, sys.argv[1]); import import_claude as ic; "
                 "print(ic.iso_to_date('2026-09-30T23:30:00Z'), '|', ic.iso_to_dt('2026-09-30T23:30:00Z'))")
-        r = subprocess.run([sys.executable, "-c", code, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace",
+        r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + code, str(v / "tools")], capture_output=True, text=True, encoding="utf-8", errors="replace",
                            env={**os.environ, "TZ": "SGT-8"})   # UTC+8 in the POSIX and MSVCRT forms alike
         c.ok(r.stdout.strip() == "2026-10-01 | 2026-10-01 07:30", "17. UTC timestamps are shown in local time",
              r.stdout + r.stderr)

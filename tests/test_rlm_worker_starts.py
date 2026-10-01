@@ -9,6 +9,7 @@ scripted replies (one code step, then FINAL) — worker start, handshake and one
 are all exercised, with zero model calls.
 """
 import subprocess, sys
+import _util
 from _util import Checks, make_vault, write
 
 DRIVER = r'''
@@ -27,7 +28,7 @@ def main() -> int:
     v = make_vault()
     for i in range(3):
         write(v, f"10 Notes/note {i}.md", f"note {i}\n")
-    r = subprocess.run([sys.executable, "-c", DRIVER, str(v / "tools" / "rlm.py")], cwd=v,
+    r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + DRIVER, str(v / "tools" / "rlm.py")], cwd=v,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     out = r.stdout + r.stderr
     c.ok("REPL worker died" not in out and r.returncode == 0, "rlm.py gets past worker start", out[-600:])

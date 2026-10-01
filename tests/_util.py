@@ -17,6 +17,21 @@ TOOLS_SRC = Path(os.environ.get("PALIMPSEST_TOOLS", REPO / "tools"))
 _MADE: list[Path] = []
 os.environ["PALIMPSEST_STUB_PY"] = sys.executable      # read by the Windows stub launchers
 
+# A test that prints a failure detail its console's code page lacks must report it, not crash on
+# it: on a stock Windows (cp1251, UTF-8 mode off) Checks.ok died printing a Cyrillic path and
+# hid the failure it was reporting.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
+
+# Prefix for the tests' own `python -c` drivers: they write UTF-8, like the tools, because the
+# tests read every child as UTF-8. Without it a driver on a cp1251 box printed in cp1251 and a
+# Cyrillic profile path came back as U+FFFD.
+UTF8_STDIO = ("import sys as _sys\nfor _st in (_sys.stdout, _sys.stderr):\n"
+              "    _st.reconfigure(encoding='utf-8', errors='backslashreplace')\n")
+
 
 def _writable_retry(func, path, _exc) -> None:
     """git makes its object files read-only, which Windows refuses to delete."""
