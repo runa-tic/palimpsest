@@ -27,7 +27,7 @@ executable that never talks to anything is put first on PATH.
 """
 import json, os, shutil, subprocess, sys, tempfile
 from pathlib import Path
-from _util import TOOLS_SRC, Checks, make_vault, write
+from _util import TOOLS_SRC, Checks, can_symlink, make_vault, rmtree, stub, stub_path, write
 
 DRIVER = r'''
 import os, sys, json, time, importlib.util
@@ -77,16 +77,12 @@ def check_root_failure(c: Checks) -> None:
     # The real _claude, against a fake `claude` that fails like a rate limit and counts its calls.
     v = vault()
     write(v, "10 Notes/n.md", "a note\n")
-    fakebin = v / "fakebin"; fakebin.mkdir()
+    fakebin = v / "fakebin"
     calls = v / "calls.txt"
-    if os.name == "nt":
-        (fakebin / "claude.cmd").write_text(f'@echo x>>"{calls}"\r\n@echo rate limited (529) 1>&2\r\n@exit /b 1\r\n')
-    else:
-        exe = fakebin / "claude"
-        exe.write_text(f"#!/bin/sh\necho x >> '{calls}'\necho 'rate limited (529)' >&2\nexit 1\n")
-        exe.chmod(0o755)
+    stub(fakebin, "claude", f"import sys\nopen({str(calls)!r}, 'a').write('x\\n')\n"
+                            "sys.stderr.write('rate limited (529)\\n')\nsys.exit(1)\n")
     r = subprocess.run([sys.executable, str(v / "tools" / "rlm.py"), "--log", "q"], cwd=v, capture_output=True,
-                       text=True, timeout=120, env={**os.environ, "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}"})
+                       text=True, timeout=120, env={**os.environ, "PATH": stub_path(fakebin)})
     ncalls = len(calls.read_text().splitlines()) if calls.exists() else 0
     failed_ok = (r.returncode != 0 and "claude CLI failed" not in qa_log(v) and ncalls == 2
                  and not any(t["t"] == "final" for t in traces(v)))
@@ -173,6 +169,10 @@ def check_worker_exit(c: Checks) -> None:
 
 
 def check_symlink(c: Checks) -> None:
+    if not can_symlink():
+        c.skip("a note symlinked outside the vault is skipped, not fatal to the corpus",
+               "this process may not create symlinks: on Windows that needs admin or Developer Mode")
+        return
     v = vault()
     ext = Path(tempfile.mkdtemp(prefix="palimpsest-ext-"))
     try:
@@ -422,7 +422,7 @@ def main() -> int:
         check_parent_budget(c)
     finally:
         for d in _MINE:
-            shutil.rmtree(d, ignore_errors=True)
+            rmtree(d)
     return c.done()
 
 

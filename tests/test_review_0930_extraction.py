@@ -33,7 +33,7 @@ triggers that happen to parse as JSON, the per-call temp cwd), and still fail on
 import json, os, re, shutil, stat, subprocess, sys, tempfile
 from pathlib import Path
 import _util
-from _util import Checks, run, write
+from _util import Checks, rmtree, run, stub, stub_path, write
 
 VAULTS: list[Path] = []
 
@@ -42,8 +42,7 @@ def make_vault() -> Path:
     VAULTS.append(_util.make_vault())
     return VAULTS[-1]
 
-FAKE = r'''#!{py}
-import json, os, sys
+FAKE = r'''import json, os, sys
 prompt = sys.stdin.read()
 log = os.environ["FAKE_LOG"]
 n = sum(1 for _ in open(log)) + 1 if os.path.exists(log) else 1
@@ -78,12 +77,11 @@ def load(v, name):
 
 def fake_env(v: Path, **extra) -> dict:
     fb = v / "fakebin"
-    fc = write(v, "fakebin/claude", FAKE.format(py=sys.executable))
-    fc.chmod(fc.stat().st_mode | stat.S_IEXEC)
+    stub(fb, "claude", FAKE.format())
     log = v / "fake.log"
     # A temp dir of its own, outside the vault: the extractors keep a fixed cwd under it.
     VAULTS.append(Path(tempfile.mkdtemp(prefix="palimpsest-tmp-")))
-    return {"PATH": f"{fb}{os.pathsep}{os.environ['PATH']}", "FAKE_LOG": str(log),
+    return {"PATH": stub_path(fb), "FAKE_LOG": str(log),
             "TMPDIR": str(VAULTS[-1]), "TEMP": str(VAULTS[-1]), "TMP": str(VAULTS[-1]), **extra}
 
 
@@ -135,8 +133,10 @@ def main() -> int:
                 modes.append(stat.S_IMODE((folder / f).stat().st_mode))
             except Exception as e:
                 modes.append(f"{type(e).__name__}: {e}")
+        # Windows has no POSIX modes (every file reads 0o666); there the write itself is the check.
+        want = [0o640, 0o666 & ~mask] if os.name != "nt" else [m for m in modes if isinstance(m, int)]
         c.ok(not err and "cut emoji" in after and after.strip() != "" and "fresh" in kept.read_text()
-             and modes == [0o640, 0o666 & ~mask],
+             and modes == want and len(want) == 2,
              "1. a note with a lone surrogate is written, never left truncated, and modes are kept",
              (err or repr(after[:80])) + f" modes={[oct(m) if isinstance(m, int) else m for m in modes]}")
     guard(c, "1. a note with a lone surrogate is written, never left truncated, and modes are kept", t1)
@@ -374,7 +374,8 @@ def main() -> int:
         old_path, old_which = os.environ["PATH"], shutil.which
         # a PATH on which a bare "claude" does not resolve, as with npm's claude.cmd on Windows
         os.environ["PATH"] = empty
-        shutil.which = lambda name, *a, **k: str(v / "fakebin" / "claude") if name == "claude" else None
+        exe = old_which("claude", path=env["PATH"])
+        shutil.which = lambda name, *a, **k: exe if name == "claude" else None
         try:
             out, err = en.call_claude("x", "m"), ""
         except Exception as e:
@@ -382,7 +383,7 @@ def main() -> int:
         finally:
             os.environ["PATH"], shutil.which = old_path, old_which
             os.environ.pop("FAKE_LOG", None)
-            shutil.rmtree(empty)
+            rmtree(empty)
         c.ok(out == "[]", "15. claude is found through shutil.which", err)
     guard(c, "15. claude is found through shutil.which", t15)
 
@@ -406,7 +407,7 @@ def main() -> int:
         code = ("import sys; sys.path.insert(0, sys.argv[1]); import import_claude as ic; "
                 "print(ic.iso_to_date('2026-09-30T23:30:00Z'), '|', ic.iso_to_dt('2026-09-30T23:30:00Z'))")
         r = subprocess.run([sys.executable, "-c", code, str(v / "tools")], capture_output=True, text=True,
-                           env={**os.environ, "TZ": "Asia/Singapore"})
+                           env={**os.environ, "TZ": "SGT-8"})   # UTC+8 in the POSIX and MSVCRT forms alike
         c.ok(r.stdout.strip() == "2026-10-01 | 2026-10-01 07:30", "17. UTC timestamps are shown in local time",
              r.stdout + r.stderr)
     guard(c, "17. UTC timestamps are shown in local time", t17)
@@ -479,7 +480,7 @@ def main() -> int:
     guard(c, "20. a lone surrogate in a model field is written, not a failure every run", t20)
 
     for v in VAULTS:
-        shutil.rmtree(v, ignore_errors=True)
+        rmtree(v)
     return c.done()
 
 

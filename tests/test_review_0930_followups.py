@@ -19,12 +19,12 @@ itself, which PALIMPSEST_TOOLS does not swap; it failed before the atexit cleanu
 import json, os, stat, subprocess, sys, textwrap
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from _util import Checks, REPO, git, make_vault, run, write
+from _util import Checks, REPO, git, make_vault, run, stub, stub_path, write
 
 BAD_CFG = '{"steps": {"pull": true, "push": true},\n "push_remote": "backup",}\n'
 STEP_SCRIPTS = ("import_claude.py", "extract_notes.py", "link_notes.py", "maintenance.py", "dedupe.py",
                 "triage_skills.py", "weekly_review.py", "embed.py", "briefing.py")
-CLAUDE_STUB = (f"#!{sys.executable}\nimport os, sys\n"
+CLAUDE_STUB = ("import os, sys\n"
                "open(os.environ['STUB_PROMPT_OUT'], 'w', encoding='utf-8').write(sys.stdin.read())\n"
                "print('stub answer')\n")
 
@@ -40,9 +40,8 @@ def opener(v: Path) -> str:
 
 
 def stub_claude(v: Path) -> dict:
-    claude = write(v, ".stubs/bin/claude", CLAUDE_STUB)
-    claude.chmod(claude.stat().st_mode | stat.S_IEXEC)
-    return {"PATH": f"{v / '.stubs' / 'bin'}{os.pathsep}{os.environ['PATH']}",
+    stub(v / ".stubs" / "bin", "claude", CLAUDE_STUB)
+    return {"PATH": stub_path(v / ".stubs" / "bin"),
             "STUB_PROMPT_OUT": str(v / ".stubs" / "prompt.txt"), "CLAUDE_BRAIN_NO_HOOK": "1",
             "PALIMPSEST_MACHINE": "alpha"}
 

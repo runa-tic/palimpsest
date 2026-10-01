@@ -163,5 +163,5 @@ if __name__ == "__main__":
         rc = main()
     finally:
         for d in MADE:
-            shutil.rmtree(d, ignore_errors=True)
+            _util.rmtree(d, ignore_errors=True)
     sys.exit(rc)
