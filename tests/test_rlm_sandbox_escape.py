@@ -10,7 +10,7 @@ rlm() could send to the API. Two layers now, tested separately:
      the generated profile — no audit hook at all — so only the kernel can refuse.
 The secret file lives under the home directory, which is what the OS profile protects.
 """
-import os, subprocess, sys, tempfile
+import os, shutil, subprocess, sys, tempfile
 from pathlib import Path
 from _util import Checks, make_vault, write
 
@@ -68,6 +68,25 @@ def main() -> int:
                            text=True, timeout=60)
         c.ok(r.returncode != 0 and not (home_tmp / "w.txt").exists(), "OS sandbox: no writes outside scratch",
              r.stderr[-200:])
+        # A vault under the home dir (the usual place on a Mac) must still start: the allow-list
+        # profile once denied stat() under /Users and the worker died at `import ask`.
+        hv = Path(tempfile.mkdtemp(prefix="palimpsest-homevault-", dir=Path.home() / "Library" / "Caches"))
+        try:
+            shutil.copytree(v / "tools", hv / "tools", ignore=shutil.ignore_patterns(".rlm_scratch", "__pycache__"))
+            (hv / "10 Notes").mkdir(parents=True)
+            (hv / "10 Notes" / "n.md").write_text("a note\n")
+            drv = ("import sys, importlib.util\n"
+                   "spec = importlib.util.spec_from_file_location('rlm', sys.argv[1])\n"
+                   "rlm = importlib.util.module_from_spec(spec); spec.loader.exec_module(rlm)\n"
+                   "it = iter(['```python\\nprint(\"DOCS\", len(docs))\\n```', 'FINAL\\nx'])\n"
+                   "rlm._claude = lambda prompt, model, timeout: next(it)\n"
+                   "sys.argv = ['rlm.py', 'q', '--steps', '3']\nrlm.main()\n")
+            r = subprocess.run([sys.executable, "-c", drv, str(hv / "tools" / "rlm.py")], cwd=hv,
+                               capture_output=True, text=True, timeout=120)
+            c.ok("DOCS 1" in r.stdout + r.stderr and "worker died" not in (r.stdout + r.stderr).lower(),
+                 "OS sandbox: a vault under the home dir starts and reads its notes", (r.stdout + r.stderr)[-300:])
+        finally:
+            shutil.rmtree(hv, ignore_errors=True)
         cmd, note = rlm._os_sandbox(["true"], scratch)
         os.environ["RLM_OS_SANDBOX"] = "0"
         cmd0, note0 = rlm._os_sandbox(["true"], scratch)

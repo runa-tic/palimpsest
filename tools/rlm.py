@@ -275,12 +275,18 @@ def _os_sandbox(cmd: list[str], scratch: Path) -> tuple[list[str], str]:
     system = ['(literal "/")', '(subpath "/System")', '(subpath "/usr/lib")', '(subpath "/usr/share")',
               '(subpath "/dev")', '(literal "/private/etc/localtime")', '(subpath "/private/var/db/timezone")',
               '(subpath "/private/var/db/dyld")']
+    allowed = system + [f"(subpath {q(r)})" for r in sorted(roots | libdirs)]
     profile = "\n".join([
         "(version 1)", "(allow default)", "(deny network*)",
         '(deny file-read* (subpath "/"))',
         '(allow file-read-metadata (subpath "/"))',
         '(deny file-read-metadata (subpath "/Users") (subpath "/Volumes"))',
-        "(allow file-read* " + " ".join(system + [f"(subpath {q(r)})" for r in sorted(roots | libdirs)]) + ")",
+        "(allow file-read* " + " ".join(allowed) + ")",
+        # Re-allow metadata under the same roots: the /Users deny above otherwise wins for
+        # file-read-metadata even after the file-read* allow, so with the vault under /Users
+        # (the usual place on a Mac) every stat() inside it failed EPERM, `import ask` missed,
+        # and the worker died at startup. The tests kept their vaults in $TMPDIR and never saw it.
+        "(allow file-read-metadata " + " ".join(allowed) + ")",
         # path resolution stats every parent; allow that metadata, never their contents
         "(allow file-read-metadata " + " ".join(f"(literal {q(a)})" for a in sorted(ancestors)) + ")",
         '(deny file-write* (subpath "/"))',
@@ -344,8 +350,18 @@ def main() -> int:
             raise RuntimeError("REPL worker died")
         return json.loads(line)
 
-    ready = w_recv(120)     # corpus load + handshake
-    ndocs = ready["docs"]
+    try:
+        ready = w_recv(120)     # corpus load + handshake
+        ndocs = ready["docs"]
+    except (TimeoutError, RuntimeError, ValueError, KeyError, TypeError, OSError) as e:
+        # A worker that dies (or hangs) before its handshake escaped as a traceback; the step
+        # loop's handling never covered it. End the same way: a record, a message, exit 1.
+        died = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        worker.kill()
+        rec({"t": "worker_died", "step": 0, "error": died})
+        print(f"rlm: the REPL worker did not start ({died}); its stderr is above. "
+              f"RLM_OS_SANDBOX=0 tells a sandbox fault from a worker bug.", file=sys.stderr)
+        return 1
     rec({"t": "start", "question": question, "docs": ndocs, "root": args.root_model,
          "sub": args.sub_model, "steps": args.steps, "subagents": args.subagents})
     print(f"corpus: {ndocs} docs · root {args.root_model} · subs {args.sub_model} "
