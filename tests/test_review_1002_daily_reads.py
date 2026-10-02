@@ -99,8 +99,8 @@ def check_todays_note(c: Checks) -> None:
     after = today.read_bytes()
     sb, sa = split_block(before, "<!-- briefing:start -->", "<!-- briefing:end -->"), \
         split_block(after, "<!-- briefing:start -->", "<!-- briefing:end -->")
-    c.ok(r.returncode == 0 and b"[[Garden]]" in after,
-         "briefing refreshes today's note when it holds a cp1251 line",
+    c.ok(r.returncode == 0 and b"[[Garden]]" in after and "not UTF-8" in r.stderr,
+         "briefing refreshes today's note when it holds a cp1251 line, and says the line is not UTF-8",
          f"exit={r.returncode}\n{(r.stdout + r.stderr)[-400:]}")
     c.ok(sb is not None and sb == sa and mine in after and FFFD not in after,
          "...and every byte outside the block is the user's, the cp1251 line included, no U+FFFD",
@@ -112,6 +112,17 @@ def check_todays_note(c: Checks) -> None:
          f"exit={r.returncode} stdout={r.stdout[-300:]!r} stderr={r.stderr[-400:]!r}")
     c.ok(mine in today.read_bytes() and FFFD not in today.read_bytes(),
          "...and the opener's own refresh kept that line's bytes too")
+
+    # UTF-16 cannot round-trip through the text-mode refresh: whole (PowerShell 5.1 `>`) or
+    # appended (`>>`), the note is left byte-identical and the run fails where the sync shows it.
+    for label, body in (("a UTF-16 note with a BOM", "\ufeff# Today\r\n- [ ] a task\r\n".encode("utf-16-le")),
+                        ("a UTF-8 note with a UTF-16 append",
+                         before + "- 10:00 from PowerShell >>\r\n".encode("utf-16-le"))):
+        today.write_bytes(body)
+        r = run(v, "briefing.py")
+        c.ok(r.returncode == 1 and today.read_bytes() == body and "not UTF-8" in r.stderr,
+             f"briefing leaves {label} byte-identical and fails, saying why",
+             f"exit={r.returncode} same={today.read_bytes() == body} {r.stderr[-300:]!r}")
 
 
 def check_weekly(c: Checks) -> None:
