@@ -44,7 +44,10 @@ def recent_daily(before: str) -> Path | None:
 def open_tasks(p: Path | None) -> list[str]:
     if not p or not p.exists():
         return []
-    return re.findall(r"^\s*- \[ \] (.+)$", p.read_text(encoding="utf-8"), re.M)
+    # errors="replace": one line saved in the ANSI code page (PowerShell 5.1) made this raise before
+    # today's note existed, and recent_daily() picked the same note again every later day (review,
+    # 2026-10-02). The note is only read here; a task with such bytes rolls over showing U+FFFD.
+    return re.findall(r"^\s*- \[ \] (.+)$", p.read_text(encoding="utf-8", errors="replace"), re.M)
 
 def active_projects() -> list[str]:
     out = []
@@ -217,7 +220,10 @@ def main():
     f = DAILY / f"{today}.md"
     block = build_block()
     if f.exists():
-        txt = f.read_text(encoding="utf-8")
+        # surrogateescape on the read AND the write, never "replace": this note is written back, and
+        # a line the user saved in another code page must come back as the bytes they wrote, not as
+        # U+FFFD (the strict read raised on it instead; review, 2026-10-02).
+        txt = f.read_text(encoding="utf-8", errors="surrogateescape")
         # A callback, not the string: re.sub reads backslashes in a replacement string as escapes,
         # so a rolled-over task holding a Windows path (C:\Users\...) raised "bad escape \U" on
         # every refresh (review, 2026-09-30).
@@ -226,7 +232,8 @@ def main():
             # No well-formed block (never rendered, or a marker was deleted): add a fresh one and
             # leave any orphan marker, and everything around it, exactly as it is.
             txt = txt.rstrip() + "\n\n" + block + "\n"
-        f.write_text(txt, encoding="utf-8")
+        # A strict write here raises after write_text has truncated the file: the note is emptied.
+        f.write_text(txt, encoding="utf-8", errors="surrogateescape")
         print(f"Refreshed briefing in Daily/{today}.md")
     else:
         header = f"---\ntype: daily\ndate: {today}\ntags:\n  - daily\n---\n\n# {date.today():%A, %B %d, %Y}\n\n"

@@ -154,7 +154,10 @@ def main():
     if daily.exists():
         # One well-formed pair, as briefing.BLOCK: a plain START(.*?)END ran from an orphaned start
         # marker (its end deleted while editing) to the next block's end, stale text included.
-        m = BRIEF_BLOCK.search(daily.read_text(encoding="utf-8"))
+        # errors="replace": the note is only searched and shown here, and one line appended in the
+        # ANSI code page (PowerShell 5.1) made this read raise — exit 1, no opener at all (review,
+        # 2026-10-02).
+        m = BRIEF_BLOCK.search(daily.read_text(encoding="utf-8", errors="replace"))
         if m:
             brief = m.group(1).strip()
 
