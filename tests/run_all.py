@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Run every tests/test_*.py with this interpreter and summarise.
 
-One command on every OS (the README's shell loop is bash-only, and macOS has no `timeout`):
+One command, no bash or `timeout` needed (macOS has no `timeout`); run on macOS and Windows 11 so far:
 
   python tests/run_all.py                              # all scripts
   python tests/run_all.py ledger rlm                   # only scripts whose name contains one of the words
   python tests/run_all.py tests/test_state_ledger.py   # a path names its script
 
-Each script runs in its own process under a 10-minute limit; the exit code is the number of
-scripts that failed or timed out (0 = green). A script's full output is printed only when it fails.
-A word that matches no script is a usage error: exit 2, and nothing runs.
+Each script runs in its own process under a 10-minute limit; the exit code is 0 when every script
+passed and 1 when any failed or timed out (the summary line says how many). A word that matches no
+script is a usage error: exit 2, and nothing runs. A script's full output is printed only when it
+fails.
 """
 from __future__ import annotations
 import codecs, locale, subprocess, sys, time
@@ -81,7 +82,8 @@ def main() -> int:
             bad += 1
             print("\n".join("     | " + l for l in out.splitlines()[-40:]))
     print(f"\n{len(scripts) - bad}/{len(scripts)} scripts passed")
-    return bad
+    # 1, not the count: two failed scripts exited 2, the code a usage error exits with.
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

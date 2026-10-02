@@ -86,12 +86,20 @@ def main() -> int:
         import sys, time
         print("got as far as step 3", flush=True)
         print("stuck waiting on a lock", file=sys.stderr, flush=True)
-        time.sleep(120)
+        time.sleep(600)
     """))
-    r = drive(slow, limit=5)
-    c.ok(r.returncode == 1 and "TIMEOUT after 5s" in r.stdout and "got as far as step 3" in r.stdout
+    # 20 s, not 5: on a slow Windows machine with antivirus a fresh interpreter can take seconds
+    # to print its first line.
+    r = drive(slow, limit=20)
+    c.ok(r.returncode == 1 and "TIMEOUT after 20s" in r.stdout and "got as far as step 3" in r.stdout
          and "stuck waiting on a lock" in r.stdout,
          "4. a timed-out script says TIMEOUT and shows its partial stdout and stderr", r.stdout[-500:])
+
+    # 4b. Two failed scripts exited 2, the code a usage error exits with.
+    two = fakes(alpha="import sys; print('FAIL  x'); sys.exit(1)\n", beta="import sys; sys.exit(1)\n")
+    r = drive(two)
+    c.ok(r.returncode == 1 and "0/2 scripts passed" in r.stdout,
+         "4b. two failed scripts exit 1, not 2 (2 is a usage error)", f"rc={r.returncode} {r.stdout[-200:]!r}")
 
     # 5. -X utf8 does not reach the children: the runner read their code page as UTF-8, and a
     # Cyrillic failure detail came back as U+FFFD. Only a child writing something other than
