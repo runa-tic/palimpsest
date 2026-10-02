@@ -13,7 +13,7 @@ and your own content below it is preserved, as is any rolled-over task you ticke
 Usage (from vault root):  python tools/briefing.py
 """
 from __future__ import annotations
-import sys, re, random
+import codecs, sys, re, random
 from pathlib import Path
 from datetime import date, datetime
 
@@ -225,7 +225,19 @@ def main():
         # surrogateescape on the read AND the write, never "replace": this note is written back, and
         # a line the user saved in another code page must come back as the bytes they wrote, not as
         # U+FFFD (the strict read raised on it instead; review, 2026-10-02).
+        raw = f.read_bytes()
+        if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) or b"\x00" in raw:
+            # UTF-16, whole (PowerShell 5.1's `>`) or appended (its `>>`): surrogateescape keeps
+            # its bytes but the text-mode round trip turns its CRs into LFs and appends UTF-8 to
+            # it, so refreshing it corrupts it. Leave it byte-identical and fail where the sync
+            # shows it (review of the 2026-10-02 fix).
+            print(f"briefing: Daily/{today}.md is not UTF-8 text (UTF-16, as PowerShell 5.1's `>` "
+                  "and `>>` write?); left untouched. Re-save it as UTF-8.", file=sys.stderr)
+            sys.exit(1)
         txt = f.read_text(encoding="utf-8", errors="surrogateescape")
+        if any("\udc80" <= ch <= "\udcff" for ch in txt):
+            print(f"briefing: Daily/{today}.md has a line that is not UTF-8 (an ANSI code page?); "
+                  "kept as written. Re-save it as UTF-8 to see it in the briefing.", file=sys.stderr)
         # A callback, not the string: re.sub reads backslashes in a replacement string as escapes,
         # so a rolled-over task holding a Windows path (C:\Users\...) raised "bad escape \U" on
         # every refresh (review, 2026-09-30).
