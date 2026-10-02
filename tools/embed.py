@@ -436,7 +436,7 @@ if __name__ == "__main__":
     usage = ("usage: python tools/embed.py [query ...]\n"
              "  builds or refreshes the embedding index (resumable; the first e5-base build takes\n"
              "  hours on CPU), then searches for the query if one is given. No options but\n"
-             "  -h/--help (or /?); every word after `--` is query, so\n"
+             "  -h/--help (or /?); every word after `--` is the query, so\n"
              "  `python tools/embed.py -- -word` searches for a word that starts with '-'.")
     if any(w in ("-h", "--help") or w.lower() in ("/?", "/h", "/help") for w in opts):
         print(usage)
@@ -452,11 +452,13 @@ if __name__ == "__main__":
               "(opt in with `pip install sentence-transformers`)")
         sys.exit(0)
     if _NO_NUMPY:
-        # The same no-op for the same reason: sentence-transformers cannot run without numpy, so
-        # a Python that cannot import it has not opted in either.
-        print(f"embed: numpy is not importable ({_NO_NUMPY}); nothing to build "
-              "(opt in with `pip install sentence-transformers`, which installs it)")
-        sys.exit(0)
+        # sentence-transformers is there but numpy is not: an install that opted in and broke, not
+        # one that never opted in (that one stops at the check above, since sentence-transformers
+        # needs numpy). Exiting 0 here kept the sync green while the index silently went stale.
+        print(f"embed: sentence-transformers is installed but numpy cannot be imported ({_NO_NUMPY}); "
+              "the install is broken: `pip install --force-reinstall numpy sentence-transformers`",
+              file=sys.stderr)
+        sys.exit(1)
     from ask import gather
     idx = Index.open(gather())
     dim = idx.vec.shape[1] if idx.vec.size else 0

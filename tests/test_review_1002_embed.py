@@ -5,13 +5,15 @@
    `embed.py /?` built the index to search for "/?".
 3. `--` ends the options wherever it stands: `-- -zebra` and `stripes -- -zebra` build and search.
    Only a leading `--` was honoured; the second was refused as an unknown option '--'.
-4. [P2] Without numpy, `embed.py` (the nightly sync's embed step) and `embed.py --help` exit 0
-   with a message, like a missing sentence-transformers. The module-level `import numpy` raised
-   before either check, so the step failed every night with a traceback. An importer (ask.py)
-   still gets the ImportError.
+4. [P2] On a Python with neither numpy nor sentence-transformers (python.org's, which never opted
+   in), `embed.py` (the nightly sync's embed step) and `embed.py --help` exit 0 with a message.
+   The module-level `import numpy` raised before either check, so the step failed every night
+   with a traceback. With sentence-transformers but no importable numpy (an install that opted in
+   and broke) it fails, exit 1 with what to reinstall, rather than keep the sync green while the
+   index goes stale. An importer (ask.py) still gets the ImportError.
 
-Checks 2, 3 (the mid-line `--`) and 4 (the two exit-0 checks) fail with PALIMPSEST_TOOLS pointed
-at tools/ from 60b4bff.
+Checks 2, 3 (the mid-line `--`) and 4 (the exit-0 checks) fail with PALIMPSEST_TOOLS pointed at
+tools/ from 60b4bff.
 
 No model, no network: sentence_transformers and torch are stubs on PYTHONPATH (a hashed
 bag-of-words encoder), and "no numpy" is a numpy package on PYTHONPATH whose import raises.
@@ -101,15 +103,29 @@ def check_double_dash(c: Checks):
              f"`embed.py {' '.join(argv)}` builds the index and searches for the words after `--`", out(r))
 
 
+def bare(v: Path, *argv: str) -> subprocess.CompletedProcess:
+    """embed.py on this interpreter with site-packages switched off (-S): neither numpy nor
+    sentence-transformers, like a python.org install that never opted in."""
+    env = {k: val for k, val in os.environ.items() if k != "PYTHONPATH"}
+    return subprocess.run([sys.executable, "-S", str(v / "tools" / "embed.py"), *argv], cwd=v,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=60)
+
+
 def check_no_numpy(c: Checks):
     v, env = vault(numpy=False)
-    r = run(v, "embed.py", env=env)
-    c.ok(r.returncode == 0 and "numpy" in r.stdout and "nothing to build" in r.stdout
+    r = bare(v)
+    c.ok(r.returncode == 0 and "nothing to build" in r.stdout
          and "Traceback" not in r.stdout + r.stderr and not cache(v),
-         "without numpy the nightly `embed.py` is a no-op that says why (exit 0, no traceback)", out(r))
-    r = run(v, "embed.py", "--help", env=env)
+         "with neither numpy nor sentence-transformers the nightly `embed.py` is a no-op that says why "
+         "(exit 0, no traceback)", out(r))
+    r = bare(v, "--help")
     c.ok(r.returncode == 0 and r.stdout.startswith("usage:") and "Traceback" not in r.stdout + r.stderr,
          "without numpy `embed.py --help` still prints the usage", out(r))
+    r = run(v, "embed.py", env=env)
+    c.ok(r.returncode == 1 and "numpy" in r.stderr and "broken" in r.stderr
+         and "Traceback" not in r.stdout + r.stderr and not cache(v),
+         "with sentence-transformers but no importable numpy `embed.py` fails (exit 1) and says what to "
+         "reinstall, so the sync shows it", out(r))
     r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + "import embed"], cwd=v / "tools",
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
                        env={**os.environ, **env}, timeout=60)
