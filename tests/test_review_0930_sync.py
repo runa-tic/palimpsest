@@ -2,6 +2,7 @@
 
 One check per confirmed finding; every check fails on ba54bc9.
 1. the opener says so when state.py fails, instead of silently dropping the State block
+   (1b: also when the traceback is in cp1251 and names a non-ASCII path; fails on c22bdff^)
 2. vault_push runs the secret/PII scans itself when core.hooksPath is not tools/githooks
 3. a session-start render of Reviews/Vault Health.md never jams a two-machine pull
 4. an autostash that git refuses to re-apply is a failed pull, not a clean one
@@ -66,6 +67,21 @@ def main() -> int:
                        cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace")
     c.ok("ledger unreadable" in r.stdout and "JSONDecodeError" in r.stdout,
          "1. a crashing state.py yields a visible '**State:** ledger unreadable' line", r.stdout + r.stderr)
+
+    # 1b. The same crash on a stock Windows with a Cyrillic profile: the traceback names a
+    # non-ASCII path in the code page, and the opener's strict UTF-8 read died on it (c22bdff).
+    # Check 1 only meets that path when TMPDIR is non-ASCII, so this vault sits under a Cyrillic
+    # dir made here and state.py's stdio defaults to cp1251, on any OS.
+    v = Path(tempfile.mkdtemp(prefix="palimpsest-")) / "Пользователь" / "vault"
+    MADE.append(v.parent.parent)
+    shutil.copytree(TOOLS_SRC, v / "tools", ignore=shutil.ignore_patterns("cache", "__pycache__", "*.pyc"))
+    write(v, "State/entities.json", '{"entities": {"box": {"hot": true},}}\n')
+    r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + "import sys; sys.path.insert(0, 'tools'); "
+                        "import hook_session_start as h; print(repr(h.state_block()))"],
+                       cwd=v, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env={**os.environ, "PYTHONIOENCODING": "cp1251"})
+    c.ok("ledger unreadable" in r.stdout and "JSONDecodeError" in r.stdout,
+         "1b. the line survives a traceback in cp1251 that names a non-ASCII path", r.stdout + r.stderr)
 
     # 2. core.hooksPath is per-clone and does not travel: the second machine had no guard at all.
     remote = bare_remote()
