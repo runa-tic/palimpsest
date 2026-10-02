@@ -31,7 +31,17 @@ from __future__ import annotations
 import sys, os, re, json, hashlib, time, math, zlib, importlib.util
 from dataclasses import dataclass
 from pathlib import Path
-import numpy as np
+_NO_NUMPY = None
+try:
+    import numpy as np
+except ImportError as e:
+    # The nightly sync runs this file on every vault and embeddings are opt-in, but on a Python
+    # without numpy this import failed before the no-op check in __main__: the embed step failed
+    # every night and `embed.py --help` was a traceback (review, 2026-10-02). Only the command
+    # line tolerates it; an importer (ask.py, bench_retrieval.py) still gets the ImportError.
+    if __name__ != "__main__":
+        raise
+    np, _NO_NUMPY = None, f"{type(e).__name__}: {e}"
 
 VAULT = Path(__file__).resolve().parent.parent
 # e5-base replaced e5-small as the default on a full-vault benchmark (5,286 files, 300 EN/RU
@@ -414,24 +424,35 @@ if __name__ == "__main__":
         pass
     # Every word after the script is a query, so a flag would be searched for, after a build
     # that can take hours: `embed.py --help` started one. Options are refused before any work.
-    words = sys.argv[1:]
-    if words[:1] == ["--"]:
-        words = words[1:]
-    elif any(w.startswith("-") for w in words):
-        usage = ("usage: python tools/embed.py [query ...]\n"
-                 "  builds or refreshes the embedding index (resumable; the first e5-base build takes\n"
-                 "  hours on CPU), then searches for the query if one is given. No options;\n"
-                 "  `python tools/embed.py -- -word` searches for a word that starts with '-'.")
-        if any(w in ("-h", "--help") for w in words):
-            print(usage)
-            sys.exit(0)
-        print(f"embed: unknown option {next(w for w in words if w.startswith('-'))!r}\n{usage}", file=sys.stderr)
+    # `--` ends them wherever it stands, and /?, /h and /help are the Windows habit for --help:
+    # `foo -- -bar` was refused as an unknown option '--', and `/?` started a build to search
+    # for "/?" (review, 2026-10-02).
+    args = sys.argv[1:]
+    cut = args.index("--") if "--" in args else len(args)
+    opts, words = args[:cut], args[:cut] + args[cut + 1:]
+    usage = ("usage: python tools/embed.py [query ...]\n"
+             "  builds or refreshes the embedding index (resumable; the first e5-base build takes\n"
+             "  hours on CPU), then searches for the query if one is given. No options but\n"
+             "  -h/--help (or /?); every word after `--` is query, so\n"
+             "  `python tools/embed.py -- -word` searches for a word that starts with '-'.")
+    if any(w in ("-h", "--help") or w.lower() in ("/?", "/h", "/help") for w in opts):
+        print(usage)
+        sys.exit(0)
+    bad = next((w for w in opts if w.startswith("-")), None)
+    if bad is not None:
+        print(f"embed: unknown option {bad!r}\n{usage}", file=sys.stderr)
         sys.exit(2)
     if importlib.util.find_spec("sentence_transformers") is None:
         # The nightly sync runs this unconditionally; without the optional package it is a no-op,
         # not a failure, so the sync stays green on a vault that never opted in.
         print("embed: sentence-transformers is not installed; nothing to build "
               "(opt in with `pip install sentence-transformers`)")
+        sys.exit(0)
+    if _NO_NUMPY:
+        # The same no-op for the same reason: sentence-transformers cannot run without numpy, so
+        # a Python that cannot import it has not opted in either.
+        print(f"embed: numpy is not importable ({_NO_NUMPY}); nothing to build "
+              "(opt in with `pip install sentence-transformers`, which installs it)")
         sys.exit(0)
     from ask import gather
     idx = Index.open(gather())
