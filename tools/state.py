@@ -58,8 +58,10 @@ The value recorded is the command's first line of output, decoded strictly as th
 "cp1251"). Output that does not decode records "probe error (output not <encoding>)" with its
 first bytes in hex in the detail, never a string with U+FFFD in place of each undecodable letter:
 under that, two different values of one length compared equal. A non-zero exit records "unreachable
-(rc N)" — but only if this machine's own network is up (a verified TLS handshake with one of the
-`network_control` hosts, default github.com and 1.1.1.1). With the control down nothing is
+(rc N)" — but only if this machine's own network is up: a TLS handshake with one of the
+`network_control` hosts (default github.com and 1.1.1.1) completes, where a peer that answers with a
+certificate this machine cannot verify still counts as up (a TUN proxy with nothing upstream cannot
+send one). With the control down nothing is
 recorded and the throttle stays open: a laptop's DNS outage is not a fact about the server.
 """
 from __future__ import annotations
