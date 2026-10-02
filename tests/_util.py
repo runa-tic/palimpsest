@@ -4,7 +4,7 @@ Every test builds its own vault under a temp dir, copies the tools it exercises,
 as subprocesses exactly as the git hook or the sync would. Nothing touches the real vault, and
 claude is never called: where a tool calls it, a stub on PATH answers. One script uses the
 network: test_ask_rerank, with sentence-transformers installed, loads the real embedding and
-rerank models from Hugging Face (about 0.6 GB on a first run; with HF_HUB_OFFLINE=1 it reads only
+rerank models from Hugging Face (about 1 GB on a first run; with HF_HUB_OFFLINE=1 it reads only
 the local cache). Every other connection goes to localhost or to an address that must not answer
 (TEST-NET-1, and 1.1.1.1 from inside the macOS sandbox). Set PALIMPSEST_TOOLS to test a different
 tools/ tree (e.g. a checkout of main, to confirm a test fails before its fix).
@@ -170,10 +170,11 @@ def stub_path(bindir: Path) -> str:
 
     The fake must win, or the test sends its content to the real binary: on Windows a stub that
     PATHEXT cannot see would have let a real claude.exe on PATH answer (first Windows run,
-    2026-10-01, where the real CLI happened to be off PATH). "Resolves" is shutil.which, which is
-    how the tools find claude; a bare "claude" argv goes through CreateProcess instead, which on
-    Windows finds only claude.exe, so this check cannot vouch for it. The tests that hold ask.py,
-    bench_retrieval.py, rlm.py and extract_notes.py to shutil.which cover that side."""
+    2026-10-01, where the tester had taken the real CLI off PATH for that reason). "Resolves" is
+    shutil.which, which is how the tools find claude; a bare "claude" argv goes through
+    CreateProcess instead, which on Windows finds only claude.exe, so this check cannot vouch for
+    it. The tests that hold ask.py, bench_retrieval.py, rlm.py and extract_notes.py to
+    shutil.which cover that side."""
     path = f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"
     for name in _STUBS.get(Path(bindir).resolve(), ()):
         found = shutil.which(name, path=path)

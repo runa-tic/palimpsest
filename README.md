@@ -138,7 +138,7 @@ python tools/state.py probe                         # built-in probes + any decl
 python tests/run_all.py                    # regression tests: throwaway vaults, no claude calls;
                                            # run on macOS and Windows 11, not yet on Linux. With
                                            # sentence-transformers installed, one test loads real
-                                           # embedding and rerank models (~0.6 GB on first run; set
+                                           # embedding and rerank models (~1 GB on first run; set
                                            # HF_HUB_OFFLINE=1 once they are cached to stay offline)
 ```
 
@@ -208,13 +208,15 @@ the fixes from the 2026-10-02 review, which have run on macOS and under a cp1251
 Some checks cannot run on Windows: the symlink checks skip unless the account may create symlinks
 (admin or Developer Mode; no account tested had that right), the lock-takeover check skips because
 Windows will not delete a file its holder keeps open, one TLS check skips without the `openssl`
-CLI (Git Bash has it), and the checks of POSIX- and macOS-only pieces — the hook's fresh-clone
-commit, file modes, the cron line, `claude-code.sh`, `rlm.py`'s sandbox — are not run there (a
-few such checks report a pass without that part). Not run on Windows yet: the scheduled nightly
-sync with its hidden console windows, any real `claude` call (an `ask.py` answer, extraction,
-`rlm.py`, `bench_retrieval.py --gen`; the tests stand in a stub for it), an embedding index
-build, and a live push and pull between two machines (the suite's two-machine checks use local
-remotes).
+CLI (Git Bash has it), two code-page checks of `config.py --check` skip because `LC_ALL` does not
+pick the code page on Windows (their `PYTHONIOENCODING` cases run instead), and the checks of
+POSIX- and macOS-only pieces — the hook's fresh-clone commit, file modes and the executable bit,
+the cron line, `claude-code.sh`, `rlm.py`'s sandbox — are not run there (a few such checks report
+a pass without that part). Not run on Windows yet: the scheduled nightly sync with its hidden
+console windows, any real `claude` call (an `ask.py` answer, extraction, `rlm.py`,
+`bench_retrieval.py --gen`; the tests stand in a stub for it), an embedding index build over a
+real vault (the reranker test builds one over a handful of notes), and a live push and pull
+between two machines (the suite's two-machine checks use local remotes).
 
 A declared probe whose command prints in a Windows code page needs that code page named as its
 `"encoding"` (default UTF-8; the format is in `tools/state.py`): a first line that does not decode

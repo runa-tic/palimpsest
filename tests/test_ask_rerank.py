@@ -2,7 +2,7 @@
 no model call (--retrieve-only), plus the fallback: if a reranker cannot load, ask.py says so
 and the sources line does NOT claim "+rerank".
 
-Needs sentence-transformers and the models (downloads ~0.6 GB on first run unless cached);
+Needs sentence-transformers and the models (downloads ~1 GB on first run unless cached);
 without the package it reports SKIP rather than failing.
 """
 import importlib.util, os, sys
