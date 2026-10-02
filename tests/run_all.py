@@ -3,14 +3,16 @@
 
 One command on every OS (the README's shell loop is bash-only, and macOS has no `timeout`):
 
-  python tests/run_all.py            # all scripts
-  python tests/run_all.py ledger rlm # only scripts whose name contains one of the words
+  python tests/run_all.py                              # all scripts
+  python tests/run_all.py ledger rlm                   # only scripts whose name contains one of the words
+  python tests/run_all.py tests/test_state_ledger.py   # a path names its script
 
 Each script runs in its own process under a 10-minute limit; the exit code is the number of
 scripts that failed or timed out (0 = green). A script's full output is printed only when it fails.
+A word that matches no script is a usage error: exit 2, and nothing runs.
 """
 from __future__ import annotations
-import locale, os, subprocess, sys, time
+import codecs, locale, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -18,15 +20,20 @@ LIMIT_S = 600
 
 
 def child_encoding() -> str:
-    """What a child Python writes to a pipe, so its output is read in that encoding. Forcing the
-    children to UTF-8 instead would also reach the tools they run, whose output the tests decode
-    with the locale's encoding (cp1252 on an ANSI Windows), and break those checks."""
-    forced = os.environ.get("PYTHONIOENCODING", "").split(":")[0]
-    if forced:
-        return forced
-    if os.environ.get("PYTHONUTF8") == "1":
-        return "utf-8"
-    return locale.getpreferredencoding(False)
+    """What a child Python writes to a pipe, so its output is read in that encoding.
+
+    Asked of a child rather than worked out here: a child inherits the environment
+    (PYTHONIOENCODING, PYTHONUTF8, the locale) but not this interpreter's -X options, so a runner
+    started with `-X utf8` read its children's cp1251 as UTF-8 (review, 2026-10-02), and Python
+    turns UTF-8 mode on by itself under a C locale, so the flags alone cannot tell either. The
+    children are left on the code page rather than forced to UTF-8 so the suite keeps running the
+    code paths a stock install runs, not those of a UTF-8 mode the user's machine does not have."""
+    try:
+        r = subprocess.run([sys.executable, "-c", "import sys; print(sys.stdout.encoding)"],
+                           capture_output=True, timeout=60)
+        return codecs.lookup(r.stdout.decode("ascii", "replace").strip()).name
+    except (OSError, subprocess.SubprocessError, LookupError):
+        return locale.getpreferredencoding(False)
 
 
 def main() -> int:
@@ -38,16 +45,35 @@ def main() -> int:
         except (AttributeError, ValueError):
             pass
     words = sys.argv[1:]
-    scripts = [p for p in sorted(HERE.glob("test_*.py")) if not words or any(w in p.name for w in words)]
+    if "-h" in words or "--help" in words:
+        print(__doc__)
+        return 0
+    # A word is matched by its file name, so tests/test_x.py names test_x.py. A word that matched
+    # nothing (a typo, an option, a path) ran 0 scripts and exited 0: a green run that tested
+    # nothing (review, 2026-10-02).
+    every = sorted(HERE.glob("test_*.py"))
+    names = [Path(w).name for w in words]
+    unmatched = [w for w, n in zip(words, names) if not any(n in p.name for p in every)]
+    if unmatched:
+        print(f"run_all.py: no tests/test_*.py matches {', '.join(map(repr, unmatched))}; "
+              "nothing was run (--help for usage)", file=sys.stderr)
+        return 2
+    scripts = [p for p in every if not names or any(n in p.name for n in names)]
+    enc = child_encoding()
     bad = 0
     for p in scripts:
         t0 = time.monotonic()
         try:
             r = subprocess.run([sys.executable, str(p)], cwd=HERE, capture_output=True, text=True,
-                               encoding=child_encoding(), errors="replace", timeout=LIMIT_S)
+                               encoding=enc, errors="replace", timeout=LIMIT_S)
             out, rc = (r.stdout or "") + (r.stderr or ""), r.returncode
         except subprocess.TimeoutExpired as e:
-            out = (e.stdout or b"").decode(child_encoding(), "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            # A hung script printed a bare FAIL that did not say it had timed out, and dropped its
+            # stderr, where a traceback or a stuck child's complaint lands (review, 2026-10-02).
+            # POSIX hands back the partial output as bytes even in text mode; Windows as str.
+            partial = "".join(s.decode(enc, "replace") if isinstance(s, bytes) else (s or "")
+                              for s in (e.stdout, e.stderr))
+            out = "\n".join(t for t in (partial.rstrip("\n"), f"TIMEOUT after {LIMIT_S}s") if t)
             rc = "TIMEOUT"
         last = next((l for l in reversed(out.splitlines()) if l.strip()), "")
         print(f"{'ok  ' if rc == 0 else 'FAIL'} {p.name:<42} {time.monotonic() - t0:6.1f}s  {last[:90]}")
