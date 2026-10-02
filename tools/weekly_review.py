@@ -139,7 +139,10 @@ def main():
     # The file invites writing (Reflection) and ticking (Open loops), and this runs every day. It
     # used to rebuild the whole file, so each night's sync erased what was written that week.
     # Only the marked block is regenerated now, and a loop ticked in it stays ticked.
-    old = out.read_text(encoding="utf-8") if out.exists() else None
+    # surrogateescape here and on the write below: the Reflection is the user's, a line of it saved
+    # in another code page made this read raise, and "replace" would write U+FFFD over it (review,
+    # 2026-10-02). The escaped bytes go back out exactly as they came in.
+    old = out.read_text(encoding="utf-8", errors="surrogateescape") if out.exists() else None
     pair = PAIR.search(old) if old is not None else None
     if old is not None and not pair:
         if START in old or END in old:
@@ -184,7 +187,7 @@ def main():
     else:
         text = front + block + "\n\n" + REFLECTION
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text, encoding="utf-8")
+    out.write_text(text, encoding="utf-8", errors="surrogateescape")
     print(f"Wrote {out.relative_to(VAULT)} — {len(new_notes)} notes, {len(new_convs)} convs, {len(tasks)} open tasks.")
 
 if __name__ == "__main__":
