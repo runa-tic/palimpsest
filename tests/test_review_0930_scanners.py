@@ -54,10 +54,24 @@ def make_vault():
 
 
 def redact(v, text: str) -> str:
+    # stdio in cp1251, as on a stock Windows: PYTHONIOENCODING=utf-8 here took away the very
+    # precondition of the code-page bug e232e70 fixed (review, 2026-10-02).
     r = subprocess.run([sys.executable, str(v / "tools" / "redact.py")], cwd=v, input=text.encode("utf-8"),
-                       capture_output=True, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-    return r.stdout.decode("utf-8", "replace") + ("\nSTDERR " + r.stderr.decode("utf-8", "replace")
-                                                  if r.returncode else "")
+                       capture_output=True, env={**os.environ, "PYTHONIOENCODING": "cp1251"})
+    out = r.stdout.decode("utf-8", "replace")
+    if r.returncode:
+        return out + "\nSTDERR " + r.stderr.decode("utf-8", "replace")
+    # The output must be the input with spans replaced by [redacted]. Mojibake or translated newlines
+    # merely lack the term, and passed every "term not in out" check; such an output comes back as
+    # the input itself, so those checks fail on it.
+    parts = out.split("[redacted]")
+    ok, at = text.startswith(parts[0]), len(parts[0])
+    for seg in parts[1:-1]:                  # in order, leftmost first, leaves the most room
+        found = text.find(seg, at)
+        ok, at = ok and found >= 0, found + len(seg)
+    ok = ok and (out == text if len(parts) == 1 else
+                 text.endswith(parts[-1]) and len(text) - len(parts[-1]) >= at)
+    return out if ok else f"{text}\nSTDERR output is not a redaction of the input: {out!r}"
 
 
 def scan_path(v, text: str, name: str = "10 Notes/probe.md"):
