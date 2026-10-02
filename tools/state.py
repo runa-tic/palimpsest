@@ -50,10 +50,14 @@ probe declared in palimpsest.json, so no host, service or path is baked into thi
   "probes": [
     {"name": "api", "entity": "my-api", "attr": "status",
      "cmd": ["ssh", "-o", "BatchMode=yes", "my-server", "systemctl is-active my-api"],
-     "timeout": 20, "min_interval_h": 1, "network": true}
+     "timeout": 20, "min_interval_h": 1, "network": true, "encoding": "utf-8"}
   ]
 
-The value recorded is the command's first line of output; a non-zero exit records "unreachable
+The value recorded is the command's first line of output, decoded strictly as the probe's
+"encoding" (default "utf-8"; a command that prints in a Windows code page needs it named, e.g.
+"cp1251"). Output that does not decode records "probe error (output not <encoding>)" with its
+first bytes in hex in the detail, never a string with U+FFFD in place of each undecodable letter:
+under that, two different values of one length compared equal. A non-zero exit records "unreachable
 (rc N)" — but only if this machine's own network is up (a TCP control connection to
 `network_control` hosts, default github.com and 1.1.1.1). With the control down nothing is
 recorded and the throttle stays open: a laptop's DNS outage is not a fact about the server.
@@ -794,13 +798,21 @@ def probe_command(spec: dict) -> tuple[list[tuple[str, str, str]], dict]:
     """A user-declared probe (palimpsest.json "probes"): run `cmd`, record its first line of
     output as entity.attr. Read-only by convention — a probe observes, it never changes anything."""
     eid, attr = spec["entity"], spec.get("attr", "status")
+    enc = spec.get("encoding") or "utf-8"
     try:
-        p = subprocess.run(spec["cmd"], cwd=str(VAULT), capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=spec.get("timeout", 20), creationflags=NO_WINDOW)
-        out = (p.stdout or "").strip().splitlines()
+        # Bytes, decoded strictly in the probe's declared encoding. Decoding as UTF-8 with
+        # errors="replace" turned each letter a cp1251 probe printed into U+FFFD, so two values
+        # of one length were the same string and a service going down was logged as "1 unchanged"
+        # (review, 2026-10-02). Output that does not decode is a probe error, never a lossy value.
+        p = subprocess.run(spec["cmd"], cwd=str(VAULT), capture_output=True,
+                           timeout=spec.get("timeout", 20), creationflags=NO_WINDOW)
         if p.returncode == 0:
+            try:
+                out = p.stdout.decode(enc).strip().splitlines()
+            except UnicodeDecodeError:
+                return [(eid, attr, f"probe error (output not {enc})")], {"detail": f"stdout starts {p.stdout[:32].hex(' ')}"}
             return [(eid, attr, (out[0].strip() if out else "ok")[:200])], {}
-        detail = ((p.stderr or "") + (p.stdout or "")).strip()[:200]
+        detail = (p.stderr.decode(enc, "backslashreplace") + p.stdout.decode(enc, "backslashreplace")).strip()[:200]
         fail = f"unreachable (rc {p.returncode})"
     except subprocess.TimeoutExpired:
         detail, fail = "timed out", "unreachable (timeout)"
@@ -808,6 +820,7 @@ def probe_command(spec: dict) -> tuple[list[tuple[str, str, str]], dict]:
         # The command never started (not installed, not on PATH, not executable): a fault on this
         # machine, whatever the network is doing. Checking the network here reported a missing
         # executable as "this machine's network is down" and recorded nothing, run after run.
+        # An "encoding" with no codec (LookupError) lands here too: also this machine's fault.
         return [(eid, attr, f"probe error ({type(e).__name__})")], {"detail": f"{type(e).__name__}: {e}"[:200]}
     if spec.get("network", True) and not local_network_up():
         return [], {"detail": detail, "local_network_down": True}
