@@ -73,9 +73,47 @@ def tempdir(prefix: str = "palimpsest-test-") -> Path:
     return d
 
 
+# The per-machine state a used tools/ tree holds, as .gitignore lists it. git's own ignore rules
+# come first; this list covers a tree they do not reach (a plain directory, or a tools/ copied
+# into some other repository).
+TOOLS_STATE = ("cache", "__pycache__", "*.pyc", "logs", ".rlm_scratch", "sync.log", ".sync_status.json",
+               ".sync.lock", ".vault_push.lock", ".extract_state.json", ".extract_skills_state.json",
+               ".extract_docs_state.json", ".redact_terms.txt", ".secret_scan_allow.txt")
+
+
+def copy_tools(dst: Path, src: Path | None = None) -> None:
+    """Copy the tools in src (default TOOLS_SRC) to dst, without the machine's state.
+
+    Copying the whole directory carried a used clone's deny list, sync receipt and rlm
+    trajectories into every test vault: after one setup.py run the deny list shifted each scripted
+    answer in the setup test, turning one check red and letting both push_remote checks pass
+    without reaching that prompt; one trajectory in logs/ turned rlm checks red (review,
+    2026-10-02). In a git work tree the copy is what git lists: every tracked file, plus the
+    untracked ones neither .gitignore nor TOOLS_STATE excludes, so a new tool is tested before its
+    first commit. A plain directory (PALIMPSEST_TOOLS at an exported tree) is copied whole minus
+    TOOLS_STATE."""
+    src = Path(src or TOOLS_SRC)
+    try:
+        # -x excludes untracked files only: a tracked file is a tool whatever its name.
+        r = subprocess.run(["git", "-C", str(src), "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+                            *(a for p in TOOLS_STATE for a in ("-x", p)), "--", "."], capture_output=True)
+        # -z prints raw, unquoted path bytes (UTF-8 from Git for Windows); fsdecode maps them back.
+        rels = sorted({os.fsdecode(p) for p in r.stdout.split(b"\0") if p}) if r.returncode == 0 else []
+    except OSError:
+        rels = []
+    if not rels:                    # not a work tree, or one that ignores all of src
+        shutil.copytree(src, dst, ignore=shutil.ignore_patterns(*TOOLS_STATE))
+        return
+    for rel in rels:
+        if not os.path.lexists(src / rel):          # tracked, but deleted in the working tree
+            continue
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src / rel, dst / rel)
+
+
 def make_vault(with_hooks: bool = False) -> Path:
     v = tempdir()
-    shutil.copytree(TOOLS_SRC, v / "tools", ignore=shutil.ignore_patterns("cache", "__pycache__", "*.pyc"))
+    copy_tools(v / "tools")
     git(v, "init", "-q", "-b", "main")
     git(v, "config", "user.name", "test")
     git(v, "config", "user.email", "test@example.invalid")
