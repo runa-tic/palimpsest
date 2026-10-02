@@ -89,11 +89,45 @@ class ClaudeError(RuntimeError):
     "[claude CLI failed rc=1: ...]" for a FINAL answer, log it to the Q&A log and exit 0."""
 
 
+# A model name goes on the claude command line, and model code picks it: rlm(..., model=...) went
+# into argv unchecked (review, 2026-10-02). Only what a model id is made of; never a leading "-",
+# which could read as an option.
+_MODEL_NAME = re.compile(r"[A-Za-z0-9._:\[\]-]{1,100}")
+_BATCH_META = frozenset('&|<>^%"!()\r\n')
+
+
+def _model_problem(model) -> str | None:
+    """Why `model` may not go on the claude command line, or None when it may."""
+    if isinstance(model, str) and _MODEL_NAME.fullmatch(model) and not model.startswith("-"):
+        return None
+    return (f"refused model name {repr(model)[:120]}: a model name is a str of 1-100 characters "
+            f"from A-Z a-z 0-9 . _ : [ ] - that does not start with '-'")
+
+
+def _batch_guard(argv: list[str]) -> None:
+    """Refuse to launch a .cmd/.bat with an argument cmd.exe would parse. On Windows claude is
+    npm's claude.cmd, which CreateProcess runs through cmd.exe, and CPython does not escape
+    arguments for a batch file, so `x|calc` as a model name would run calc outside the sandbox
+    (review, 2026-10-02). Model names are checked before this; it holds for any argument added later.
+    argv[0] is the resolved path, not model input: "Program Files (x86)" is CPython's to quote."""
+    if not str(argv[0]).lower().endswith((".cmd", ".bat")):
+        return
+    for a in argv[1:]:
+        if any(ch in _BATCH_META for ch in a):
+            raise ClaudeError(f"refused to run {Path(argv[0]).name} with argument {a[:120]!r}: "
+                              f"cmd.exe would interpret & | < > ^ % \" ! ( ) or a newline in it")
+
+
 def _claude(prompt: str, model: str, timeout: int) -> str:
+    bad = _model_problem(model)
+    if bad:
+        raise ClaudeError(bad)    # model=123 was a TypeError from Popen that ended the run
     exe = shutil.which("claude") or "claude"
+    argv = [exe, "-p", "--model", model]
+    _batch_guard(argv)
     env = {**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1", "PYTHONIOENCODING": "utf-8"}
     try:
-        p = subprocess.run([exe, "-p", "--model", model], input=prompt, capture_output=True,
+        p = subprocess.run(argv, input=prompt, capture_output=True,
                            text=True, encoding="utf-8", errors="replace", env=env,
                            timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -309,6 +343,9 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="echo each step's code and output")
     args = ap.parse_args()
     question = " ".join(args.question)
+    for flag, model in (("--root-model", args.root_model), ("--sub-model", args.sub_model)):
+        if bad := _model_problem(model):
+            ap.error(f"{flag}: {bad}")
 
     SCRATCH.mkdir(parents=True, exist_ok=True)
     LOGDIR.mkdir(parents=True, exist_ok=True)
