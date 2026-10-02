@@ -261,18 +261,19 @@ def main() -> int:
          and (os.name == "nt" or os.access(hook, os.X_OK)),
          "setup.py --fix-line-endings rewrites a CRLF hook left by an older checkout (tree stays clean)",
          f"CRLF before={stale} status before={dirty!r}\n{(r.stdout + r.stderr)[-300:]}")
-    # 7. notes too: LF at checkout under core.autocrlf=true, and a CRLF note left by an older
-    # checkout is rewritten with LF while the tree stays clean
+    # 7. notes check out LF under core.autocrlf=true, and --fix-line-endings leaves a CRLF one
+    # byte-identical: rewriting it gains git nothing and makes embed.py re-embed it (review,
+    # 2026-10-02; the older-checkout case is in test_review_1002_setup_repair.py)
     eol_rule = "* text=auto eol=lf" in (d / ".gitattributes").read_text()
     readme_crlf = b"\r" in (d / "README.md").read_bytes()
-    (d / "README.md").write_bytes((d / "README.md").read_bytes().replace(b"\n", b"\r\n"))
+    crlf = (d / "README.md").read_bytes().replace(b"\n", b"\r\n")
+    (d / "README.md").write_bytes(crlf)
     r = subprocess.run([sys.executable, str(d / "tools" / "setup.py"), "--fix-line-endings"], cwd=d,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", input="")
-    c.ok(eol_rule and not readme_crlf and b"\r" not in (d / "README.md").read_bytes()
-         and not git(d, "status", "--short").stdout,
-         "notes check out LF under core.autocrlf=true, and --fix-line-endings rewrites a CRLF one",
-         f"rule={eol_rule} crlf-at-checkout={readme_crlf} status={git(d, 'status', '--short').stdout!r}\n"
-         f"{(r.stdout + r.stderr)[-300:]}")
+    c.ok(eol_rule and not readme_crlf and (d / "README.md").read_bytes() == crlf
+         and "README.md" not in r.stdout,
+         "notes check out LF under core.autocrlf=true, and --fix-line-endings leaves a CRLF one alone",
+         f"rule={eol_rule} crlf-at-checkout={readme_crlf}\n{(r.stdout + r.stderr)[-300:]}")
     _util.rmtree(d)
     mode = git(REPO, "ls-tree", ref, "claude-code.sh").stdout.split()[:1]
     c.ok(mode == ["100755"], f"claude-code.sh is committed executable on {ref[:12]}", str(mode))
