@@ -92,9 +92,10 @@ class ClaudeError(RuntimeError):
 
 
 # A model name goes on the claude command line, and model code picks it: rlm(..., model=...) went
-# into argv unchecked (review, 2026-10-02). Only what a model id is made of; never a leading "-",
-# which could read as an option.
-_MODEL_NAME = re.compile(r"[A-Za-z0-9._:\[\]-]{1,100}")
+# into argv unchecked (review, 2026-10-02). Only what a model id is made of, Vertex ids
+# (claude-...@20250929) and Bedrock ARNs (arn:aws:bedrock:...:inference-profile/...) included;
+# never a leading "-", which could read as an option.
+_MODEL_NAME = re.compile(r"[A-Za-z0-9._:@/\[\]-]{1,200}")
 _BATCH_META = frozenset('&|<>^%"!()\r\n')
 
 
@@ -102,15 +103,15 @@ def _model_problem(model) -> str | None:
     """Why `model` may not go on the claude command line, or None when it may."""
     if isinstance(model, str) and _MODEL_NAME.fullmatch(model) and not model.startswith("-"):
         return None
-    return (f"refused model name {repr(model)[:120]}: a model name is a str of 1-100 characters "
-            f"from A-Z a-z 0-9 . _ : [ ] - that does not start with '-'")
+    return (f"refused model name {repr(model)[:120]}: a model name is a str of 1-200 characters "
+            f"from A-Z a-z 0-9 . _ : @ / [ ] - that does not start with '-'")
 
 
 def _batch_guard(argv: list[str]) -> None:
-    """Refuse to launch a .cmd/.bat with an argument cmd.exe would parse. On Windows claude is
-    npm's claude.cmd, which CreateProcess runs through cmd.exe, and CPython does not escape
-    arguments for a batch file, so `x|calc` as a model name would run calc outside the sandbox
-    (review, 2026-10-02). Model names are checked before this; it holds for any argument added later.
+    """Refuse to launch a .cmd/.bat with an argument cmd.exe would parse. Where claude is npm's
+    claude.cmd (the native installer's claude.exe is not affected), CreateProcess runs it through
+    cmd.exe, and CPython does not escape arguments for a batch file, so `x|calc` as a model name
+    would run calc outside the sandbox (review, 2026-10-02). Model names are checked before this; it holds for any argument added later.
     argv[0] is the resolved path, not model input: "Program Files (x86)" is CPython's to quote."""
     if not str(argv[0]).lower().endswith((".cmd", ".bat")):
         return

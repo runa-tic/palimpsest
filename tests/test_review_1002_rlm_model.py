@@ -118,6 +118,30 @@ print("RESULT", json.dumps(out))
 '''
 
 
+NAMES = r'''
+import json, sys, importlib.util
+spec = importlib.util.spec_from_file_location("rlm", sys.argv[1])
+rlm = importlib.util.module_from_spec(spec); spec.loader.exec_module(rlm)
+print("RESULT", json.dumps([rlm._model_problem(m) is None for m in json.loads(sys.stdin.read())]))
+'''
+
+
+def check_model_names(c: Checks) -> None:
+    """Real model ids pass, Vertex and Bedrock forms included; anything cmd.exe could read does not."""
+    ok = ["claude-opus-5", "claude-sonnet-4-5-20250929", "claude-opus-4-6[1m]", "claude-sonnet-4-5@20250929",
+          "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"]
+    bad = ["x|calc", 'a" & calc & "b', "%USERPROFILE%", "-p", "", "a b", "a\nb", "x" * 201]
+    r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + NAMES, str(TOOLS_SRC / "rlm.py")],
+                       input=json.dumps(ok + bad), capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    line = next((l for l in r.stdout.splitlines() if l.startswith("RESULT ")), "")
+    got = json.loads(line[7:]) if line else []
+    c.ok(got == [True] * len(ok) + [False] * len(bad),
+         "model ids pass, Vertex (@) and Bedrock ARN (/) forms included; metacharacters, options, "
+         "spaces, newlines and 201 characters do not", f"{got} {r.stderr[-300:]}")
+
+
 def check_batch_guard(c: Checks) -> None:
     """The guard itself, with fake exe paths: no batch file is run, so this holds on every OS."""
     npm = r"C:\fake\npm\claude.cmd"
@@ -143,6 +167,7 @@ def main() -> int:
         check_hostile_names(c)
         check_int_model(c)
         check_cli_models(c)
+        check_model_names(c)
         check_batch_guard(c)
     finally:
         for d in _MINE:
