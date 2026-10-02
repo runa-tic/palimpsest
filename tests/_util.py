@@ -108,7 +108,12 @@ def copy_tools(dst: Path, src: Path | None = None) -> None:
         if not os.path.lexists(src / rel):          # tracked, but deleted in the working tree
             continue
         (dst / rel).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src / rel, dst / rel)
+        if (src / rel).is_dir() and not (src / rel).is_symlink():
+            # An untracked nested repository is listed as "sub/", one entry for the whole tree.
+            shutil.copytree(src / rel, dst / rel, ignore=shutil.ignore_patterns(".git", *TOOLS_STATE),
+                            dirs_exist_ok=True)
+        else:
+            shutil.copy2(src / rel, dst / rel)
 
 
 def make_vault(with_hooks: bool = False) -> Path:
