@@ -145,6 +145,23 @@ def main() -> int:
     c.ok(holds_tools_only(got), "from a tools/ kept untracked in another repository, the copy holds the "
          "tools and none of the state", why(got))
 
+    # An untracked nested repository in tools/ (a developer's scratch clone): git lists it as one
+    # "sub/" entry, and copying that entry as a file raised IsADirectoryError.
+    nest = tempdir("palimpsest-tools-nested-")
+    git(nest, "init", "-q", "-b", "main")
+    write(nest, "tools/a.py", "print(1)\n")
+    git(nest, "add", "tools/a.py"); git(nest, "commit", "-q", "-m", "seed")
+    git(nest / "tools", "init", "-q", "sub")
+    write(nest, "tools/sub/f.py", "print(2)\n")
+    dst = tempdir("palimpsest-tools-nested-dst-")
+    try:
+        _util.copy_tools(dst / "tools", nest / "tools")
+        got = sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file())
+    except OSError as e:
+        got = [f"{type(e).__name__}: {e}"]
+    c.ok(got == ["tools/a.py", "tools/sub/f.py"], "an untracked nested repository in tools/ is copied as a "
+         "tree (without its .git), not opened as a file", str(got))
+
     # This checkout's own tools/: exactly what is on disk and not ignored, whatever a past
     # setup.py, sync or rlm run left behind in it.
     on_disk = sorted(p.relative_to(_util.TOOLS_SRC).as_posix() for p in Path(_util.TOOLS_SRC).rglob("*")
