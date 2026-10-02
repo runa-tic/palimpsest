@@ -260,13 +260,30 @@ def redact_text(s: str) -> tuple[str, int]:
 if __name__ == "__main__":
     # Quick self-check / manual scrub: `python tools/redact.py < file` prints redacted.
     import sys
-    # Bytes in and out as UTF-8, like the vault's files: a text stdin on a Windows ANSI code page
-    # misread a UTF-8 note, so a deny-listed term in it went through unredacted.
-    data = sys.stdin.buffer.read().decode("utf-8", "replace")
+    # Bytes in and out, never through the console's code page: a text stdin on a Windows ANSI code
+    # page misread a UTF-8 note, so a deny-listed term in it went through unredacted.
     try:
         sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    raw = sys.stdin.buffer.read()
+    # A file with a BOM is redacted in its own encoding and written back in it, BOM included:
+    # PowerShell 5.1 `>` writes UTF-16, which read as UTF-8 matched no term and came out with
+    # "0 substitution(s)" and exit 0 (review, 2026-10-02). UTF-32 before UTF-16: same lead bytes.
+    boms = ((codecs.BOM_UTF32_LE, "utf-32-le"), (codecs.BOM_UTF32_BE, "utf-32-be"), (codecs.BOM_UTF8, "utf-8"),
+            (codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be"))
+    bom, enc = next(((b, e) for b, e in boms if raw.startswith(b)), (b"", "utf-8"))
+    # Anything else must be UTF-8, strictly: errors="replace" turned a cp1251 note into U+FFFD, and
+    # NULs (UTF-16 without a BOM, or appended by `>>`) are valid UTF-8 that no term matches. Refuse,
+    # and write nothing, rather than print a mangled or unredacted copy.
+    try:
+        data = raw[len(bom):].decode(enc)
+    except UnicodeDecodeError:
+        data = None
+    if data is None or (enc == "utf-8" and "\x00" in data):
+        why = "has NUL bytes (UTF-16 without a BOM?)" if data is not None else f"is not {enc.upper()}"
+        sys.stderr.write(f"redact: input {why}; re-save it as UTF-8. Nothing was written.\n")
+        sys.exit(2)
     out, hits = redact_text(data)
     sys.stderr.write(f"redact: {hits} substitution(s)\n")
-    sys.stdout.buffer.write(out.encode("utf-8"))   # bytes: no newline translation on Windows
+    sys.stdout.buffer.write(bom + out.encode(enc))   # bytes: no newline translation on Windows
