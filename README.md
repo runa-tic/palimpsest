@@ -135,7 +135,11 @@ python tools/state.py add my-api host server-1 --source "[[Deploy notes]]"
 python tools/state.py show my-api                  # current value, when, who, why, what it superseded
 python tools/state.py probe                         # built-in probes + any declared in palimpsest.json
 
-python tests/run_all.py                    # regression tests on any OS: throwaway vaults, no model calls
+python tests/run_all.py                    # regression tests: throwaway vaults, no claude calls;
+                                           # run on macOS and Windows 11, not yet on Linux. With
+                                           # sentence-transformers installed, one test loads real
+                                           # embedding and rerank models (~0.6 GB on first run; set
+                                           # HF_HUB_OFFLINE=1 once they are cached to stay offline)
 ```
 
 You can skip `setup.py` entirely: with the hooks registered, an unconfigured vault makes the
@@ -187,7 +191,7 @@ and `extract_skills.py` distil, `link_notes.py` wires, `maintenance.py`, `dedupe
 `state.py` keeps the State ledger, `vault_push.py` backs up and syncs machines,
 and `redact.py`, `scan_secrets.py` and `scan_pii.py`
 keep private strings out of git — in file names as well as contents. `tests/` holds
-stdlib-only regression scripts; each builds throwaway git vaults and makes no model calls. `templates/` holds the note schemas. `CLAUDE.md` is
+regression scripts that need only the standard library and git, plus numpy for the three that drive embed.py (test_embed_pick_model.py, test_review_0930_retrieval.py, test_review_1002_embed.py; test_ask_rerank.py runs only with sentence-transformers installed and skips otherwise); each builds throwaway git vaults and never calls claude. `templates/` holds the note schemas. `CLAUDE.md` is
 the operating protocol (with `SETUP.md` holding the one-time onboarding, so it costs no
 context once configured) — the part that makes an agent behave like the vault's brain rather
 than a chatbot standing next to it.
@@ -196,16 +200,33 @@ than a chatbot standing next to it.
 
 Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
 assume that. This release was tested on macOS and on Windows 11 (Python 3.13, Git for Windows,
-`core.autocrlf=true`, a Cyrillic user profile), on Windows both as installed — UTF-8 mode off, a
-cp1251 code page, no Unix tools on PATH — and from Git Bash: the full suite passes in each, the
-git hook blocks a staged key, and the ledger, retrieval with the reranker and the line-ending
-repair run from a fresh clone. On Windows the symlink checks skip unless the account may create
-symlinks (admin or Developer Mode), and one TLS check skips without the `openssl` CLI (Git Bash
-has it). Two things have not been run there yet: the scheduled nightly sync with its hidden
-console windows, and extraction against the real `claude` CLI (the tests stand in a stub for it). A vault cloned before `.gitattributes` pinned every text file to LF keeps its
-CRLF working files, including a CRLF `pre-commit` that refuses every commit on Windows: after
-pulling those rules, run `python tools/setup.py --fix-line-endings` once (it rewrites only files
-the rules pin to LF, and only their line endings). `rlm.py`'s read confinement is
+`core.autocrlf=true`, a Cyrillic user profile); it has not been run on Linux. On Windows the
+suite passed both as installed — UTF-8 mode off, a cp1251 code page, no Unix tools on PATH — and
+from Git Bash, the reranker test included, and from a fresh clone the git hook blocked a staged
+key and the ledger, a lexical `ask.py` and the line-ending repair ran. Those Windows runs predate
+the fixes from the 2026-10-02 review, which have run on macOS and under a cp1251 emulation only.
+Some checks cannot run on Windows: the symlink checks skip unless the account may create symlinks
+(admin or Developer Mode; no account tested had that right), the lock-takeover check skips because
+Windows will not delete a file its holder keeps open, one TLS check skips without the `openssl`
+CLI (Git Bash has it), and the checks of POSIX- and macOS-only pieces — the hook's fresh-clone
+commit, file modes, the cron line, `claude-code.sh`, `rlm.py`'s sandbox — are not run there (a
+few such checks report a pass without that part). Not run on Windows yet: the scheduled nightly
+sync with its hidden console windows, any real `claude` call (an `ask.py` answer, extraction,
+`rlm.py`, `bench_retrieval.py --gen`; the tests stand in a stub for it), an embedding index
+build, and a live push and pull between two machines (the suite's two-machine checks use local
+remotes).
+
+A declared probe whose command prints in a Windows code page needs that code page named as its
+`"encoding"` (default UTF-8; the format is in `tools/state.py`): a first line that does not decode
+is recorded as a probe error, not as a garbled value. A vault cloned before `.gitattributes` pinned
+the hook and shell scripts to LF keeps a CRLF `pre-commit`, which refuses every commit on
+Windows: after pulling those rules, run `python tools/setup.py --fix-line-endings` once (every
+`setup.py` run also does it). It rewrites only files pinned to `text eol=lf` — the hook and
+`*.sh` — and only their line endings. Notes are left alone: an older checkout's CRLF notes
+already read as unchanged to git, since their blobs are LF, and rewriting them would make the
+embedding index re-embed the whole vault. A file already committed with CRLF stays CRLF; do not
+renormalize `State/facts.jsonl` while another machine may append to it, because `merge=union`
+then keeps both versions of every line. `rlm.py`'s read confinement is
 OS-enforced on macOS only; elsewhere, treat the REPL as able to read what your user can. The skills extractor is disabled in the default pipeline — it burned most of a
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long

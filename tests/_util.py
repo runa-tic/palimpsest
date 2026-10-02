@@ -1,9 +1,13 @@
 """Helpers for the regression scripts in tests/: throwaway git vaults with a copy of tools/.
 
 Every test builds its own vault under a temp dir, copies the tools it exercises, and runs them
-as subprocesses exactly as the git hook or the sync would. Nothing touches the real vault, no
-network, no model calls. Set PALIMPSEST_TOOLS to test a different tools/ tree (e.g. a checkout
-of main, to confirm a test fails before its fix).
+as subprocesses exactly as the git hook or the sync would. Nothing touches the real vault, and
+claude is never called: where a tool calls it, a stub on PATH answers. One script uses the
+network: test_ask_rerank, with sentence-transformers installed, loads the real embedding and
+rerank models from Hugging Face (about 0.6 GB on a first run; with HF_HUB_OFFLINE=1 it reads only
+the local cache). Every other connection goes to localhost or to an address that must not answer
+(TEST-NET-1, and 1.1.1.1 from inside the macOS sandbox). Set PALIMPSEST_TOOLS to test a different
+tools/ tree (e.g. a checkout of main, to confirm a test fails before its fix).
 
 Every vault and dir made here (make_vault, tempdir) is removed when the test script exits; set
 PALIMPSEST_KEEP_TMP=1 to keep them for a post-mortem.
@@ -18,8 +22,8 @@ _MADE: list[Path] = []
 os.environ["PALIMPSEST_STUB_PY"] = sys.executable      # read by the Windows stub launchers
 
 # A test that prints a failure detail its console's code page lacks must report it, not crash on
-# it: on a stock Windows (cp1251, UTF-8 mode off) Checks.ok died printing a Cyrillic path and
-# hid the failure it was reporting.
+# it: on a stock Windows (cp1251, UTF-8 mode off) Checks.ok died printing a failure detail with a
+# character the code page lacks and hid the failure it was reporting.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(errors="backslashreplace")
@@ -165,7 +169,11 @@ def stub_path(bindir: Path) -> str:
     """PATH with bindir first, refusing to run when a stubbed name resolves anywhere else.
 
     The fake must win, or the test sends its content to the real binary: on Windows a stub that
-    PATHEXT cannot see silently made the real claude.exe answer (first Windows run, 2026-10-01)."""
+    PATHEXT cannot see would have let a real claude.exe on PATH answer (first Windows run,
+    2026-10-01, where the real CLI happened to be off PATH). "Resolves" is shutil.which, which is
+    how the tools find claude; a bare "claude" argv goes through CreateProcess instead, which on
+    Windows finds only claude.exe, so this check cannot vouch for it. The tests that hold ask.py,
+    bench_retrieval.py, rlm.py and extract_notes.py to shutil.which cover that side."""
     path = f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"
     for name in _STUBS.get(Path(bindir).resolve(), ()):
         found = shutil.which(name, path=path)

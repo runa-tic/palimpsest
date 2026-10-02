@@ -13,11 +13,14 @@ State/proposed.jsonl merge=union
 # These rules reach fresh checkouts only: a vault that already has the CRLF hook keeps it
 # (the blob is unchanged, so git never rewrites the file and the tree looks clean). Repair it
 # once with `python tools/setup.py --fix-line-endings`; every setup.py run also does it.
-# Every other text file is stored, and checked out, with LF too. Without this, a Mac (no autocrlf)
-# commits whatever bytes a tool or a paste left, and a vault shared with Windows collects CRLF
-# blobs: a CRLF State/facts.jsonl doubles its lines under merge=union, and every machine's
-# embedding index re-hashes the vault after the inevitable cleanup. An existing Windows checkout
-# keeps its CRLF working files until `python tools/setup.py --fix-line-endings`.
+# Every other text file is normalized to LF when git adds it and checked out with LF, so a Mac (no
+# autocrlf) no longer commits whatever endings a tool or a paste left. A blob already stored with
+# CRLF is the exception: text=auto never renormalizes it, so it stays CRLF in the repository and
+# in fresh clones. Leave it so: renormalizing State/facts.jsonl on one machine while another
+# appends makes merge=union keep both versions of every line, and converting notes changes the
+# bytes embed.py hashes, so every machine re-embeds them. For the same reason setup.py leaves the
+# CRLF notes of an existing core.autocrlf=true checkout alone (their blobs are LF, so git already
+# reads them as unchanged) and repairs only the `text eol=lf` files below.
 * text=auto eol=lf
 tools/githooks/* text eol=lf
 *.sh text eol=lf
