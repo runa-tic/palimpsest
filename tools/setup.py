@@ -7,8 +7,9 @@ detects an unconfigured vault and hands the agent this file's questions.
 
 Non-interactive invocations (cron, CI, a piped shell) print the plan and change nothing,
 because a setup script that blocks on stdin in a scheduled job is a wedged job. The one
-exception is a repair, not a choice: tracked files .gitattributes pins to LF are rewritten
-with LF if the checkout has them in CRLF (see fix_line_endings).
+exception is a repair, not a choice: tracked files .gitattributes pins to `text eol=lf` (the
+hook, shell scripts) are rewritten with LF if the checkout has them in CRLF. Notes are left
+alone (see fix_line_endings).
 
   python tools/setup.py --fix-line-endings   only that repair — for a Windows vault cloned with
                                              core.autocrlf=true before the eol rules existed
@@ -116,11 +117,16 @@ def plan(cfg: dict) -> str:
 
 
 def fix_line_endings() -> list[str]:
-    """Rewrite with LF every tracked file that .gitattributes pins to eol=lf but that sits in the
-    working tree with CRLF. The eol rule only reaches fresh checkouts: a core.autocrlf=true vault
-    that got its CRLF pre-commit before the rule landed keeps it — the blob did not change, so git
-    never rewrites the file and `git status` is clean — and '#!/bin/sh\\r' refuses every commit,
-    the nightly backup's too. Only the line endings change, so local edits survive."""
+    """Rewrite with LF every tracked file that .gitattributes pins to `text eol=lf` (the hook,
+    *.sh: what an interpreter reads) but that sits in the working tree with CRLF. The eol rule
+    only reaches fresh checkouts: a core.autocrlf=true vault that got its CRLF pre-commit before
+    the rule landed keeps it — the blob did not change, so git never rewrites the file and
+    `git status` is clean — and '#!/bin/sh\\r' refuses every commit, the nightly backup's too.
+    Only the line endings change, so local edits survive.
+
+    Not the `* text=auto eol=lf` files, which is every note: git hashes a CRLF note to the same LF
+    blob and a stale one reads clean, so rewriting it gains nothing, and it changes the raw bytes
+    embed.py hashes, so the next hybrid ask re-embeds the whole vault (review, 2026-10-02)."""
     try:
         p = subprocess.run(["git", "ls-files", "--eol", "-z"], cwd=str(cfgmod.VAULT),
                            capture_output=True, text=True, encoding="utf-8", timeout=60, errors="replace")
@@ -130,8 +136,11 @@ def fix_line_endings() -> list[str]:
     for rec in p.stdout.split("\0") if p.returncode == 0 else []:
         info, _, path = rec.partition("\t")
         f = info.split()
+        # The attr column is exact: an explicit rule prints 'text eol=lf', the catch-all prints
+        # 'text=auto eol=lf'. Matching "eol=lf" alone took every note (review, 2026-10-02).
         # Only where the blob itself is LF: then LF bytes are exactly what git stores.
-        if not ("eol=lf" in f and "i/lf" in f and ("w/crlf" in f or "w/mixed" in f)):
+        if not (info.partition("attr/")[2].strip() == "text eol=lf"
+                and "i/lf" in f and ("w/crlf" in f or "w/mixed" in f)):
             continue
         target = cfgmod.VAULT / path
         try:
