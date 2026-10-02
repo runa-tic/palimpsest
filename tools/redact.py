@@ -288,5 +288,13 @@ if __name__ == "__main__":
         sys.stderr.write(f"redact: input {why}; re-save it as UTF-8. Nothing was written.\n")
         sys.exit(2)
     out, hits = redact_text(data)
+    # A BOM describes how a file began, not everything after it: text appended to a UTF-16 file by
+    # `echo >>` from cmd or Git Bash is UTF-8, which the UTF-16 decode reads as CJK, so a term in it
+    # went out unredacted with "0 substitution(s)" (review of the 2026-10-02 fix). Read the bytes as
+    # UTF-8 too; a term only that reading sees means the file mixes encodings: refuse it.
+    if enc != "utf-8" and redact_text(raw.decode("utf-8", "replace"))[1]:
+        sys.stderr.write(f"redact: input starts as {enc.upper()} but holds a deny-listed term in UTF-8 "
+                         "(text appended in another encoding?); re-save it as UTF-8. Nothing was written.\n")
+        sys.exit(2)
     sys.stderr.write(f"redact: {hits} substitution(s)\n")
     sys.stdout.buffer.write(bom + out.encode(enc))   # bytes: no newline translation on Windows

@@ -79,7 +79,11 @@ def main() -> int:
                        ("UTF-16 LE without a BOM", f"met {NAME} today\r\n".encode("utf-16-le")),
                        ("UTF-8 + UTF-16 appended by >>",
                         f"met {NAME}\n".encode("utf-8") + f"and {NAME}\r\n".encode("utf-16")),
-                       ("UTF-16 BOM over an odd byte count", codecs.BOM_UTF16_LE + f"{NAME}".encode("utf-16-le") + b"x")):
+                       ("UTF-16 BOM over an odd byte count", codecs.BOM_UTF16_LE + f"{NAME}".encode("utf-16-le") + b"x"),
+                       # `echo ... >>` from cmd or Git Bash appends UTF-8 to a UTF-16 file; at an even
+                       # byte count the whole decodes as UTF-16 (the tail as CJK) and the term hid in it
+                       ("UTF-16 with UTF-8 appended (even length)", (lambda b: b if len(b) % 2 == 0 else b + b"\n")(
+                           codecs.BOM_UTF16_LE + "notes\r\n".encode("utf-16-le") + f"met {NAME} today\n".encode("utf-8")))):
         rc, out, err = cli(v, data)
         if rc != 2 or out != b"" or "re-save it as UTF-8" not in err or "substitution" in err:
             bad.append((name, rc, out[:60], err))
