@@ -168,6 +168,13 @@ def is_configured() -> bool:
 
 
 if __name__ == "__main__":
+    try:
+        # UTF-8 whatever the code page, as callers read it, and backslashreplace: under "strict" a
+        # surrogate (argv or a path that is not UTF-8) crashed the very error that carried it.
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except Exception:
+        pass
     # `python tools/config.py --check` — the launchers' pre-flight. Exit CHECK_BROKEN (3) with the
     # problem on stdout when palimpsest.json is unreadable, 0 otherwise.
     why = problem()

@@ -9,6 +9,14 @@ import os, sys, json, subprocess, re
 from pathlib import Path
 from datetime import date, datetime
 
+try:
+    # UTF-8 whatever the code page, as callers read it, and backslashreplace: under "strict" a
+    # surrogate (argv or a path that is not UTF-8) crashed the very error that carried it.
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+except Exception:
+    pass
+
 TOOLS = Path(__file__).resolve().parent
 VAULT = TOOLS.parent
 PY = sys.executable or "python"

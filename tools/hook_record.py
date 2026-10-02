@@ -9,6 +9,14 @@ never blocks the session.
 import os, sys, json
 from pathlib import Path
 
+try:
+    # UTF-8 whatever the code page, as callers read it, and backslashreplace: under "strict" a
+    # surrogate (argv or a path that is not UTF-8) crashed the very error that carried it.
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+except Exception:
+    pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 def main():

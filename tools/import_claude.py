@@ -18,10 +18,11 @@ import sys, os, re, json, argparse, glob, hashlib, stat, tempfile
 from pathlib import Path
 from datetime import datetime
 
-# Windows consoles default to cp1252 and choke on non-Latin paths / emoji.
 try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    # UTF-8 whatever the code page, as callers read it, and backslashreplace: under "strict" a
+    # surrogate (argv or a path that is not UTF-8) crashed the very error that carried it.
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
 except Exception:
     pass
 
