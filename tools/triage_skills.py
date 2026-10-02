@@ -183,11 +183,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # The house convention (state.py, scan_secrets.py): output is UTF-8 whatever the code page, so
-    # a piped or logged run on a Windows ANSI code page neither crashes nor writes mojibake.
-    for _s in (sys.stdout, sys.stderr):
-        try:
-            _s.reconfigure(encoding="utf-8")
-        except Exception:
-            pass
+    try:
+        # UTF-8 whatever the code page, as callers read it, and backslashreplace: under "strict" a
+        # surrogate (argv or a path that is not UTF-8) crashed the very error that carried it.
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except Exception:
+        pass
     sys.exit(main())

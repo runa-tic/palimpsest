@@ -263,7 +263,10 @@ if __name__ == "__main__":
     # Bytes in and out, never through the console's code page: a text stdin on a Windows ANSI code
     # page misread a UTF-8 note, so a deny-listed term in it went through unredacted.
     try:
-        sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="utf-8")
+        # UTF-8 whatever the code page, as callers read it, and backslashreplace: under "strict" a
+        # surrogate (argv or a path that is not UTF-8) crashed the very error that carried it.
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
     except Exception:
         pass
     raw = sys.stdin.buffer.read()
