@@ -78,6 +78,11 @@ def main() -> int:
     r = probe(v, emit(b"up\n"), encoding="no-such-codec")
     c.ok("my-api.status = probe error (LookupError)" in r.stdout,
          "6. an encoding with no codec is recorded as a probe error", r.stdout + r.stderr)
+
+    r = probe(v, emit(b"active\n" + "\u0441\u043b\u0443\u0436\u0431\u0430 \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442\n".encode("cp1251")))
+    c.ok("my-api.status = active" in r.stdout,
+         "7. only the recorded first line has to decode: later lines in a code page do not make it an error",
+         r.stdout + r.stderr)
     return c.done()
 
 

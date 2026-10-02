@@ -58,7 +58,7 @@ The value recorded is the command's first line of output, decoded strictly as th
 "cp1251"). Output that does not decode records "probe error (output not <encoding>)" with its
 first bytes in hex in the detail, never a string with U+FFFD in place of each undecodable letter:
 under that, two different values of one length compared equal. A non-zero exit records "unreachable
-(rc N)" — but only if this machine's own network is up (a TCP control connection to
+(rc N)" — but only if this machine's own network is up (a verified TLS handshake with one of the
 `network_control` hosts, default github.com and 1.1.1.1). With the control down nothing is
 recorded and the throttle stays open: a laptop's DNS outage is not a fact about the server.
 """
@@ -809,20 +809,26 @@ def probe_command(spec: dict) -> tuple[list[tuple[str, str, str]], dict]:
         p = subprocess.run(spec["cmd"], cwd=str(VAULT), capture_output=True,
                            timeout=spec.get("timeout", 20), creationflags=NO_WINDOW)
         if p.returncode == 0:
-            try:
-                out = p.stdout.decode(enc).strip().splitlines()
-            except UnicodeDecodeError:
+            # Only the recorded line has to decode: a probe whose first line is ASCII and whose
+            # later lines are in a local code page recorded the right value before, and must not
+            # turn into an error now. surrogateescape marks what does not decode, in any codec.
+            out = p.stdout.decode(enc, "surrogateescape").strip().splitlines()
+            first = out[0].strip() if out else "ok"
+            if any("\udc80" <= ch <= "\udcff" for ch in first):
                 return [(eid, attr, f"probe error (output not {enc})")], {"detail": f"stdout starts {p.stdout[:32].hex(' ')}"}
-            return [(eid, attr, (out[0].strip() if out else "ok")[:200])], {}
+            return [(eid, attr, first[:200])], {}
         detail = (p.stderr.decode(enc, "backslashreplace") + p.stdout.decode(enc, "backslashreplace")).strip()[:200]
         fail = f"unreachable (rc {p.returncode})"
     except subprocess.TimeoutExpired:
         detail, fail = "timed out", "unreachable (timeout)"
     except Exception as e:
-        # The command never started (not installed, not on PATH, not executable): a fault on this
-        # machine, whatever the network is doing. Checking the network here reported a missing
-        # executable as "this machine's network is down" and recorded nothing, run after run.
-        # An "encoding" with no codec (LookupError) lands here too: also this machine's fault.
+        # A fault on this machine, whatever the network is doing: mostly a command that never
+        # started (not installed, not on PATH, not executable), but also a malformed spec (a
+        # "timeout" that is not a number fails after the command was spawned, an "encoding" that
+        # is not a str is a TypeError) or an "encoding" with no codec (LookupError). This branch
+        # used to fall through to the network check: online that recorded the probe error anyway,
+        # but offline, or with a network control nothing answers, a missing executable read as
+        # "this machine's network is down" and nothing was recorded, run after run.
         return [(eid, attr, f"probe error ({type(e).__name__})")], {"detail": f"{type(e).__name__}: {e}"[:200]}
     if spec.get("network", True) and not local_network_up():
         return [], {"detail": detail, "local_network_down": True}
