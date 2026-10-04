@@ -1,7 +1,20 @@
-# Palimpsest
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.svg">
+    <img src=".github/assets/banner-light.svg" alt="Palimpsest" width="640">
+  </picture>
+</h1>
 
-*Conversations in, atomic notes out — a self-distilling Obsidian vault for Claude Code, and
-several months of notes on everything that went wrong building it.*
+<p align="center">
+  <em>Conversations in, atomic notes out — a self-distilling Obsidian vault for Claude Code, and
+  several months of notes on everything that went wrong building it.</em>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-c8623a?style=flat-square&labelColor=3a2717"></a>
+  <img alt="Tested on macOS and Windows 11" src="https://img.shields.io/badge/tested%20on-macOS%20%C2%B7%20Windows%2011-b9995c?style=flat-square&labelColor=3a2717">
+  <img alt="No API key: model calls go through the local claude CLI" src="https://img.shields.io/badge/API%20key-none%20needed-b9995c?style=flat-square&labelColor=3a2717">
+</p>
 
 A palimpsest is a manuscript scraped down and written over, the earlier text still faintly
 readable underneath. That is what this does to a working log: sessions are captured verbatim,
