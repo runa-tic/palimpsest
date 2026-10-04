@@ -84,13 +84,41 @@ def recent(folder: Path, days=7, recurse=False, keys=("created",), first=True):
     return out
 
 TASK = re.compile(r"^\s*- \[ \] (.+)$", re.M)
+# The encoding a BOM names, for a note that is only read (as briefing.py's READ_BOMS). UTF-32 first:
+# UTF-32 LE's BOM begins with UTF-16 LE's.
+READ_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
+             (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"), (codecs.BOM_UTF8, "utf-8-sig"))
+# Where a line of such a note ends: at a line end as a text-mode read gives it, and at a NUL or any
+# other control character but a tab.
+LINE_END = re.compile(r"\r\n?|[\x00-\x08\x0b-\x1f\x7f]")
+
+def note_text(p: Path) -> str:
+    """A daily or project note as the text this review quotes from: no NUL and no other control
+    character in any line of it.
+
+    The notes were read as UTF-8 with errors="ignore", which keeps the NULs of UTF-16. A note
+    ending in an open task with no final newline, then appended to by PowerShell 5.1's `>>`
+    (UTF-16), gave the task "call the bank-\x00 \x00[\x00 ...", and that went into Open loops:
+    this tool wrote a NUL into the review, and from the next run on refused to refresh the review
+    because it holds one, with advice (re-save it as UTF-8) that does not apply to a file that
+    already is UTF-8 (review, 2026-10-04). A project's status line took the same way in.
+
+    So the note is decoded in the encoding its BOM names, UTF-8 without one (a UTF-16 note
+    contributed no task at all, silently), and a line ends at a NUL or other control character:
+    UTF-16 that follows UTF-8 text on a line is NULs for ASCII and bytes like 0x04 for Cyrillic.
+    What is quoted is cut there. It can keep one stray character, the first byte of the first
+    UTF-16 character ("call the bank-"), since nothing says where the UTF-8 ended. errors="ignore"
+    as before: a byte that does not decode is dropped."""
+    raw = p.read_bytes()
+    enc = next((e for bom, e in READ_BOMS if raw.startswith(bom)), "utf-8")
+    return LINE_END.sub("\n", raw.decode(enc, errors="ignore"))
 
 def open_tasks_in(folder: Path):
     out = []
     for p in folder.glob("*.md"):
         if p.name.startswith("_"):
             continue
-        for t in TASK.findall(p.read_text(encoding="utf-8", errors="ignore")):
+        for t in TASK.findall(note_text(p)):
             out.append((p.stem, t))
     return out
 
@@ -106,7 +134,7 @@ def open_tasks_today():
     if not dailies:
         return []
     p = dailies[-1]
-    return [(p.stem, t) for t in TASK.findall(p.read_text(encoding="utf-8", errors="ignore"))]
+    return [(p.stem, t) for t in TASK.findall(note_text(p))]
 
 def dedupe_tasks(tasks):
     seen, out = set(), []
@@ -131,8 +159,7 @@ def main():
     for p in PROJECTS.glob("*.md"):
         if p.name.startswith("_"):
             continue
-        txt = p.read_text(encoding="utf-8", errors="ignore")
-        m = re.search(r"^status:\s*(.+)$", txt, re.M)
+        m = re.search(r"^status:\s*(.+)$", note_text(p), re.M)
         projects.append((p.stem, m.group(1).strip() if m else "?"))
     projects.sort()
 
