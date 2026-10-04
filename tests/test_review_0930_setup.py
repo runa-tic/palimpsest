@@ -25,7 +25,7 @@ Set PALIMPSEST_REF to test another committed ref for 5 and 6 (default: the curre
 import json, os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 import _util
-from _util import Checks, REPO, TOOLS_SRC, git, make_vault as _make_vault, write
+from _util import Checks, REPO, git, make_vault as _make_vault, write
 
 MADE: list[Path] = []
 
@@ -38,7 +38,9 @@ def make_vault() -> Path:
 def vault_at(name: str) -> Path:
     """A vault whose root directory is called `name` (make_vault's name has no spaces)."""
     v = Path(tempfile.mkdtemp(prefix="palimpsest-test-")) / name
-    shutil.copytree(TOOLS_SRC, v / "tools", ignore=shutil.ignore_patterns("cache", "__pycache__", "*.pyc"))
+    # copy_tools, not a copytree of TOOLS_SRC: that carried a used clone's gitignored state (its
+    # deny list, sync receipt and logs/) into this vault (review, 2026-10-02).
+    _util.copy_tools(v / "tools")
     git(v, "init", "-q", "-b", "main")
     return v
 

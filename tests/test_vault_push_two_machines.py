@@ -5,16 +5,18 @@ this machine's push was rejected on every run and it silently stayed behind. Now
 pull --rebase --autostash, push; a same-line conflict aborts the rebase, restores the tree,
 reports the files and exits 1.
 """
-import json, shutil, subprocess, sys
+import json, subprocess, sys
 from pathlib import Path
-from _util import Checks, TOOLS_SRC, git, run, tempdir, write
+from _util import Checks, copy_tools, git, run, tempdir, write
 
 
 def clone(remote: Path, name: str) -> Path:
     d = tempdir(f"palimpsest-{name}-")
     subprocess.run(["git", "clone", "-q", str(remote), str(d)], check=True)
     git(d, "config", "user.name", name); git(d, "config", "user.email", f"{name}@example.invalid")
-    shutil.copytree(TOOLS_SRC, d / "tools", dirs_exist_ok=True, ignore=shutil.ignore_patterns("cache", "__pycache__"))
+    # copy_tools, not a copytree of TOOLS_SRC: that carried a used clone's gitignored state (its
+    # deny list, sync receipt and logs/) into this vault (review, 2026-10-02).
+    copy_tools(d / "tools")
     write(d, "palimpsest.json", json.dumps({"version": 1, "push_remote": "origin"}))
     return d
 

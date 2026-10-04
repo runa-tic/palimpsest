@@ -19,7 +19,7 @@ import json, os, shutil, subprocess, sys, tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import _util
-from _util import Checks, TOOLS_SRC, make_vault, git, run, write
+from _util import Checks, make_vault, git, run, write
 
 GITIGNORE = "__pycache__/\nState/Register.md\nState/current.json\nState/.observed.json\n"
 TMP: list[Path] = []
@@ -50,7 +50,9 @@ def clone(remote: Path, name: str) -> Path:
     TMP.append(d)
     subprocess.run(["git", "clone", "-q", str(remote), str(d)], check=True, capture_output=True)
     git(d, "config", "user.name", name); git(d, "config", "user.email", f"{name}@example.invalid")
-    shutil.copytree(TOOLS_SRC, d / "tools", dirs_exist_ok=True, ignore=shutil.ignore_patterns("cache", "__pycache__"))
+    # copy_tools, not a copytree of TOOLS_SRC: that carried a used clone's gitignored state (its
+    # deny list, sync receipt and logs/) into this vault (review, 2026-10-02).
+    _util.copy_tools(d / "tools")
     write(d, "palimpsest.json", json.dumps({"version": 1, "push_remote": "origin"}))
     return d
 
