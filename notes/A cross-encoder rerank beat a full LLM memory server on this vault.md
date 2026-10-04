@@ -20,6 +20,17 @@ The heavier system was Hindsight, an open-source agent-memory server. Every stor
 | Hindsight, multilingual reranker | 0.59 / 0.44 | 0.74 / 0.63 | 0.58 | 2,194 |
 | hybrid + language-routed cross-encoder | 0.76 / 0.57 | 0.90 / 0.82 | 0.73 | 231 |
 
+With 150 questions per language the numbers carry real noise, so here are 95% Wilson intervals on the recall figures:
+
+| system | R@8 en | R@8 ru | R@8 all | R@1 all |
+|---|---|---|---|---|
+| `ask.py` hybrid | 0.85 [0.78, 0.90] | 0.59 [0.51, 0.67] | 0.72 [0.67, 0.77] | 0.35 [0.30, 0.41] |
+| Hindsight, default reranker | 0.91 [0.85, 0.95] | 0.12 [0.08, 0.18] | 0.52 [0.46, 0.58] | 0.35 [0.30, 0.41] |
+| Hindsight, multilingual reranker | 0.74 [0.66, 0.80] | 0.63 [0.55, 0.70] | 0.68 [0.63, 0.73] | 0.51 [0.45, 0.57] |
+| hybrid + language-routed cross-encoder | 0.90 [0.84, 0.94] | 0.82 [0.75, 0.87] | 0.86 [0.82, 0.89] | 0.67 [0.61, 0.72] |
+
+The overall gap to Hindsight's best bilingual configuration holds: recall@8 0.86 against 0.68, a difference of 0.18 ± 0.07, with disjoint intervals. Two smaller differences do not: English recall@8 against Hindsight's default reranker (0.90 against 0.91) is a tie, and the reranker's gain on English alone (0.85 to 0.90) is inside the noise, while its gain on Russian (0.59 to 0.82) is not. The intervals are unpaired and computed from the rounded proportions; every system answered the same 300 questions, so a paired test on per-question hits would be tighter and has not been run.
+
 Two findings came from looking *inside* the pipeline rather than at its output:
 
 - **The default reranker made Russian unusable.** Per-stage scores for Russian questions showed Hindsight's semantic stage ranking the right note 1st to 6th, and the final order, which was exactly the English-only reranker's order, pushing it to 9th through 148th. A model that has never seen a language produces noise, and noise in the last stage overrides every stage before it.
