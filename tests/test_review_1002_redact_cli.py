@@ -80,8 +80,10 @@ def main() -> int:
                        ("UTF-8 + UTF-16 appended by >>",
                         f"met {NAME}\n".encode("utf-8") + f"and {NAME}\r\n".encode("utf-16")),
                        ("UTF-16 BOM over an odd byte count", codecs.BOM_UTF16_LE + f"{NAME}".encode("utf-16-le") + b"x"),
-                       # `echo ... >>` from cmd or Git Bash appends UTF-8 to a UTF-16 file; at an even
-                       # byte count the whole decodes as UTF-16 (the tail as CJK) and the term hid in it
+                       # `echo ... >>` from Git Bash appends UTF-8 to a UTF-16 file; at an even byte
+                       # count the whole decodes as UTF-16 (the tail as CJK) and the term hid in it.
+                       # cmd.exe's `echo >>` appends in the console's code page, not UTF-8 as this
+                       # comment said: test_review_1002b_readings covers that tail and the others.
                        ("UTF-16 with UTF-8 appended (even length)", (lambda b: b if len(b) % 2 == 0 else b + b"\n")(
                            codecs.BOM_UTF16_LE + "notes\r\n".encode("utf-16-le") + f"met {NAME} today\n".encode("utf-8")))):
         rc, out, err = cli(v, data)

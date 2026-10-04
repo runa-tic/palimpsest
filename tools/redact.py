@@ -288,13 +288,23 @@ if __name__ == "__main__":
         sys.stderr.write(f"redact: input {why}; re-save it as UTF-8. Nothing was written.\n")
         sys.exit(2)
     out, hits = redact_text(data)
-    # A BOM describes how a file began, not everything after it: text appended to a UTF-16 file by
-    # `echo >>` from cmd or Git Bash is UTF-8, which the UTF-16 decode reads as CJK, so a term in it
-    # went out unredacted with "0 substitution(s)" (review of the 2026-10-02 fix). Read the bytes as
-    # UTF-8 too; a term only that reading sees means the file mixes encodings: refuse it.
-    if enc != "utf-8" and redact_text(raw.decode("utf-8", "replace"))[1]:
-        sys.stderr.write(f"redact: input starts as {enc.upper()} but holds a deny-listed term in UTF-8 "
-                         "(text appended in another encoding?); re-save it as UTF-8. Nothing was written.\n")
-        sys.exit(2)
+    done = bom + out.encode(enc)
+    # A BOM describes how a file began, not everything after it. Text appended to a UTF-16 file in
+    # UTF-8 (`echo >>` from Git Bash), in a code page (cmd.exe's `echo >>` writes the console's:
+    # cp866 on a Russian Windows, UTF-8 only after `chcp 65001`; other programs write the ANSI
+    # one), or as UTF-16 after an odd number of bytes still decodes as UTF-16, as CJK or
+    # private-use characters, so a term in it went out unredacted with "0 substitution(s)" and exit
+    # 0. The first fix re-read the input as UTF-8 alone, on the claim that cmd appends UTF-8, which
+    # it does not (review, 2026-10-02). So what is about to be written is read every other likely
+    # way (scan_secrets.readings), and if any reading still shows a deny-listed term or a
+    # credential, nothing is written. Which writer left it there is not known and not claimed.
+    # Clean UTF-8 has no other reading, so this costs a UTF-8 file nothing.
+    from scan_secrets import readings           # no fallback: without it this check cannot be made
+    for way, text in readings(done):
+        if way and redact_text(text)[1]:
+            sys.stderr.write(f"redact: input starts as {enc.upper()}, but read as {way} it holds a deny-listed"
+                             " term or a credential that redaction did not reach (a file in more than one"
+                             " encoding?); re-save it as UTF-8. Nothing was written.\n")
+            sys.exit(2)
     sys.stderr.write(f"redact: {hits} substitution(s)\n")
-    sys.stdout.buffer.write(bom + out.encode(enc))   # bytes: no newline translation on Windows
+    sys.stdout.buffer.write(done)                    # bytes: no newline translation on Windows
