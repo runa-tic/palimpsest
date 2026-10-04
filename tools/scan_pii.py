@@ -21,8 +21,8 @@ cp1251/cp1252). A line that is not clean UTF-8 or UTF-16 is checked in every lik
 the commit is blocked until the file is re-saved as UTF-8: which codepage it is cannot be known,
 so a clean result over it would be a guess.
 
-A staged file that is not clean UTF-8 is checked in every likely reading as well
-(scan_secrets.readings: its BOM's encoding, UTF-8, cp1251, cp1252, cp866, UTF-16 from either
+A staged file, or a staged name, that is not clean UTF-8 is checked in every likely reading as
+well (scan_secrets.readings: its BOM's encoding, UTF-8, cp1251, cp1252, cp866, UTF-16 from either
 byte), and a term in any of them counts: a file's first bytes do not say what a later writer
 appended to it.
 
@@ -38,7 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from redact import DENY_FILE, load_deny_report, is_phone, term_pattern   # the one parser/matcher
-from scan_secrets import NotScanned, staged_blobs, staged_files
+from scan_secrets import NotScanned, masked_path, path_bytes, path_readings, staged_blobs, staged_files
 
 
 def mask(term: str) -> str:
@@ -61,6 +61,11 @@ def is_hard(term: str) -> bool:
 def _safe_path(rel: str, literals, regexes) -> str:
     """The path as printed: every deny-listed term in it masked, since the path itself may be
     what carries the term (and this output is recorded into the vault)."""
+    raw = path_bytes(rel)
+    if raw is not None:         # not UTF-8: mask what any reading of its bytes shows (see masked_path)
+        rxs = [term_pattern(t) for t in literals] + list(regexes)
+        return masked_path(raw, rel, lambda text: (
+            (m.start(), m.end(), mask(m.group(0))) for rx in rxs for m in rx.finditer(text)))
     for t in sorted(literals, key=len, reverse=True):
         rel = term_pattern(t).sub(lambda m: mask(m.group(0)), rel)
     for rx in regexes:
@@ -111,7 +116,11 @@ def main() -> int:
     for rel, blocks in staged_blobs(staged_files()):
         # Scan the path as well as the content: a note named after a person or a conversation
         # title carries the term in its filename, where a contents-only scan never looks.
-        _scan(_safe_path(f"{rel} [path]", literals, regexes), "", rel, hard, soft, regexes, found, warned)
+        # A name that is not UTF-8 is read every likely way: as the lossless decode has it, its
+        # bytes are surrogates that no term matches (review, 2026-10-02).
+        path_label = _safe_path(f"{rel} [path]", literals, regexes)
+        for way, text in path_readings(rel):
+            _scan(path_label, way, text, hard, soft, regexes, found, warned)
         label = _safe_path(rel, literals, regexes)
         try:
             for _, way, text in blocks:

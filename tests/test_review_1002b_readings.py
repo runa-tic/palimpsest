@@ -1,7 +1,7 @@
 """Bytes that do not decode cleanly are checked in every likely reading, not in the one their first bytes name.
 
-Review of 2026-10-02, second pass. Both commit guards trusted one reading of a staged file: the
-one its first bytes name.
+Review of 2026-10-02, second pass. Both commit guards trusted one reading of a staged file, the
+one its first bytes name, and one reading of a staged name.
 
 A file's first bytes say how it began, not what a later writer appended: PowerShell 5.1 `>>`
 appends UTF-16 to anything, Git Bash appends UTF-8 to a UTF-16 file, cmd.exe's `echo >>` appends
@@ -28,8 +28,12 @@ encodings those programs are understood to use; none of the programs was run.
     spell a deny-listed term in cp1251 passes too: clean UTF-8 has one reading. The same bytes
     with one stray byte after them are blocked, which is what shows the first passed for that
     reason. Files that are not clean and hold nothing (UTF-16, cp1251, a small binary) pass.
+ 6. A deny-listed name in a staged file NAME that is not UTF-8 (cp1251, cp866) blocks scan_pii,
+    and no line prints the name, its bytes as escapes included. A key in such a name still blocks
+    scan_secrets, masked (it did before: a key is ASCII), and so does a secret access key that
+    only a code page reading of the name shows, masked in the label as well.
 
-Set PALIMPSEST_TOOLS to a tools/ tree from before these fixes to see the checks fail; 2(b) and the passing halves of 5 held before and pass there.
+Set PALIMPSEST_TOOLS to a tools/ tree from before these fixes to see the checks fail; 2(b), the passing halves of 5 and the key half of 6 held before and pass there.
 """
 import codecs, hashlib, json, subprocess, sys
 import _util
@@ -38,6 +42,7 @@ from _util import Checks, run, write
 TERM = "Сидорова"                                       # synthetic deny-listed surname, Cyrillic
 MAIL = "zq.private@example.invalid"                     # synthetic address
 AKIA = "AKIA" + "QZXW" * 4                              # synthetic, AWS-shaped
+AWS_SECRET = "Ab3dEf9hIj" * 4                           # synthetic, 40 characters
 BOM16 = codecs.BOM_UTF16_LE
 SECRET = f"key {AKIA} mail {MAIL} met {TERM}"            # what each mixed file holds, once
 
@@ -193,6 +198,40 @@ def main() -> int:
          and "pii-scan: clean" in rp.stdout,
          "5. a UTF-16 file, a cp1251 file and a small binary that hold nothing pass both guards",
          f"{rs.returncode} {rs.stdout[-300:]}\n{rp.returncode} {rp.stdout[-300:]}")
+
+    # 6. a staged NAME that is not UTF-8 (Linux allows it; index-only, so any filesystem will do)
+    for cp in ("cp1251", "cp866"):
+        v = vault(f"{TERM}\n".encode("utf-8"))
+        stage(v, b"notes/met " + TERM.encode(cp) + b".md", b"nothing here\n")
+        r = run(v, "scan_pii.py")
+        out = r.stdout + r.stderr
+        c.ok(r.returncode == 1 and f"[path]: 1x Си******  (read as {cp})" in out and "Traceback" not in out,
+             f"6. scan_pii blocks a deny-listed name in a staged file name written in {cp}",
+             f"rc={r.returncode} {out[-400:]}")
+        # With the term in the body as well, the file's label is printed on a content line too.
+        stage(v, b"notes/met " + TERM.encode(cp) + b".md", f"met {TERM} today\n".encode("utf-8"))
+        out = run(v, "scan_pii.py").stdout
+        c.ok(TERM not in out and "\\udc" not in out and out.count("notes/met Си******.md") == 2,
+             f"6. ...and no line prints the {cp} name: not as text, not as the escapes of its bytes",
+             out[-400:])
+    v = vault()
+    stage(v, b"notes/" + TERM.encode("cp1251") + b" " + AKIA.encode() + b".md", b"nothing here\n")
+    r = run(v, "scan_secrets.py")
+    c.ok(r.returncode == 1 and r.stdout.count("AWS access key id") == 1 and AKIA not in r.stdout + r.stderr
+         and "Traceback" not in r.stdout + r.stderr,
+         "6. scan_secrets blocks a key in a staged file name that is not UTF-8, reported once and masked"
+         " (held before)", f"rc={r.returncode} {(r.stdout + r.stderr)[-400:]}")
+    # A key is ASCII and stayed readable among the surrogates. A secret found by its label did not,
+    # when the byte between the two is a no-break space in cp1251 and cp1252 (0xA0): as a surrogate
+    # it is not a space, so the name was committed. The value is also what its label must not print.
+    v = vault()
+    stage(v, b"notes/aws_secret_access_key=\xa0" + AWS_SECRET.encode() + b".md", b"nothing here\n")
+    r = run(v, "scan_secrets.py")
+    out = r.stdout + r.stderr
+    c.ok(r.returncode == 1 and "AWS secret access key" in out and "(read as cp1251)" in out
+         and AWS_SECRET[3:-3] not in out and "Traceback" not in out,
+         "6. scan_secrets blocks a secret access key in a file name where only a code page reads the"
+         " separator as a space, and masks it in the label too", f"rc={r.returncode} {out[-400:]}")
 
     return c.done()
 

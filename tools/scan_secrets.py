@@ -108,6 +108,11 @@ def safe_label(rel: str) -> str:
     """A path as printed: every credential shape in it masked. The path is content (notes are named
     after conversations), and this output is recorded into the vault and copied into vault_push's
     log, so no line may carry a name raw, a content finding's label included."""
+    raw = path_bytes(rel)
+    if raw is not None:         # not UTF-8: mask what any reading of its bytes shows (see masked_path)
+        return masked_path(raw, rel, lambda text: (
+            (m.start(), m.end(), mask(m.group(0)))
+            for rules in (HIGH, WARN) for _, rx in rules for m in rx.finditer(text)))
     for rules in (HIGH, WARN):
         for _, rx in rules:
             rel = rx.sub(lambda m: mask(m.group(0)), rel)
@@ -233,6 +238,59 @@ def readings(raw: bytes):
     yield "", decode(raw)
     for codec, off, alt in other_readings(raw, enc):
         yield reading_name(codec, off), alt
+
+
+def path_bytes(rel: str) -> bytes | None:
+    """The bytes of a path that is not UTF-8, which git allows on Linux and staged_files carries as
+    surrogates; None for any other path. Also None for a name holding a lone surrogate that is not
+    such a byte (Windows allows those): there are no bytes to read another way."""
+    try:
+        rel.encode("utf-8")
+        return None
+    except UnicodeEncodeError:
+        pass
+    try:
+        return rel.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        return None
+
+
+def path_readings(rel: str):
+    """(how, text) for every reading of a staged path: the path itself, and for one that is not
+    UTF-8 every other reading of its bytes. Since the staged names stopped being decoded strictly
+    (first with replacement, then losslessly so that two such names stay apart: staged_files), a
+    name byte that is not UTF-8 is a surrogate, which no deny-listed term and no pattern matches.
+    A name in cp1251 was committed with the term in it, where the strict decode had crashed and
+    blocked (review, 2026-10-02)."""
+    yield "", rel
+    raw = path_bytes(rel)
+    if raw is not None:
+        for codec, off, text in other_readings(raw, "utf-8"):
+            yield reading_name(codec, off), text
+
+
+def masked_path(raw: bytes, rel: str, find) -> str:
+    """A path that is not UTF-8, as printed. `find(text)` gives (start, end, shown) for each span to
+    hide in one reading of it; the BYTES under every span found in any reading are replaced by
+    `shown`. Masking the reading that matched alone would leave the same bytes to be printed by
+    another reading or as escapes, which is the value in a different spelling."""
+    def at(codec: str, off: int, text: str, i: int) -> int:
+        """The byte that character i of a reading starts at."""
+        if codec in LEGACY:
+            return i                                    # one byte, one character
+        if codec == "utf-8":
+            return len(text[:i].encode("utf-8", "surrogateescape"))
+        return min(len(raw), off + len(text[:i].encode(codec)))     # a replaced unit is 2 bytes too
+
+    cuts = [(at(codec, off, text, s), at(codec, off, text, e), shown)
+            for codec, off, text in [("utf-8", 0, rel), *other_readings(raw, "utf-8")]
+            for s, e, shown in find(text) if e > s]
+    out, done = [], 0
+    for s, e, shown in sorted(cuts):
+        if s >= done:               # a span overlapping one already hidden adds no text of its own
+            out += [raw[done:s].decode("utf-8", "surrogateescape"), shown]
+        done = max(done, e)
+    return "".join(out) + raw[done:].decode("utf-8", "surrogateescape")
 
 
 # Size policy, the same in every mode. Up to MAX_BYTES a file is read whole and scanned, binary or
@@ -494,7 +552,7 @@ def main() -> int:
             wanted = [rel for rel in staged_files() if not is_skipped(rel, walk=False)]
             for rel, blocks in staged_blobs(wanted):
                 # The name is content too: import_claude.py names files after the conversation.
-                yield f"{rel} [path]", [(1, "", rel)], False
+                yield f"{rel} [path]", [(1, way, text) for way, text in path_readings(rel)], False
                 yield rel, blocks, False
 
     high, warn, n = [], [], 0
