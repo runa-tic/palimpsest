@@ -222,15 +222,22 @@ The commit guards (`scan_secrets.py`, `scan_pii.py`) and the redact CLI read cle
 no control byte but tab, form feed and line ends) one way. Anything else is also read as UTF-8
 without its NULs, cp1251, cp1252, cp866, and UTF-16 in both byte orders from byte 0 and byte 1;
 there only credentials and block-tier deny entries count (a `re:` pattern, an address, a 7+ digit
-number, an alphabetic term of 5+ characters), not short terms. Not read: KOI8-R, ISO-8859-5, Mac
-Cyrillic/Roman, cp437/cp850/cp855 and other code pages; code-page text whose bytes are valid
-UTF-8; a value split across two encodings; a UTF-16 character with byte 0x0A in it where a 1 MB
-run ends. A file that starts as a known binary format does (PNG, JPEG, GIF, PDF, ZIP, MP4 and the
-like; the list is in `scan_secrets.py`) is read the usual way alone. A deny list that cannot be
-read, or holds a line that is not clean UTF-8 or UTF-16 or a pattern that does not compile, blocks
-every commit and the redact CLI; the session recorder still writes its note (credentials masked;
-with an unreadable list, terms not) and says so on stderr. A FIFO in the deny list's place hangs
-all three.
+number, an alphabetic term of 5+ characters), not short terms or the scanner's warn-tier rules.
+Not read: KOI8-R, ISO-8859-5, Mac Cyrillic/Roman, cp437/cp850/cp855 and other code pages;
+code-page or BOM-less UTF-16 text whose bytes happen to be valid UTF-8 (much CJK); a value split
+across two encodings, or a UTF-16 value directly followed by U+0000; a UTF-16 character with byte
+0x0A in it where a 1 MB run ends. A file that starts as a known binary format does (PNG, JPEG,
+GIF, PDF, ZIP, MP4 and the like; the list is in `scan_secrets.py`) is read the usual way alone,
+as is a text file that begins with such a header; binary formats not on the list (TIFF, WebM, old
+Office files) are read every way, about six times slower, and a long Cyrillic term can match
+their bytes by chance. Two false alarms are possible in UTF-16 text: a listed number matches
+digits followed by a Cyrillic letter whose low byte is a digit, and a line the allow list exempts
+also exempts other readings of the same bytes. One control character (a terminal colour code)
+makes a note not clean, which costs time: about twice as long for the guards, several times for
+the redact CLI. A deny list that cannot be read, or holds a line that is not clean UTF-8 or
+UTF-16 or a pattern that does not compile, blocks every commit and the redact CLI; the session
+recorder still writes its note (credentials masked; with an unreadable list, terms not) and says
+so on stderr. A FIFO in the deny list's place hangs all three.
 
 A declared probe whose command prints in a Windows code page needs that code page named as its
 `"encoding"` (default UTF-8; the format is in `tools/state.py`): a first line that does not decode
