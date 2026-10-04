@@ -212,6 +212,10 @@ def file_sizes(raw: bytes) -> set[int]:
 
 def is_extracted(prev: dict, sizes: set, sig: str, done_elsewhere: set) -> bool:
     """Whether this content was already extracted, here or on another machine."""
+    # A pass over this content began writing here and did not finish (see mark_pending): the items
+    # it wrote carry this hash, and they are not the whole conversation.
+    if prev.get("pending") == sig:
+        return False
     if prev.get("sig") == sig or sig in done_elsewhere:
         return True
     # An entry from before content hashing holds "mtime_ns:size". The same size means only the
@@ -220,6 +224,19 @@ def is_extracted(prev: dict, sizes: set, sig: str, done_elsewhere: set) -> bool:
     # change is CRLF <-> LF counts as the same size.
     old = str(prev.get("sig") or "")
     return bool(re.fullmatch(r"\d+:\d+", old)) and int(old.split(":")[1]) in sizes
+
+
+def mark_pending(state: dict, key: str, prev: dict, sig: str, save) -> None:
+    """Record, before a pass writes its first item, that this content is being extracted. Each item
+    is written with the conversation's source_hash, and any item with that hash counted as the
+    whole conversation: when a later write of the same pass failed, or the run was killed between
+    two writes, the next run skipped the conversation for good and the rest was never written
+    (review, 2026-10-04). The mark is replaced by the checkpoint when the pass completes; until
+    then is_extracted says no. "stat" is dropped so the unchanged-file shortcut cannot skip it.
+    The mark is this machine's (the state file is not committed): another machine that pulls the
+    partial items takes them for a finished pass and leaves the retry to this one."""
+    state[key] = {**{k: v for k, v in prev.items() if k != "stat"}, "pending": sig}
+    save(state)
 
 
 def machine_name() -> str:
@@ -231,8 +248,14 @@ def machine_name() -> str:
         name = _cfg.load().get("machine")
     except Exception:
         pass
-    name = name or os.environ.get("PALIMPSEST_MACHINE") or socket.gethostname().split(".")[0]
-    return re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-") or "machine"
+    name = str(name or os.environ.get("PALIMPSEST_MACHINE") or socket.gethostname().split(".")[0])
+    # state._machine's rule, kept in step with it (tests/test_review_1004.py compares the two):
+    # Unicode letters and digits stay. An ASCII-only class turned "мак" and "бокс" both into
+    # "machine", so two machines wrote one <kind>-machine.json and merged against each other
+    # (review, 2026-10-04). An ASCII name keeps the file it had; a <kind>-machine.json already
+    # written is still read by Ledger, which reads every machine's file.
+    clean = re.sub(r"(?:[^\w-]|_)+", "-", name.lower()).strip("-")
+    return clean or "machine-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
 
 
 class Ledger:
@@ -674,12 +697,14 @@ def main():
         date = date.group(0) if date else datetime.now().strftime("%Y-%m-%d")
         try:
             notes = extract_notes_from(transcript, args.model, [n for n, _ in from_here])
+            if notes and not args.dry_run:
+                mark_pending(state, key, prev, sig, save_state)
             # Inside the try: one bad item (an unwritable name, an odd field) fails this
             # conversation, reported and retried, instead of killing the run before any checkpoint.
             written = [w for n in notes if (w := write_atomic_note(n, src, date, args.dry_run, sig))]
         except Exception as e:
             print(f"  ! skipped ({e})")
-            failed.append(src.name)      # not recorded in state, so the next run retries it
+            failed.append(src.name)      # no checkpoint (at most a pending mark), so the next run retries it
             continue
         total_notes += len(written)
         processed += 1

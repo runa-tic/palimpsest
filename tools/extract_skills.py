@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The checkpoint, lock, model call, chunking and field hygiene are extract_notes.py's. Two copies
 # of each meant every defect in them was found twice and, as often, fixed once.
 from extract_notes import (sanitize, read_state, write_state, open_state, hold_lock, content_sig,
-                           is_extracted, source_index, captured_block, as_text, clean_tags,
+                           is_extracted, mark_pending, source_index, captured_block, as_text, clean_tags,
                            run_claude, chunk_transcript, WORD, file_sizes, Ledger)
 
 try:
@@ -327,12 +327,14 @@ def main():
         date = m.group(0) if m else datetime.now().strftime("%Y-%m-%d")
         try:
             skills = extract_skills_from(transcript, args.model, [n for n, _ in from_here])
+            if skills and not args.dry_run:
+                mark_pending(state, key, prev, sig, save_state)
             # Inside the try, as in extract_notes: one bad item fails this conversation only.
             written = [w for s in skills
                        if (w := write_proposed_skill(s, src, date, args.dry_run, args.dup_threshold, sig))]
         except Exception as e:
             print(f"  ! skipped ({e})")
-            failed.append(src.name)      # not recorded in state, so the next run retries it
+            failed.append(src.name)      # no checkpoint (at most a pending mark), so the next run retries it
             continue
         total += len(written)
         processed += 1

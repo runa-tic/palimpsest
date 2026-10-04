@@ -18,7 +18,8 @@ Usage (from vault root):
   python tools/rlm.py "how has my thinking on approval gates changed over time?"
   python tools/rlm.py --steps 16 --subagents 60 --log "audit every uncommitted deploy claim"
 
-No API key: sub-agents are `claude -p` under your Claude Code login, like ask.py.
+No API key: the root and the sub-agents are `claude -p` under your Claude Code login, started as
+the extractors start it: no tools, no MCP servers, outside the vault.
 """
 from __future__ import annotations
 import sys, os, re, json, argparse, subprocess, shutil, textwrap
@@ -95,6 +96,7 @@ class ClaudeError(RuntimeError):
 # into argv unchecked (review, 2026-10-02). Only what a model id is made of, Vertex ids
 # (claude-...@20250929) and Bedrock ARNs (arn:aws:bedrock:...:inference-profile/...) included;
 # never a leading "-", which could read as an option.
+_LEGACY_CLI = False   # set once an older CLI rejects the strict flags (as in extract_notes)
 _MODEL_NAME = re.compile(r"[A-Za-z0-9._:@/\[\]-]{1,200}")
 _BATCH_META = frozenset('&|<>^%"!()\r\n')
 
@@ -126,15 +128,38 @@ def _claude(prompt: str, model: str, timeout: int) -> str:
     if bad:
         raise ClaudeError(bad)    # model=123 was a TypeError from Popen that ended the run
     exe = shutil.which("claude") or "claude"
-    argv = [exe, "-p", "--model", model]
-    _batch_guard(argv)
-    env = {**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1", "PYTHONIOENCODING": "utf-8"}
+    # The extractors' launch, not a bare `claude -p`: the worker is confined, but these calls are
+    # made out here by the broker, and started plainly they ran in the vault with its CLAUDE.md,
+    # every built-in tool and every MCP server the user's settings allow, on prompts that
+    # model-written code composes from vault text. So what the worker may not read or run, a
+    # prompt could ask claude to read or run for it (review, 2026-10-04). No tools, no MCP
+    # servers, no session file, and a directory outside the vault: see extract_notes.claude_argv.
+    global _LEGACY_CLI
+    if str(TOOLS) not in sys.path:
+        sys.path.insert(0, str(TOOLS))
+    from extract_notes import claude_argv, extract_cwd
+    env = {**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1", "PYTHONIOENCODING": "utf-8",
+           "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
     try:
-        p = subprocess.run(argv, input=prompt, capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", env=env,
-                           timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise ClaudeError(f"timed out after {timeout}s") from None
+        cwd = extract_cwd()
+    except (OSError, RuntimeError) as e:
+        raise ClaudeError(f"no directory outside the vault to run claude in ({e})") from None
+    for legacy in ([True] if _LEGACY_CLI else [False, True]):
+        argv = claude_argv(exe, model, legacy)
+        _batch_guard(argv)
+        try:
+            p = subprocess.run(argv, input=prompt, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", env=env, cwd=str(cwd),
+                               timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise ClaudeError(f"timed out after {timeout}s") from None
+        if legacy or p.returncode == 0 or "unknown option" not in (p.stderr or ""):
+            break
+        # A CLI older than --tools / --no-session-persistence: the deny list alone, said once.
+        if not _LEGACY_CLI:
+            print(f"rlm: this claude CLI rejects the strict flags ({(p.stderr or '').strip()[:120]}); "
+                  f"falling back to --disallowedTools only — update the CLI", file=sys.stderr)
+        _LEGACY_CLI = True
     if p.returncode != 0:
         raise ClaudeError(f"claude CLI failed rc={p.returncode}: {(p.stderr or '').strip()[:300]}")
     return (p.stdout or "").strip()

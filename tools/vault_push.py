@@ -78,9 +78,9 @@ LOCK_STALE_S = 15 * 60    # a lock older than this belongs to a dead run
 ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
 
 
-def git(*args, check: bool = False, timeout: int | None = None) -> subprocess.CompletedProcess:
+def git(*args, check: bool = False, timeout: int | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=str(VAULT), capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", check=check, env=ENV,
+                          encoding="utf-8", errors="replace", check=check, env=env or ENV,
                           timeout=timeout, creationflags=NO_WINDOW)
 
 
@@ -133,16 +133,47 @@ def guard_installed() -> bool:
     return hp.is_file() and (os.name == "nt" or os.access(hp, os.X_OK))
 
 
-def run_guards() -> tuple[bool, str]:
-    """The pre-commit hook's two scans, run directly. (ok, output). They read the whole index —
-    a superset of what `git commit -- <areas>` takes, so stricter than the hook, never looser."""
+def snapshot_index(paths: list[str]) -> tuple[dict, str]:
+    """(env, error): an environment whose index is a private snapshot of HEAD plus `paths` as they
+    are in the working tree now. With no hook, the scans read the index and `git commit -- <paths>`
+    then read those paths from the working tree again, so a note that changed while the scans ran
+    (two scans over a large vault take the better part of a minute, and the recorder writes after
+    every turn) was committed as it stood at the commit, unscanned (review, 2026-10-04). The scans
+    and the commit now share this one index: what is committed is what was scanned. It starts from
+    HEAD, not from the real index, so nothing staged by hand outside `paths` is in it."""
+    idx = git("rev-parse", "--git-path", "vault_push.index").stdout.strip()
+    if not idx:
+        return {}, "git rev-parse --git-path failed"
+    idx = Path(idx) if Path(idx).is_absolute() else VAULT / idx
+    idx.unlink(missing_ok=True)
+    env = {**ENV, "GIT_INDEX_FILE": str(idx)}
+    if git("rev-parse", "--verify", "-q", "HEAD").returncode == 0:      # not the first commit
+        r = git("read-tree", "HEAD", env=env)
+        if r.returncode != 0:
+            return env, f"read-tree: {r.stderr.strip()[:200]}"
+    r = git("add", "--", *paths, env=env)
+    return env, (f"add: {r.stderr.strip()[:200]}" if r.returncode != 0 else "")
+
+
+def drop_snapshot(env: dict) -> None:
+    for p in (env.get("GIT_INDEX_FILE"), (env.get("GIT_INDEX_FILE") or "") + ".lock"):
+        try:
+            if p:
+                Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def run_guards(env: dict | None = None) -> tuple[bool, str]:
+    """The pre-commit hook's two scans, run directly. (ok, output). They read the index `env`
+    names (snapshot_index), which is the one the commit is then made from."""
     out = []
     for s in ("scan_secrets.py", "scan_pii.py"):
         if not (TOOLS / s).is_file():
             return False, f"{s} is missing — refusing to commit unscanned"
         try:
             g = subprocess.run([sys.executable or "python", str(TOOLS / s)], cwd=str(VAULT), capture_output=True,
-                               text=True, encoding="utf-8", errors="replace", env=ENV, timeout=300,
+                               text=True, encoding="utf-8", errors="replace", env=env or ENV, timeout=300,
                                creationflags=NO_WINDOW)
         except subprocess.TimeoutExpired:
             return False, f"{s} timed out — refusing to commit unscanned"
@@ -393,11 +424,18 @@ def _run() -> int:
         # No hook on this clone means no guard at all, so run its scans here instead: a missing
         # setup line must cost a warning, never an unscanned push.
         hooked = guard_installed()
+        snap: dict = {}
         if not hooked:
             print("vault-push: the pre-commit guard is not installed on this clone (core.hooksPath is not "
                   "tools/githooks) — running its scans directly. Install once: git config core.hooksPath tools/githooks")
-            ok, out = run_guards()
+            snap, err = snapshot_index([*existing, *KEEP_OUT])
+            if err:
+                drop_snapshot(snap)
+                print(f"vault-push: could not snapshot the changes to scan — NOT committing ({err})")
+                return 1
+            ok, out = run_guards(snap)
             if not ok:
+                drop_snapshot(snap)
                 print("vault-push: BLOCKED by a commit guard — NOT committing or pushing. Staged for review:")
                 print("  " + "\n  ".join(out.splitlines()[-6:]))
                 return 1
@@ -418,10 +456,20 @@ def _run() -> int:
         # Commit ONLY the content areas this run changed. A bare `git commit` takes the whole
         # index, so anything someone had staged by hand (a half-finished tools/ edit) rode along
         # inside the automated commit (Codex review, 2026-09). `git commit -- <pathspec>` leaves
-        # everything else staged and out of this commit; the guards see the same temporary index.
+        # everything else staged and out of this commit; the hook sees the same temporary index.
         # Areas, not all existing dirs: a pathspec naming a dir git knows nothing about (an empty
         # Daily/) fails the whole commit.
-        c = git("commit", "-m", msg, "--", *sorted(areas), *KEEP_OUT)
+        if hooked:
+            c = git("commit", "-m", msg, "--", *sorted(areas), *KEEP_OUT)
+        else:
+            # No hook: commit the snapshot the scans just read, as it is. A pathspec here would
+            # read the working tree again. Then the real index takes the committed version of
+            # those paths, as `git commit -- <paths>` leaves it: an edit made since stays in the
+            # working tree, unstaged, for the next run to scan.
+            c = git("commit", "-m", msg, env=snap)
+            drop_snapshot(snap)
+            if c.returncode == 0:
+                git("reset", "-q", "--", *sorted(areas), *KEEP_OUT)
         if c.returncode != 0:
             out = (c.stdout + c.stderr).strip()
             if "pii-scan" in out or "secret-scan" in out or "blocked" in out.lower():
