@@ -24,6 +24,14 @@ Two redaction sources:
 
 The deny list itself lists sensitive strings, so it is git-ignored and never syncs.
 
+A deny list that is there but cannot be read (no permission, a directory or a dangling link in its
+place) is not "no deny list": load_deny_report raises DenyListUnreadable. scan_pii blocks the
+commit on it and the CLI below exits 2. redact_text, which the recorder calls for every note it
+writes and which must not fail, still masks credentials, leaves deny-listed terms as they are,
+and says so once per process on stderr. The note is then written with those terms in it; what
+keeps them out of git is scan_pii, which blocks every commit while the list cannot be read and
+blocks a commit holding the terms once it can.
+
 Public API:
     redact_text(s) -> (scrubbed, n_hits)
 Idempotent: replacements leave a [redacted] marker the rules don't re-match, so the
@@ -147,21 +155,35 @@ def deny_lines(raw: bytes) -> tuple[list[str], list[tuple[int, str]]]:
     return [t for _, t in lines], problems
 
 
+class DenyListUnreadable(Exception):
+    """The deny list is there and could not be read. The message is why: the name of the error or
+    a few fixed words, never anything from the list."""
+
+
 _warned = False
 
 
 def load_deny_report() -> tuple[list[str], list[re.Pattern], list[tuple[int, str]]]:
     """(literals, regexes, problems): problems name the lines that were not clean UTF-8 or UTF-16,
-    by number only. scan_pii refuses to call a commit clean over any of them."""
+    by number only. scan_pii refuses to call a commit clean over any of them.
+
+    Raises DenyListUnreadable when the list is there and cannot be read. That returned no terms
+    and no problems, exactly what no deny list returns, so scan_pii exited 0 having checked
+    nothing and redaction left every term in place, both silently (review, 2026-10-02)."""
     global _warned
     literals: list[str] = []
     regexes: list[re.Pattern] = []
-    if not DENY_FILE.exists():
-        return literals, regexes, []
     try:
-        texts, problems = deny_lines(DENY_FILE.read_bytes())
-    except OSError:
+        raw = DENY_FILE.read_bytes()
+    except FileNotFoundError:
+        # No list is a setup this supports. A link whose target is gone is a list that was set up
+        # and is now out of reach (a volume not mounted), so it counts as unreadable.
+        if DENY_FILE.is_symlink():
+            raise DenyListUnreadable("a link to a file that is not there") from None
         return literals, regexes, []
+    except OSError as e:        # no permission, a directory in its place, a failing disk
+        raise DenyListUnreadable(type(e).__name__) from None
+    texts, problems = deny_lines(raw)
     if problems and not _warned:
         _warned = True
         sys.stderr.write(f"redact: {DENY_FILE.name} is not clean UTF-8 (line(s) "
@@ -232,8 +254,12 @@ def _mark(m: re.Match) -> str:
     return m.group(0)[:m.start("v") - s0] + MARK + m.group(0)[m.end("v") - s0:]
 
 
+_unreadable_said = False
+
+
 def redact_text(s: str) -> tuple[str, int]:
     """Return (redacted_text, number_of_substitutions)."""
+    global _unreadable_said
     if not s:
         return s, 0
     s, n = _PEM_BLOCK.subn(MARK, s)
@@ -243,7 +269,13 @@ def redact_text(s: str) -> tuple[str, int]:
     try:
         literals, regexes = _load_deny()
     except Exception as e:   # keep the credential pass above: the caller would write the raw text
-        sys.stderr.write(f"redact: deny list unreadable ({type(e).__name__}); credentials only\n")
+        # The recorder calls this for every title and note of a turn, so once per process. It
+        # cannot refuse to record, and what it writes is not in git yet: scan_pii stops it there.
+        if not _unreadable_said:
+            _unreadable_said = True
+            why = str(e) if isinstance(e, DenyListUnreadable) else type(e).__name__
+            sys.stderr.write(f"redact: {DENY_FILE.name} cannot be read ({why}): credentials were redacted,"
+                             " deny-listed terms were NOT. scan_pii blocks every commit until it can be read.\n")
         return s, n
     for rx in regexes:
         s, k = rx.subn(MARK, s)
@@ -270,6 +302,14 @@ if __name__ == "__main__":
     except Exception:
         pass
     raw = sys.stdin.buffer.read()
+    # A deny list that cannot be read left every term in the output under "0 substitution(s)" and
+    # exit 0 (review, 2026-10-02). redact_text only warns, for the recorder's sake; this refuses.
+    try:
+        load_deny_report()
+    except DenyListUnreadable as e:
+        sys.stderr.write(f"redact: {DENY_FILE.name} is there but cannot be read ({e}), so no deny-listed term"
+                         " would be redacted. Nothing was written.\n")
+        sys.exit(2)
     # A file with a BOM is redacted in its own encoding and written back in it, BOM included:
     # PowerShell 5.1 `>` writes UTF-16, which read as UTF-8 matched no term and came out with
     # "0 substitution(s)" and exit 0 (review, 2026-10-02). UTF-32 before UTF-16: same lead bytes.
