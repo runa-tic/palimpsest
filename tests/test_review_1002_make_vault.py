@@ -15,11 +15,16 @@ push_remote prompt; one rlm trajectory turned rlm checks red.
    _util.TOOLS_STATE fails here.
 6. So does a copy of tools/ kept untracked inside another repository, whose .gitignore knows
    nothing of it: git lists its files, TOOLS_STATE still drops the state.
-7. From this checkout's own tools/, the copy is exactly the files git does not ignore.
+7. An untracked nested repository in tools/ (a developer's scratch clone), which git lists as one
+   "sub/" entry, is copied as a tree without its .git, not opened as a file.
+8. From this checkout's own tools/, the copy is exactly the files git does not ignore.
 
-These test tests/_util.py itself, which PALIMPSEST_TOOLS does not swap: next to _util.py from
-60b4bff, checks 1, 5 and 6 fail, and 7 does too once this checkout's tools/ holds any state.
-2 to 4 guard the new copy against dropping tools; they pass on the old whole-directory copy.
+These test tests/_util.py itself, which PALIMPSEST_TOOLS does not swap. Next to a _util.py from
+before copy_tools existed, when make_vault copied tools/ whole, checks 1, 5 and 6 fail and 2 to 4
+pass (those three guard the new copy against dropping tools, and the whole-directory copy dropped
+none); the script then dies with AttributeError at check 7, which calls _util.copy_tools, so check 8
+never runs and no summary line is printed. Next to a _util.py whose copy_tools still copied every
+entry git lists as a file, only check 7 fails (on macOS, with IsADirectoryError).
 """
 import hashlib, json, os, shutil, stat, subprocess, sys
 from pathlib import Path
