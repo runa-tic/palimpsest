@@ -13,9 +13,9 @@ filesystem or a line-ending setting does to it. The byte layouts are built here 
 encodings those programs are understood to use; none of the programs was run.
 
  1. scan_secrets.readings is the one list of readings: clean UTF-8, with or without a UTF-8 BOM,
-    has one, the reading it always had; a UTF-16 BOM, a NUL or a byte that is not UTF-8 adds
-    UTF-8 without its NULs, cp1251, cp1252, cp866 and UTF-16 in both byte orders from byte 0 and
-    from byte 1.
+    has one, the reading it always had; a UTF-16 BOM, a NUL or other control byte, or a byte that
+    is not UTF-8 adds UTF-8 without its NULs, cp1251, cp1252, cp866 and UTF-16 in both byte orders
+    from byte 0 and from byte 1. Tab, LF, FF and CR are not such control bytes.
  2. scan_secrets blocks a key, and reports it once, in: (a) UTF-8 appended to a UTF-16 file,
     (a') cp866 appended to one, (c) UTF-16 appended to a UTF-8 file with a BOM, (d) UTF-16 after
     an odd number of bytes. In (b), cp1251 appended to a UTF-8 note, it blocked before too (a key
@@ -45,6 +45,18 @@ encodings those programs are understood to use; none of the programs was run.
 
 Set PALIMPSEST_TOOLS to a tools/ tree from before these fixes to see the checks fail; 2(b), the
 passing halves of 5 and 8, the key half of 6 and the second half of 7 held before and pass there.
+
+Review of 2026-10-04, of the fixes above: what the other readings still let through, and what
+they cost or broke.
+
+10. UTF-16 text with no NUL byte (a Cyrillic word with no space or line end: bytes like 21 04 38
+    04, valid UTF-8 made of control bytes) is blocked by scan_pii and refused by the redact CLI,
+    in either byte order, alone, and after an ASCII line. So is the name in a UTF-32 section, and
+    in a UTF-16 file with U+0000 between its letters.
+
+With the tools from before the 2026-10-04 fixes the checks from 10 on fail, and so do the parts
+of 1 and 7 added with them, except the checks that say "held before" in their names: those passed
+there too, and are here so that they keep passing.
 """
 import codecs, hashlib, json, os, subprocess, sys
 import _util
@@ -123,7 +135,11 @@ def main() -> int:
                "a NUL": b"note\x00\n",
                "a byte that is not UTF-8": "заметка\n".encode("cp1251"),
                "UTF-8 BOM and a NUL": codecs.BOM_UTF8 + b"note\x00\n",
-               "UTF-8 BOM and a stray byte": codecs.BOM_UTF8 + b"note\xff\n"}
+               "UTF-8 BOM and a stray byte": codecs.BOM_UTF8 + b"note\xff\n",
+               "clean, with a tab, a form feed and CRLF": b"a\tb\x0c\r\nc\n",
+               "a control byte": b"note\x04\n",
+               "ESC": b"note \x1b[31mred\x1b[0m\n",
+               "DEL": b"note\x7f\n"}
     driver = (_util.UTF8_STDIO + "import json, sys\nsys.path.insert(0, 'tools')\nimport scan_secrets as s\n"
               "out = {}\n"
               "for name, raw in json.load(sys.stdin).items():\n"
@@ -140,7 +156,9 @@ def main() -> int:
             "a NUL": ["", *legacy, *utf16],
             "a byte that is not UTF-8": ["", *legacy, *utf16],
             "UTF-8 BOM and a NUL": ["", "utf-8", *legacy, *utf16],
-            "UTF-8 BOM and a stray byte": ["", *legacy, *utf16]}
+            "UTF-8 BOM and a stray byte": ["", *legacy, *utf16],
+            "clean, with a tab, a form feed and CRLF": [""],
+            "a control byte": ["", *legacy, *utf16], "ESC": ["", *legacy, *utf16], "DEL": ["", *legacy, *utf16]}
     try:
         got = json.loads(r.stdout)
     except ValueError:
@@ -345,6 +363,40 @@ def main() -> int:
          "9. ...and the commit guard keeps that note out of git: while the list is unreadable, and for"
          " the term once it is readable",
          f"{blocked.returncode} {blocked.stdout[-200:]}\n{after.returncode} {after.stdout[-300:]}")
+
+    # 10. UTF-16 with no NUL byte in it: valid UTF-8, made of control bytes
+    for name, data in (
+            ("an ASCII line, then the name in UTF-16 LE", bytes.fromhex("6e6f74650a" "2104380434043e0440043e0432043004")),
+            ("an ASCII line, then the name in UTF-16 BE", bytes.fromhex("6e6f74650a" "042104380434043e0440043e04320430")),
+            ("the name alone, in UTF-16 LE", u16(TERM)),
+            ("two names joined by U+2014, in UTF-16 LE", u16(f"{TERM}\u2014{TERM}"))):
+        v = vault(f"{TERM}\n".encode("utf-8"))
+        stage(v, b"10 Notes/n.md", data)
+        rp = run(v, "scan_pii.py")
+        try:
+            valid = b"\x00" not in data and TERM not in data.decode("utf-8")
+        except UnicodeDecodeError:
+            valid = False
+        c.ok(valid and rp.returncode == 1 and "x Си******" in rp.stdout and TERM not in rp.stdout,
+             f"10. scan_pii blocks {name}: bytes that are valid UTF-8 with no NUL",
+             f"valid UTF-8 without NUL: {valid} rc={rp.returncode} {rp.stdout[-300:]}")
+        rc, out, err = cli(v, data)
+        c.ok(rc == 2 and out == b"" and "Nothing was written" in err and "substitution" not in err,
+             f"10. ...and the redact CLI exits 2 and writes nothing for {name}",
+             f"rc={rc} out={out[:60]!r} err={err[-300:]}")
+    for name, data, through_cli in (
+            ("in UTF-32 with no BOM", TERM.encode("utf-32-le"), False),
+            ("in UTF-32 after a UTF-8 line", b"note\n" + TERM.encode("utf-32-le"), False),
+            ("in UTF-32 after UTF-16 text", BOM16 + u16("notes\r\n") + TERM.encode("utf-32-le"), True),
+            ("in a UTF-16 file with U+0000 between its letters",
+             BOM16 + u16("notes\r\n" + "\x00".join(TERM) + "\r\n"), True)):
+        v = vault(f"{TERM}\n".encode("utf-8"))
+        stage(v, b"10 Notes/n.md", data)
+        rp = run(v, "scan_pii.py")
+        rc, out, err = cli(v, data) if through_cli else (2, b"", "")
+        c.ok(rp.returncode == 1 and "1x Си******" in rp.stdout and rc == 2 and out == b"",
+             f"10. scan_pii blocks the name {name}" + (", and the redact CLI writes nothing" if through_cli else ""),
+             f"rc={rp.returncode} {rp.stdout[-300:]} | cli rc={rc} out={out[:60]!r} err={err[-200:]}")
 
     return c.done()
 
