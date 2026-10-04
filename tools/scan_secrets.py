@@ -10,8 +10,9 @@ Severity:
   WARN  policy-sensitive but often public (EVM addresses, generic secret-ish
         assignments) -> reported only, never blocks (unless --strict)
 
-A file that is clean UTF-8 is read as that. Any other file (a UTF-16 or UTF-32 BOM, a NUL, a byte
-that is not UTF-8) is read every likely way, and a finding in any reading counts: see readings.
+A file that is clean UTF-8 is read as that. Any other file (a UTF-16 or UTF-32 BOM, a NUL or other
+control byte, a byte that is not UTF-8) is read every likely way, and a finding in any reading
+counts: see readings.
 
 Usage (from vault root):
   python tools/scan_secrets.py            # scan staged changes (used by pre-commit)
@@ -190,13 +191,19 @@ LEGACY = ("cp1251", "cp1252", "cp866")
 # From byte 1 as well: text appended after an odd number of bytes is UTF-16 that no reading from
 # byte 0 pairs up, in either byte order.
 _UTF16 = (("utf-16-le", 0), ("utf-16-le", 1), ("utf-16-be", 0), ("utf-16-be", 1))
+# Control bytes that clean text does not hold: every C0 control but tab, LF, FF and CR, and DEL.
+# UTF-16 text without a space or a line end has no NUL in it, and is valid UTF-8 made of these:
+# a Cyrillic word is bytes like 21 04 38 04, so it passed as clean UTF-8 and got the one reading
+# that cannot show it (review, 2026-10-04). Greek, Hebrew and Arabic have 03, 05 and 06 there.
+# ESC is one of them: a transcript with terminal colour codes in it is read every way too.
+_CONTROL = bytes(c for c in range(32) if c not in b"\t\n\f\r") + b"\x7f"
 
 
 def clean_text(raw: bytes, enc: str) -> str | None:
-    """`raw` as text when it has one reading, else None: strictly valid UTF-8 with no NUL, in a
-    file that starts with a UTF-8 BOM or with none. `enc` is what _encoding says of that file's
-    first bytes; raw may be a later part of it."""
-    if enc not in ("utf-8", "utf-8-sig") or b"\x00" in raw:
+    """`raw` as text when it has one reading, else None: strictly valid UTF-8 with none of the
+    control bytes in _CONTROL (NUL among them), in a file that starts with a UTF-8 BOM or with
+    none. `enc` is what _encoding says of that file's first bytes; raw may be a later part of it."""
+    if enc not in ("utf-8", "utf-8-sig") or len(raw.translate(None, _CONTROL)) != len(raw):
         return None
     try:
         return raw.decode(enc)
@@ -206,9 +213,10 @@ def clean_text(raw: bytes, enc: str) -> str | None:
 
 def other_readings(raw: bytes, enc: str):
     """(codec, first byte, text) for every reading of `raw` besides the usual one of a file whose
-    first bytes say `enc`: UTF-8 with the NULs removed, each LEGACY code page, and UTF-16 in both
-    byte orders from byte 0 and from byte 1. errors="replace" throughout, so no reading fails, and
-    one at a time: held together, the readings of a 5MB file came to between 54 and 88MB."""
+    first bytes say `enc`: UTF-8, each LEGACY code page, and UTF-16 in both byte orders from byte 0
+    and from byte 1; UTF-8 and UTF-16 with the NULs removed. errors="replace" throughout, so no
+    reading fails, and one at a time: held together, the readings of a 5MB file came to between 54
+    and 88MB."""
     # The usual reading of a file with no BOM already is this one; with a UTF-8 BOM it differs
     # only by the NULs that reading keeps.
     if enc != "utf-8" and (enc != "utf-8-sig" or b"\x00" in raw):
@@ -216,7 +224,10 @@ def other_readings(raw: bytes, enc: str):
     for cp in LEGACY:
         yield cp, 0, raw.decode(cp, errors="replace")
     for codec, off in _UTF16:
-        yield codec, off, raw[off:].decode(codec, errors="replace")
+        # Without the NULs here too: a Cyrillic word in a UTF-32 section, or in a UTF-16 file
+        # with U+0000 between its letters, reads as that word with a NUL after each letter, which
+        # no term matches (review, 2026-10-04). A path has no NUL byte, so its readings are as before.
+        yield codec, off, raw[off:].decode(codec, errors="replace").replace("\x00", "")
 
 
 def reading_name(codec: str, off: int) -> str:
@@ -227,9 +238,10 @@ def reading_name(codec: str, off: int) -> str:
 def readings(raw: bytes):
     """(how, text) for every reading of `raw` to check, the usual one (decode) first with how "".
 
-    Clean input has that one reading, as before: strictly valid UTF-8 with no NUL, with or without a
-    UTF-8 BOM. Anything else (a UTF-16 or UTF-32 BOM, a NUL, a byte that is not UTF-8) is followed
-    by other_readings: up to nine scans instead of one, for every UTF-16 file and every binary."""
+    Clean input has that one reading, as before: strictly valid UTF-8 with no control byte of
+    _CONTROL, with or without a UTF-8 BOM. Anything else (a UTF-16 or UTF-32 BOM, a NUL or other
+    control byte, a byte that is not UTF-8) is followed by other_readings: up to nine scans
+    instead of one, for every UTF-16 file and every binary."""
     enc = _encoding(raw)
     text = clean_text(raw, enc)
     if text is not None:
