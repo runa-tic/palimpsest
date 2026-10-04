@@ -32,6 +32,21 @@ With a weekly_review.py without that guard the first two fail: the appended one 
 exit 0, and the whole one, though left alone with exit 1, is reported as having no generated block.
 The re-save is the control and passes there too.
 
+What weekly_review reads (review of 2026-10-04). That guard refuses a review with a NUL in it, and
+weekly_review could write one itself: it read the daily and project notes as UTF-8 with
+errors="ignore", which keeps the NULs of UTF-16 appended to a note.
+
+8. A latest daily note, or a project note, that ends in an open task with no final newline and
+   then has UTF-16 appended to it (PowerShell 5.1's `>>`) gives a review with no NUL and no other
+   control character in it, the task included up to where the UTF-16 begins, and the next run
+   exits 0 and refreshes it. The same for a project whose status line is followed by UTF-16, and
+   for Cyrillic appended in UTF-16, whose bytes hold no NUL. A latest daily note that is UTF-16 as
+   a whole (PowerShell 5.1's `>`) contributes its open tasks.
+
+With a weekly_review.py that reads those notes as UTF-8 with errors="ignore", every check of 8
+fails: the second run exits 1 on the NUL the first wrote (for the Cyrillic one the review holds
+control characters), and the UTF-16 note contributes nothing.
+
 Test vault builders. Six of them, in five scripts, still copied TOOLS_SRC with shutil.copytree
 after make_vault had stopped, so a used clone's gitignored state (its deny list, sync receipt and
 logs/) reached their vaults.
@@ -204,6 +219,51 @@ def check_weekly(c: Checks) -> None:
          f"exit={r.returncode} {(r.stdout + r.stderr)[-300:]!r}")
 
 
+def check_weekly_reads(c: Checks) -> None:
+    appended = "- [ ] appended\r\n".encode("utf-16-le")
+    today = f"Daily/{date.today().isoformat()}.md"
+    for label, rel, body, want in (
+            # The fixture of the review: the latest daily note, no newline after its last task.
+            ("a daily note ending in an open task, then UTF-16 appended",
+             today, "# Sunday\n\n- [ ] call the bank".encode("utf-8") + appended, "- [ ] call the bank"),
+            ("a project note ending in an open task, then UTF-16 appended",
+             "20 Projects/Garden.md", "---\nstatus: active\n---\n- [ ] buy seeds".encode("utf-8") + appended,
+             "- [ ] buy seeds"),
+            ("a project note whose status line runs into UTF-16",
+             "20 Projects/Garden.md", "---\nstatus: paused".encode("utf-8") + " for now\r\n".encode("utf-16-le"),
+             "[[Garden]] — `paused`"),
+            # No NUL here: Cyrillic in UTF-16 is bytes like 3F 04, and there is no line end after it.
+            ("a daily note ending in an open task, then Cyrillic in UTF-16 with no line end",
+             today, "- [ ] call the bank".encode("utf-8") + "позвонить".encode("utf-16-le"), "- [ ] call the bank")):
+        v = make_vault()
+        note = v / rel
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_bytes(body)
+        r1 = run(v, "weekly_review.py")
+        weekly = sorted((v / "Reviews" / "Weekly").glob("*.md"))
+        first = weekly[0].read_bytes() if weekly else b"\x00"
+        control = sorted({b for b in first if b < 32 and b not in b"\r\n"})
+        r2 = run(v, "weekly_review.py")
+        c.ok(r1.returncode == 0 and not control and want.encode("utf-8") in first and r2.returncode == 0
+             and "Wrote" in r2.stdout and not r2.stderr.strip(),
+             f"{label}: the review holds no NUL or other control character, quotes it up to the UTF-16, "
+             "and the next run refreshes the review",
+             f"run 1: exit={r1.returncode} control bytes={control} quoted={want.encode('utf-8') in first} | "
+             f"run 2: exit={r2.returncode} {(r2.stdout + r2.stderr)[-300:]!r}")
+
+    v = make_vault()
+    note = v / today
+    note.parent.mkdir(parents=True)
+    note.write_bytes(codecs.BOM_UTF16_LE + NOTE.replace("\n", "\r\n").encode("utf-16-le"))
+    r = run(v, "weekly_review.py")
+    weekly = sorted((v / "Reviews" / "Weekly").glob("*.md"))
+    text = weekly[0].read_bytes().decode("utf-8", errors="replace") if weekly else ""
+    c.ok(r.returncode == 0 and f"{PASSPORT}  <sub>" in text and f"{PLUMBER}  <sub>" in text and "Open loops (2)" in text
+         and "done already" not in text,
+         "a latest daily note that is UTF-16 as a whole contributes its two open tasks to Open loops",
+         f"exit={r.returncode} {text[-400:]!r} {r.stderr[-200:]!r}")
+
+
 def copies_of_tools_src(source: str) -> list[int]:
     """The lines of every copytree(...) call with TOOLS_SRC among its arguments."""
     out = []
@@ -239,6 +299,7 @@ def main() -> int:
     check_sync_logs_notice(c)
     check_clean_note(c)
     check_weekly(c)
+    check_weekly_reads(c)
     check_builders(c)
     return c.done()
 
