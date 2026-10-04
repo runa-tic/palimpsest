@@ -82,8 +82,11 @@ they cost or broke.
     name before the boundary and with the boundary inside the name.
     15 and 16 held before: no check built such a file, so two changes to the run code went
     unnoticed by the suite (other readings for a file's last run only; no carry between runs).
+17. In another reading scan_secrets applies its credential rules alone: a note that is not clean
+    only because of a terminal colour code prints no WARN for a short Cyrillic value and passes
+    --strict. It passed before the other readings existed and fails with the tools in between.
 
-With the tools from before the 2026-10-04 fixes the checks from 10 on fail, and so do the parts
+With the tools from before the 2026-10-04 fixes the checks from 10 to 16 fail, and so do the parts
 of 1 and 7 added with them, except the checks that say "held before" in their names: those passed
 there too, and are here so that they keep passing.
 """

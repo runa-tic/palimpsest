@@ -55,7 +55,7 @@ probe declared in palimpsest.json, so no host, service or path is baked into thi
 
 The value recorded is the command's first line of output, decoded strictly as the probe's
 "encoding" (default "utf-8"; a command that prints in a Windows code page needs it named, e.g.
-"cp1251"). Output that does not decode records "probe error (output not <encoding>)" with its
+"cp1251"). A first line that does not decode records "probe error (output not <encoding>)" with its
 first bytes in hex in the detail, never a string with U+FFFD in place of each undecodable letter:
 under that, two different values of one length compared equal. A non-zero exit records "unreachable
 (rc N)" — but only if this machine's own network is up: a TLS handshake with one of the

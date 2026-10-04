@@ -11,8 +11,8 @@ Severity:
         assignments) -> reported only, never blocks (unless --strict)
 
 A file that is clean UTF-8 is read as that. Any other file (a UTF-16 or UTF-32 BOM, a NUL or other
-control byte, a byte that is not UTF-8) is read every likely way, and a finding in any reading
-counts: see readings. A file that starts as a known binary format does is read the one way.
+control byte, a byte that is not UTF-8) is read every likely way, and a credential (HIGH) finding
+in any reading counts; the WARN rules apply to the usual reading alone: see readings. A file that starts as a known binary format does is read the one way.
 
 Usage (from vault root):
   python tools/scan_secrets.py            # scan staged changes (used by pre-commit)
@@ -209,8 +209,8 @@ def decode(raw: bytes) -> str:
 # console's code page, and a program that appends "ANSI" text writes the system code page. The one
 # reading decode() picks then turns the other part into replacement characters, CJK or private-use
 # characters, and a key or a deny-listed name in it was committed as clean by both guards (review,
-# 2026-10-02). So bytes that are not clean UTF-8 are read every likely way, and a finding in any
-# reading counts.
+# 2026-10-02). So bytes that are not clean UTF-8 are read every likely way, and a credential found
+# in any reading counts (the WARN rules stay with the usual reading: see scan_blocks).
 #
 # LEGACY: the code pages such a writer uses when it does not write Unicode. cp1251 and cp866 are the
 # ANSI and the console (OEM) code page of a Russian Windows, cp1252 the ANSI one of a Western
@@ -741,7 +741,8 @@ def walk_files(root: Path):
 def scan_blocks(blocks, allow: list[str]) -> list[tuple]:
     """scan_text over text_blocks, with line numbers counted from the start of the file, as
     (severity, label, line, masked, how). The usual reading reports every match, as before. Another
-    reading reports a finding only where no reading has reported that rule on the same bytes, and
+    reading reports HIGH findings alone, and one only where no reading has reported that rule on
+    the same bytes, and
     not where the allow list exempts the usual reading's line (see _Run.covered): the same key
     shows in most readings of a UTF-16 file, and would otherwise be listed up to nine times."""
     out = []

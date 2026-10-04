@@ -1,6 +1,6 @@
 """A daily note with one line that is not UTF-8 no longer breaks the opener, the briefing or the review.
 
-PowerShell 5.1 appends in the ANSI code page (cp1251 on a Russian Windows), and one such line in a
+PowerShell 5.1's Add-Content appends in the ANSI code page (cp1251 on a Russian Windows), and one such line in a
 daily note made the SessionStart hook exit 1 with no output, and briefing.py raise before creating
 today's note, on every later day too (recent_daily() kept picking the broken note). weekly_review
 had the same strict read of a file the user writes in (review, 2026-10-02).
@@ -11,6 +11,8 @@ had the same strict read of a file the user writes in (review, 2026-10-02).
 3. A cp1251 line in today's note: the refresh rewrites the block and keeps every byte outside it
    (no U+FFFD written over the user's line), and the opener still shows the briefing.
 4. weekly_review refreshes its block and keeps a cp1251 line in the Reflection byte for byte.
+5. briefing says on stderr when today's note has a line that is not UTF-8, and leaves a note that
+   is UTF-16 as a whole, or has UTF-16 appended, byte-identical with exit 1 and a line saying why.
 
 Each of 1-4 has a check that fails with PALIMPSEST_TOOLS pointed at tools/ from 60b4bff (the
 byte checks alone pass there, because the old tools raised before writing anything).

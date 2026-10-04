@@ -12,8 +12,8 @@
    and broke) it fails, exit 1 with what to reinstall, rather than keep the sync green while the
    index goes stale. An importer (ask.py) still gets the ImportError.
 
-Checks 2, 3 (the mid-line `--`) and 4 (the exit-0 checks) fail with PALIMPSEST_TOOLS pointed at
-tools/ from 60b4bff.
+Checks 2, 3 (the mid-line `--`) and 4 (the exit-0 checks and the exit-1 check) fail with
+PALIMPSEST_TOOLS pointed at tools/ from 60b4bff.
 
 No model, no network: sentence_transformers and torch are stubs on PYTHONPATH (a hashed
 bag-of-words encoder), and "no numpy" is a numpy package on PYTHONPATH whose import raises.

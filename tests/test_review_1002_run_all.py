@@ -4,6 +4,7 @@
 2. a path names its script: `tests/test_x.py` runs test_x.py, as `test_x` does
 3. -h / --help prints the usage and runs nothing
 4. a timed-out script says TIMEOUT and shows what it wrote by then, stdout and stderr
+4b. two failed scripts exit 1, not 2, which is the usage error's code
 5. a runner started with -X utf8 reads each child in the code page the child writes
 
 Each check runs the real run_all.main() over a dir of fake test scripts, so the suite is not

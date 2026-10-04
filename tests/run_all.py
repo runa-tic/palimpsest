@@ -9,8 +9,8 @@ One command, no bash or `timeout` needed (macOS has no `timeout`); run on macOS 
 
 Each script runs in its own process under a 10-minute limit; the exit code is 0 when every script
 passed and 1 when any failed or timed out (the summary line says how many). A word that matches no
-script is a usage error: exit 2, and nothing runs. A script's full output is printed only when it
-fails.
+script is a usage error: exit 2, and nothing runs. The last 40 lines of a script's output are
+printed only when it fails.
 """
 from __future__ import annotations
 import codecs, locale, subprocess, sys, time
