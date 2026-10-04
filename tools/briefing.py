@@ -43,13 +43,52 @@ def recent_daily(before: str) -> Path | None:
                    if re.match(r"\d{4}-\d{2}-\d{2}", p.stem) and p.stem < before)
     return cands[-1] if cands else None
 
+# The encoding a BOM names, for a note that is only read. UTF-32 first: UTF-32 LE's BOM begins with
+# UTF-16 LE's.
+READ_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
+             (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"), (codecs.BOM_UTF8, "utf-8-sig"))
+OPEN_TASK = re.compile(r"^\s*- \[ \] (.+)$", re.M)
+
+
+def tasks_in(text: str) -> list[str]:
+    # Line ends as a text-mode read gives them (bytes.decode keeps the CRs, and a task would roll
+    # over ending in "\r"), and a NUL ends a line too: a task that carried one into today's note
+    # made every later refresh of it exit 1, because main() refuses to rewrite a note with a NUL.
+    return OPEN_TASK.findall(re.sub(r"\r\n?|\x00", "\n", text))
+
+
 def open_tasks(p: Path | None) -> list[str]:
     if not p or not p.exists():
         return []
-    # errors="replace": one line saved in the ANSI code page (PowerShell 5.1) made this raise before
-    # today's note existed, and recent_daily() picked the same note again every later day (review,
-    # 2026-10-02). The note is only read here; a task with such bytes rolls over showing U+FFFD.
-    return re.findall(r"^\s*- \[ \] (.+)$", p.read_text(encoding="utf-8", errors="replace"), re.M)
+    # The note is only read here, so it is decoded in the encoding its BOM names. A note written by
+    # PowerShell 5.1's `>` is UTF-16: read as UTF-8 with errors="replace" it rolled over no task,
+    # with exit 0 and nothing printed, where the strict read before that had crashed and the sync
+    # had shown it (review, 2026-10-02).
+    raw = p.read_bytes()
+    enc = next((e for bom, e in READ_BOMS if raw.startswith(bom)), "utf-8")
+    try:
+        text = raw.decode(enc)
+        whole = "\x00" not in text
+    except UnicodeDecodeError:
+        # Never a raise: one line saved in the ANSI code page made this fail before today's note
+        # existed, and recent_daily() picked the same note again every later day. A task with such
+        # bytes rolls over showing U+FFFD.
+        text, whole = raw.decode(enc, errors="replace"), False
+    tasks = tasks_in(text)
+    if enc in ("utf-16", "utf-32"):
+        # A BOM says how the note began, not what was appended to it: UTF-8 added by a shell's
+        # `echo >>` reads as CJK in UTF-16, and without an error when it is an even number of
+        # bytes. Read as UTF-8, only such text holds a task.
+        appended = tasks_in(raw.decode("utf-8", errors="replace"))
+        tasks, whole = tasks + appended, whole and not appended
+    if not whole:
+        # Exit 0 all the same: nothing is written to this note, and today's briefing is still due.
+        # stderr is what the sync logs.
+        name = {"utf-8-sig": "UTF-8"}.get(enc, enc.upper())
+        print(f"briefing: Daily/{p.name} is not all {name} text (a line in an ANSI code page, or text "
+              "appended in another encoding by a shell's `>>`?); a task in such a line rolls over "
+              "garbled or not at all. Re-save it as UTF-8.", file=sys.stderr)
+    return tasks
 
 def active_projects() -> list[str]:
     out = []
