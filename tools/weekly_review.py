@@ -8,7 +8,7 @@ are kept. Wired into sync.py.
 Usage (from vault root):  python tools/weekly_review.py
 """
 from __future__ import annotations
-import sys, re, time, subprocess
+import codecs, sys, re, time, subprocess
 from pathlib import Path
 from datetime import date, timedelta
 
@@ -141,10 +141,21 @@ def main():
     # The file invites writing (Reflection) and ticking (Open loops), and this runs every day. It
     # used to rebuild the whole file, so each night's sync erased what was written that week.
     # Only the marked block is regenerated now, and a loop ticked in it stays ticked.
+    raw = out.read_bytes() if out.exists() else None
+    if raw is not None and (raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) or b"\x00" in raw):
+        # UTF-16, whole (PowerShell 5.1's `>`) or appended to the Reflection (its `>>`):
+        # surrogateescape keeps its bytes, but the text-mode round trip below reads its
+        # "\r\x00\n\x00" as two line ends and writes two back ("\n\x00\n\x00" on macOS), so the
+        # refresh rewrote the user's lines with exit 0 and nothing said (review, 2026-10-02). The
+        # same guard as briefing.py's for today's note: the file stays byte-identical and the run
+        # fails where the sync shows it.
+        print(f"{out.relative_to(VAULT)}: not UTF-8 text (UTF-16, as PowerShell 5.1's `>` and `>>` "
+              "write?) — left untouched; re-save it as UTF-8 to refresh it.", file=sys.stderr)
+        return 1
     # surrogateescape here and on the write below: the Reflection is the user's, a line of it saved
     # in another code page made this read raise, and "replace" would write U+FFFD over it (review,
     # 2026-10-02). The escaped bytes go back out exactly as they came in.
-    old = out.read_text(encoding="utf-8", errors="surrogateescape") if out.exists() else None
+    old = out.read_text(encoding="utf-8", errors="surrogateescape") if raw is not None else None
     pair = PAIR.search(old) if old is not None else None
     if old is not None and not pair:
         if START in old or END in old:
