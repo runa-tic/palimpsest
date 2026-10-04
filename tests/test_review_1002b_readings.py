@@ -68,6 +68,10 @@ they cost or broke.
     every other (a UTF-16 file whose first line starts with the entry, or has U+041E after it; a
     UTF-8 note with a stray byte and a Cyrillic entry). A key on another line of such a file is
     still blocked.
+14. A deny list with a `re:` pattern that does not compile blocks scan_pii, by line number and
+    without the pattern, and the redact CLI exits 2 with nothing written, as it does for a list
+    with a cp866 or KOI8-R line (which blocked scan_pii before). The recorder goes on: it
+    redacts the terms it could read and says once what is wrong.
 
 With the tools from before the 2026-10-04 fixes the checks from 10 on fail, and so do the parts
 of 1 and 7 added with them, except the checks that say "held before" in their names: those passed
@@ -573,6 +577,34 @@ def main() -> int:
     c.ok(rs.returncode == 1 and rs.stdout.count("AWS access key id") == 1 and "(read as utf-8)" in rs.stdout,
          "13. ...and a key on another line of such a file, one only another reading shows, still blocks"
          " (held before)", f"rc={rs.returncode} {rs.stdout[-300:]}")
+
+    # 14. a deny list with a line that cannot be used as written
+    text = f"met {NAME} and {TERM} today\n".encode("utf-8")
+    bad_rx = bytes.fromhex("72653a205a6f72625b616e656b0a")          # "re: Zorb[anek" and a newline
+    for name, terms, held in (("a pattern that does not compile", bad_rx, False),
+                              ("a cp866 line", f"{TERM}\n".encode("cp866"), True),
+                              ("a KOI8-R line", f"{TERM}\n".encode("koi8-r"), True)):
+        v = vault(terms)
+        stage(v, b"10 Notes/n.md", text)
+        rp = run(v, "scan_pii.py")
+        said = rp.stdout + rp.stderr
+        c.ok(rp.returncode == 1 and "Commit blocked" in said and "line 1" in said and "Zorb" not in said
+             and TERM not in said and "Traceback" not in said,
+             f"14. scan_pii blocks the commit over a deny list with {name}, named by its line number"
+             + (" (held before)" if held else ""), f"rc={rp.returncode} {said[-400:]}")
+        rc, out, err = cli(v, text)
+        c.ok(rc == 2 and out == b"" and "line 1" in err and "Nothing was written" in err and "substitution" not in err
+             and "Zorb" not in err and TERM not in err and "Traceback" not in err,
+             f"14. the redact CLI exits 2 and writes nothing over a deny list with {name}",
+             f"rc={rc} out={out!r} err={err[-400:]}")
+    v = vault(bad_rx + f"{TERM}\n".encode("utf-8"))
+    got = ask(v, "import contextlib\nerr = io.StringIO()\nwith contextlib.redirect_stderr(err):\n"
+                 "    out = [redact.redact_text(data['text']) for _ in range(2)]\n"
+                 "print(json.dumps([out, err.getvalue()]))\n", {"text": f"met {NAME} and {TERM} today"})
+    c.ok(got is not None and got[0] == [[f"met {NAME} and {MARK} today", 1]] * 2
+         and got[1].count("does not compile") == 1 and "line(s) 1" in got[1] and "Zorb" not in got[1],
+         "14. the recorder's redact_text goes on over such a pattern: it redacts the terms it could read"
+         " and says once, by line number, that the pattern does not compile", repr(got)[:500])
 
     return c.done()
 

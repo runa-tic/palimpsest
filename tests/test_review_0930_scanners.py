@@ -35,6 +35,11 @@ Second review of fix/scanners (2026-09-30):
 20. The staged scan spawns a fixed number of git processes, not one or two per staged file.
 21. A UTF-16 deny list with CJK or emoji lines is clean and does not re-read them as bytes (which
     over-redacted every transcript), while UTF-8 appended after a UTF-16 section is still read.
+
+Since the review of 2026-10-04 the redact CLI refuses a deny list with a line that is not clean
+UTF-8 or UTF-16 (exit 2, nothing written), as scan_pii blocks a commit over it: 5, 13 and 21 hold
+the CLI to that for such a list, and check that every term is still read through redact_text, the
+recorder's path, which goes on with every likely reading.
 """
 import os, shutil, subprocess, sys, tempfile
 from pathlib import Path
@@ -72,6 +77,21 @@ def redact(v, text: str) -> str:
     ok = ok and (out == text if len(parts) == 1 else
                  text.endswith(parts[-1]) and len(text) - len(parts[-1]) >= at)
     return out if ok else f"{text}\nSTDERR output is not a redaction of the input: {out!r}"
+
+
+def recorded(v, text: str) -> str:
+    """`text` as the recorder's redact_text leaves it in vault v. For a deny list that is not clean
+    UTF-8 or UTF-16: the CLI refuses that list, and redact_text reads its lines every likely way."""
+    driver = (_util.UTF8_STDIO + "import sys\nsys.path.insert(0, 'tools')\nimport redact\n"
+              "sys.stdout.buffer.write(redact.redact_text(sys.stdin.buffer.read().decode('utf-8'))[0].encode('utf-8'))\n")
+    r = subprocess.run([sys.executable, "-c", driver], cwd=v, input=text.encode("utf-8"), capture_output=True)
+    return r.stdout.decode("utf-8", "replace") + ("\nSTDERR " + r.stderr.decode("utf-8", "replace") if r.returncode else "")
+
+
+def refuses(v) -> bool:
+    """Whether the CLI refuses vault v's deny list: exit 2, nothing written, the reason on stderr."""
+    out = redact(v, "nothing listed here\n")
+    return out.startswith("\nSTDERR ") and "Nothing was written" in out
 
 
 def scan_path(v, text: str, name: str = "10 Notes/probe.md"):
@@ -133,8 +153,9 @@ def main() -> int:
                        ("cp1251", ["Сидорова"]), ("cp1252", ["Müller"])):
         vd = pii_vault("\n".join(terms).encode(enc))
         sample = " ".join(t.replace("re:qq\\d{4}", "qq1234") for t in terms)
-        out = redact(vd, f"{sample} and {AKIA}\n")
-        if any(t in out for t in sample.split()) or AKIA in out or "STDERR" in out:
+        unclean = enc in ("cp1251", "cp1252")       # the CLI refuses such a list; the recorder reads it
+        out = (recorded if unclean else redact)(vd, f"{sample} and {AKIA}\n")
+        if any(t in out for t in sample.split()) or AKIA in out or "STDERR" in out or refuses(vd) != unclean:
             bad.append((enc, out))
         write(vd, "10 Notes/n.md", f"met {terms[0]} today\n")
         git(vd, "add", "10 Notes/n.md")
@@ -227,9 +248,9 @@ def main() -> int:
     }
     for name, (raw, terms, unclean) in mixed.items():
         vd = pii_vault(raw)
-        out = redact(vd, " / ".join(f"met {t} today" for t in terms) + "\n")
+        out = (recorded if unclean else redact)(vd, " / ".join(f"met {t} today" for t in terms) + "\n")
         missed = [t for t in terms if t in out]
-        if missed or "STDERR" in out:
+        if missed or "STDERR" in out or refuses(vd) != unclean:
             bad.append((name, "redact", missed, out[-200:]))
         for t in terms:           # every term blocks on its own, in a note written by hand
             write(vd, "10 Notes/n.md", f"met {t} today\n")
@@ -370,9 +391,10 @@ def main() -> int:
     git(v21, "add", "-A")
     p21 = run(v21, "scan_pii.py")
     v21b = pii_vault("Zorbanek\r\n".encode("utf-16") + "Kowalski\nNowakowski\n".encode())
-    out_b = redact(v21b, "met Zorbanek, Kowalski and Nowakowski\n")
+    out_b = recorded(v21b, "met Zorbanek, Kowalski and Nowakowski\n")
     c.ok(prose in out and not any(t in out for t in ("Zorbanek", "李", "🦊fox")) and p21.returncode == 0
-         and not any(t in out_b for t in ("Zorbanek", "Kowalski", "Nowakowski")),
+         and not any(t in out_b for t in ("Zorbanek", "Kowalski", "Nowakowski")) and "met [redacted]," in out_b
+         and refuses(v21b),
          "a UTF-16 deny list with CJK or emoji lines is clean and does not over-redact; appended UTF-8 is read",
          f"{out}\n{p21.returncode} {p21.stdout[-300:]}\n{out_b}")
 
