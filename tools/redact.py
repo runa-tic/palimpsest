@@ -28,9 +28,12 @@ A deny list that is there but cannot be read (no permission, a directory or a da
 place) is not "no deny list": load_deny_report raises DenyListUnreadable. scan_pii blocks the
 commit on it and the CLI below exits 2. redact_text, which the recorder calls for every note it
 writes and which must not fail, still masks credentials, leaves deny-listed terms as they are,
-and says so once per process on stderr. The note is then written with those terms in it; what
-keeps them out of git is scan_pii, which blocks every commit while the list cannot be read and
-blocks a commit holding the terms once it can.
+and says so once per process on stderr. The note is then written with those terms in it, in its
+text and in its file name. While the list cannot be read, scan_pii blocks every commit. Once it
+can, scan_pii blocks a commit of that note for a BLOCK-tier term only (is_hard below). A
+WARN-tier term (a short name, a short number) in the note's text or name only warns, so that note
+can be committed with it. Recording the session again redacts the text, but the note keeps the
+file name it was first given, term included, until it is renamed by hand.
 
 A deny list with a line that cannot be used as written (not clean UTF-8 or UTF-16, or a `re:`
 pattern that does not compile) is reported by load_deny_report as a problem. scan_pii blocks the
@@ -325,7 +328,8 @@ def redact_text(s: str) -> tuple[str, int]:
         literals, regexes = _load_deny()
     except Exception as e:   # keep the credential pass above: the caller would write the raw text
         # The recorder calls this for every title and note of a turn, so once per process. It
-        # cannot refuse to record, and what it writes is not in git yet: scan_pii stops it there.
+        # cannot refuse to record, and what it writes is not in git yet: scan_pii blocks every
+        # commit while the list cannot be read. What it blocks afterwards is in the docstring above.
         if not _unreadable_said:
             _unreadable_said = True
             why = str(e) if isinstance(e, DenyListUnreadable) else type(e).__name__

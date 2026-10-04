@@ -41,7 +41,11 @@ encodings those programs are understood to use; none of the programs was run.
     nothing written. No deny list at all still passes.
  9. The recorder still records with such a list: hook_record exits 0, the note is written with
     its credentials masked, and stderr says once that deny-listed terms were not redacted. The
-    commit guard then blocks that note, while the list is unreadable and after it is readable.
+    commit guard then blocks that note while the list is unreadable, and after it is readable for
+    a BLOCK-tier term. Not for a WARN-tier one (a name of two to four letters): a note recorded
+    with one in its text and its name only warns, and it keeps that name when the session is
+    recorded again with the list readable. That is the limit redact.py's docstring states, and
+    the last check of 9 holds it to those words.
 
 Set PALIMPSEST_TOOLS to a tools/ tree from before these fixes to see the checks fail; 2(b), the
 passing halves of 5 and 8, the key half of 6 and the second half of 7 held before and pass there.
@@ -72,6 +76,12 @@ they cost or broke.
     without the pattern, and the redact CLI exits 2 with nothing written, as it does for a list
     with a cp866 or KOI8-R line (which blocked scan_pii before). The recorder goes on: it
     redacts the terms it could read and says once what is wrong.
+15. A file between 1MB and 5MB whose one part that is not clean is in its first run is blocked
+    by both guards, the key at its line.
+16. A name on a line that straddles a run boundary is blocked, under 5MB and over it, with the
+    name before the boundary and with the boundary inside the name.
+    15 and 16 held before: no check built such a file, so two changes to the run code went
+    unnoticed by the suite (other readings for a file's last run only; no carry between runs).
 
 With the tools from before the 2026-10-04 fixes the checks from 10 on fail, and so do the parts
 of 1 and 7 added with them, except the checks that say "held before" in their names: those passed
@@ -86,6 +96,7 @@ NAME = "Zorbanek"                                       # synthetic, Latin
 MAIL = "zq.private@example.invalid"                     # synthetic address
 AKIA = "AKIA" + "QZXW" * 4                              # synthetic, AWS-shaped
 AWS_SECRET = "Ab3dEf9hIj" * 4                           # synthetic, 40 characters
+SHORT = "Ivar"                                          # synthetic, a WARN-tier term: four letters
 MARK = "[redacted]"
 BOM16 = codecs.BOM_UTF16_LE
 SECRET = f"key {AKIA} mail {MAIL} met {TERM}"            # what each mixed file holds, once
@@ -138,6 +149,29 @@ def ask(v, code: str, data: dict | None = None):
         return json.loads(r.stdout)
     except ValueError:
         return None
+
+
+def record(v, sid: str, who: str):
+    """Record a two-message session that names `who`, through the Stop hook's own script."""
+    rows = [{"type": "user", "timestamp": "2026-10-02T10:00:00Z",
+             "message": {"role": "user", "content": f"call with {who} about the quarter"}},
+            {"type": "assistant", "timestamp": "2026-10-02T10:00:05Z",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": f"noted, {who}"}]}}]
+    tr = write(v, f"fixture/projects/-home-me-proj/{sid}-0000-0000-0000-000000000000.jsonl",
+               "\n".join(json.dumps(row) for row in rows) + "\n")
+    env = {k: val for k, val in os.environ.items() if k != "CLAUDE_BRAIN_NO_HOOK"}
+    return subprocess.run([sys.executable, str(v / "tools" / "hook_record.py")], cwd=v, env=env, capture_output=True,
+                          input=json.dumps({"transcript_path": str(tr)}, ensure_ascii=False).encode("utf-8"))
+
+
+def lines_to(n: int, start: int = 0) -> bytes:
+    """Whole lines of clean UTF-8, exactly n bytes of them, numbered from `start`."""
+    out, size, i = [], 0, start
+    while n - size > 200:
+        out.append(f"line {i:06d} of a transcript, clean UTF-8 with кириллица\n".encode("utf-8"))
+        size += len(out[-1])
+        i += 1
+    return b"".join(out) + b"x" * (n - size - 1) + b"\n"
 
 
 # How a file of each known binary format begins: a minimal head, built here. None is a real file.
@@ -445,6 +479,28 @@ def main() -> int:
          " the term once it is readable",
          f"{blocked.returncode} {blocked.stdout[-200:]}\n{after.returncode} {after.stdout[-300:]}")
 
+    # The limit of that, as redact.py's docstring states it: a WARN-tier term only warns, and the
+    # note keeps the name it was first given.
+    v = vault()
+    deny = v / "tools" / ".redact_terms.txt"
+    deny.mkdir()
+    record(v, "aaaa1111", SHORT)
+    deny.rmdir()
+    deny.write_bytes(f"{SHORT}\n".encode("utf-8"))
+    convs = v / "40 Resources" / "Claude Conversations"
+    first = sorted(p.name for p in convs.rglob("*(aaaa1111).md"))
+    git(v, "add", "--", "40 Resources")
+    warned = run(v, "scan_pii.py")
+    record(v, "aaaa1111", SHORT)
+    again = sorted(convs.rglob("*(aaaa1111).md"))
+    text = again[0].read_text(encoding="utf-8") if len(again) == 1 else SHORT
+    c.ok(len(first) == 1 and SHORT in first[0] and warned.returncode == 0 and "[path]" in warned.stdout
+         and warned.stdout.count("pii-scan WARN") == 2 and [p.name for p in again] == first and SHORT not in text,
+         "9. ...but not for a WARN-tier term: a note recorded with a short name in its text and its file"
+         " name only warns, and recorded again with the list readable it keeps that file name (held"
+         " before: the limit as redact.py states it)",
+         f"first={first} rc={warned.returncode} {warned.stdout[-400:]} again={[p.name for p in again]}")
+
     # 10. UTF-16 with no NUL byte in it: valid UTF-8, made of control bytes
     for name, data in (
             ("an ASCII line, then the name in UTF-16 LE", bytes.fromhex("6e6f74650a" "2104380434043e0440043e0432043004")),
@@ -605,6 +661,38 @@ def main() -> int:
          and got[1].count("does not compile") == 1 and "line(s) 1" in got[1] and "Zorb" not in got[1],
          "14. the recorder's redact_text goes on over such a pattern: it redacts the terms it could read"
          " and says once, by line number, that the pattern does not compile", repr(got)[:500])
+
+    # 15. between 1MB and 5MB, with the one part that is not clean in the first run
+    first = lines_to(300_000)
+    mid = (first + f"met {TERM} today, aws_secret_access_key=".encode("cp1251") + b"\xa0" + AWS_SECRET.encode() + b"\r\n"
+           + lines_to(2 * chunk + 200_000, start=10_000))
+    at = first.count(b"\n") + 1
+    v = vault(f"{TERM}\n".encode("utf-8"))
+    stage(v, b"40 Resources/mid.txt", mid)
+    rs, rp = run(v, "scan_secrets.py"), run(v, "scan_pii.py")
+    c.ok(2 * chunk < len(mid) < max_bytes and len(first) < chunk and rp.returncode == 1
+         and "mid.txt: 1x Си******  (read as cp1251)" in rp.stdout and rs.returncode == 1
+         and f"mid.txt:{at}  " in rs.stdout and rs.stdout.count("AWS secret access key") == 1
+         and "(read as cp1251)" in rs.stdout and AWS_SECRET[3:-3] not in rs.stdout,
+         "15. a file between 1MB and 5MB whose cp1251 line is in its first run, not its last, is blocked"
+         " by both guards, the key at its line (held before)",
+         f"{len(mid)} bytes; {rs.returncode} {rs.stdout[-300:]}\n{rp.returncode} {rp.stdout[-300:]}")
+
+    # 16. a line across a run boundary: the bytes after a run's last line end belong to the next run
+    line = f"met {TERM} today, ".encode("cp1251") + b"y" * 300 + b"\r\n"     # the name is bytes 4 to 11
+    for size, boundary, total in (("under 5MB", chunk, 2 * chunk + 300_000),
+                                  ("over 5MB", head + chunk, max_bytes + 300_000)):
+        for where, before in (("the name before the boundary", 40), ("the boundary inside the name", 8)):
+            data = lines_to(boundary - before) + line
+            data += lines_to(total - len(data), start=50_000)
+            v = vault(f"{TERM}\n".encode("utf-8"))
+            stage(v, b"40 Resources/across.txt", data)
+            rp = run(v, "scan_pii.py")
+            starts = data.find(line)
+            c.ok(len(data) == total and starts == boundary - before and rp.returncode == 1
+                 and "across.txt: 1x Си******  (read as cp1251)" in rp.stdout,
+                 f"16. a cp1251 name on a line across a run boundary is blocked, {size}, {where} (held before)",
+                 f"{len(data)} bytes, line at {starts}, boundary {boundary}; rc={rp.returncode} {rp.stdout[-300:]}")
 
     return c.done()
 
