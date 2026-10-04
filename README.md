@@ -191,7 +191,7 @@ and `extract_skills.py` distil, `link_notes.py` wires, `maintenance.py`, `dedupe
 `state.py` keeps the State ledger, `vault_push.py` backs up and syncs machines,
 and `redact.py`, `scan_secrets.py` and `scan_pii.py`
 keep private strings out of git — in file names as well as contents. `tests/` holds
-regression scripts that need only the standard library and git, plus numpy for the three that drive embed.py (test_embed_pick_model.py, test_review_0930_retrieval.py, test_review_1002_embed.py; test_ask_rerank.py runs only with sentence-transformers installed and skips otherwise); each builds throwaway git vaults and never calls claude. `templates/` holds the note schemas. `CLAUDE.md` is
+regression scripts that need only the standard library and git, plus numpy for the three that drive embed.py (test_embed_pick_model.py, test_review_0930_retrieval.py, test_review_1002_embed.py; test_ask_rerank.py runs only with sentence-transformers installed and skips otherwise); most build throwaway git vaults, and none calls claude. `templates/` holds the note schemas. `CLAUDE.md` is
 the operating protocol (with `SETUP.md` holding the one-time onboarding, so it costs no
 context once configured) — the part that makes an agent behave like the vault's brain rather
 than a chatbot standing next to it.
@@ -201,10 +201,13 @@ than a chatbot standing next to it.
 Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
 assume that. This release was tested on macOS and on Windows 11 (Python 3.13, Git for Windows,
 `core.autocrlf=true`, a Cyrillic user profile); it has not been run on Linux. On Windows the
-suite passed both as installed — UTF-8 mode off, a cp1251 code page, no Unix tools on PATH — and
-from Git Bash, the reranker test included, and from a fresh clone the git hook blocked a staged
-key and the ledger, a lexical `ask.py` and the line-ending repair ran. Those Windows runs predate
-the fixes from the 2026-10-02 review, which have run on macOS and under a cp1251 emulation only.
+suite (38 scripts) passed both as installed — UTF-8 mode off, a cp1251 code page, no Unix tools on
+PATH — and from Git Bash, the reranker test included. That run was of the commit before this
+section was last edited, an edit that changed only documentation and comments. From a fresh clone
+there the git hook blocked a staged key; the commit guards blocked a deny-listed name appended to
+a UTF-16 note in UTF-8 (by `cmd`) and to a UTF-8 note in cp1251 (by PowerShell's `Add-Content`),
+and the cp866 reading with hand-built bytes only; and the ledger, a lexical `ask.py`, the redact
+CLI and the line-ending repair ran.
 Some checks cannot run on Windows: the symlink checks skip unless the account may create symlinks
 (admin or Developer Mode; no account tested had that right), the lock-takeover check skips because
 Windows will not delete a file its holder keeps open, one TLS check skips without the `openssl`
@@ -224,20 +227,25 @@ without its NULs, cp1251, cp1252, cp866, and UTF-16 in both byte orders from byt
 there only credentials and block-tier deny entries count (a `re:` pattern, an address, a 7+ digit
 number, an alphabetic term of 5+ characters), not short terms or the scanner's warn-tier rules.
 Not read: KOI8-R, ISO-8859-5, Mac Cyrillic/Roman, cp437/cp850/cp855 and other code pages;
-code-page or BOM-less UTF-16 text whose bytes happen to be valid UTF-8 (much CJK); a value split
-across two encodings, or a UTF-16 value directly followed by U+0000; a UTF-16 character with byte
-0x0A in it where a 1 MB run ends. A file that starts as a known binary format does (PNG, JPEG,
+code-page or BOM-less UTF-16 text whose bytes happen to be valid UTF-8 (a short CJK string can
+be; about a quarter of CJK characters are, alone); a value split across two encodings; in BOM-less
+UTF-16, a listed number or a token directly followed by U+0000 and then a digit or letter; a
+UTF-16 character with byte 0x0A in it where a 1 MB run ends. A file that starts as a known binary format does (PNG, JPEG,
 GIF, PDF, ZIP, MP4 and the like; the list is in `scan_secrets.py`) is read the usual way alone,
 as is a text file that begins with such a header; binary formats not on the list (TIFF, WebM, old
 Office files) are read every way, about six times slower, and a long Cyrillic term can match
-their bytes by chance. Two false alarms are possible in UTF-16 text: a listed number matches
-digits followed by a Cyrillic letter whose low byte is a digit, and a line the allow list exempts
-also exempts other readings of the same bytes. One control character (a terminal colour code)
-makes a note not clean, which costs time: about twice as long for the guards, several times for
-the redact CLI. A deny list that cannot be read, or holds a line that is not clean UTF-8 or
+their bytes by chance. One false alarm is possible in UTF-16 text: a listed number matches digits
+followed by a Cyrillic letter whose low byte is a digit. And one miss: a line the allow list
+exempts is exempt in every reading of its bytes, so a key that only another reading shows there
+passes. One control character (a terminal colour code) makes a note not clean, which costs time:
+the run of up to 1 MB that holds it is read eight more ways, so the guards take up to about six
+times as long on a 1 MB note (half a second to a second more on a laptop) and about twice as long
+on a 5 MB one; the redact CLI re-reads all of its output and takes three to seven times as long. A deny list that cannot be read, or holds a line that is not clean UTF-8 or
 UTF-16 or a pattern that does not compile, blocks every commit and the redact CLI; the session
 recorder still writes its note (credentials masked; with an unreadable list, terms not) and says
-so on stderr. A FIFO in the deny list's place hangs all three.
+so on stderr. A FIFO in the deny list's place hangs all three. `briefing.py` and
+`weekly_review.py` read a task line up to where UTF-16 begins: after a UTF-16 append to a line
+with no line end, one stray character can stay on the task and the appended task is not listed.
 
 A declared probe whose command prints in a Windows code page needs that code page named as its
 `"encoding"` (default UTF-8; the format is in `tools/state.py`): a first line that does not decode

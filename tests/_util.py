@@ -1,12 +1,15 @@
 """Helpers for the regression scripts in tests/: throwaway git vaults with a copy of tools/.
 
-Every test builds its own vault under a temp dir, copies the tools it exercises, and runs them
-as subprocesses exactly as the git hook or the sync would. Nothing touches the real vault, and
+Most tests build their own vault under a temp dir, copy the tools they exercise, and run them
+as subprocesses exactly as the git hook or the sync would (a few call a tool in-process or need
+no vault). Nothing touches the real vault, and
 claude is never called: where a tool calls it, a stub on PATH answers. One script uses the
 network: test_ask_rerank, with sentence-transformers installed, loads the real embedding and
 rerank models from Hugging Face (about 1 GB on a first run; with HF_HUB_OFFLINE=1 it reads only
 the local cache). Every other connection goes to localhost or to an address that must not answer
-(TEST-NET-1, and 1.1.1.1 from inside the macOS sandbox). Set PALIMPSEST_TOOLS to test a different
+(TEST-NET-1, and 1.1.1.1 from inside the macOS sandbox). Where a commit message says "the cp1251 emulation" it means macOS with
+LC_ALL=ru_RU.CP1251, PYTHONUTF8 and PYTHONIOENCODING unset, and TMPDIR under a Cyrillic-named
+directory: a stock Russian Windows's encodings, without its process semantics. Set PALIMPSEST_TOOLS to test a different
 tools/ tree (e.g. a checkout of main, to confirm a test fails before its fix).
 
 Every vault and dir made here (make_vault, tempdir) is removed when the test script exits; set

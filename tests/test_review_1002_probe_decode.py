@@ -11,6 +11,7 @@ were the same string and a service going down was logged as "1 unchanged".
 4. the default stays UTF-8: UTF-8 output with no key records the text (a guard; it held before).
 5. a failed run's detail is decoded in the declared encoding too.
 6. an "encoding" with no codec is a probe error on this machine.
+7. only the recorded first line has to decode: later lines in a code page are not an error.
 
 Each probe is a `python -c` that writes fixed bytes to its binary stdout, so what it prints does not
 depend on the locale or code page the test runs under. Every probe has "network": false: no check
