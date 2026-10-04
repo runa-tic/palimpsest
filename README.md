@@ -218,6 +218,20 @@ console windows, any real `claude` call (an `ask.py` answer, extraction, `rlm.py
 real vault (the reranker test builds one over a handful of notes), and a live push and pull
 between two machines (the suite's two-machine checks use local remotes).
 
+The commit guards (`scan_secrets.py`, `scan_pii.py`) and the redact CLI read clean UTF-8 (valid,
+no control byte but tab, form feed and line ends) one way. Anything else is also read as UTF-8
+without its NULs, cp1251, cp1252, cp866, and UTF-16 in both byte orders from byte 0 and byte 1;
+there only credentials and block-tier deny entries count (a `re:` pattern, an address, a 7+ digit
+number, an alphabetic term of 5+ characters), not short terms. Not read: KOI8-R, ISO-8859-5, Mac
+Cyrillic/Roman, cp437/cp850/cp855 and other code pages; code-page text whose bytes are valid
+UTF-8; a value split across two encodings; a UTF-16 character with byte 0x0A in it where a 1 MB
+run ends. A file that starts as a known binary format does (PNG, JPEG, GIF, PDF, ZIP, MP4 and the
+like; the list is in `scan_secrets.py`) is read the usual way alone. A deny list that cannot be
+read, or holds a line that is not clean UTF-8 or UTF-16 or a pattern that does not compile, blocks
+every commit and the redact CLI; the session recorder still writes its note (credentials masked;
+with an unreadable list, terms not) and says so on stderr. A FIFO in the deny list's place hangs
+all three.
+
 A declared probe whose command prints in a Windows code page needs that code page named as its
 `"encoding"` (default UTF-8; the format is in `tools/state.py`): a first line that does not decode
 is recorded as a probe error, not as a garbled value. A vault cloned before `.gitattributes` pinned
