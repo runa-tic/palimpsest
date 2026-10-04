@@ -32,6 +32,10 @@ and says so once per process on stderr. The note is then written with those term
 keeps them out of git is scan_pii, which blocks every commit while the list cannot be read and
 blocks a commit holding the terms once it can.
 
+A deny list with a line that cannot be used as written (not clean UTF-8 or UTF-16, or a `re:`
+pattern that does not compile) is reported by load_deny_report as a problem. scan_pii blocks the
+commit on any, and the CLI exits 2; redact_text goes on with what it could read and says so once.
+
 Public API:
     redact_text(s) -> (scrubbed, n_hits)
 Idempotent: replacements leave a [redacted] marker the rules don't re-match, so the
@@ -133,15 +137,14 @@ def _utf16_lines(bom: bytes, chunk: bytes, first: int, lines: list, problems: li
     return first + len(parts) - 1
 
 
-def deny_lines(raw: bytes) -> tuple[list[str], list[tuple[int, str]]]:
-    """The deny list's lines, whatever Windows saved or appended it as, and (line number, what was
-    wrong) for every line that was not clean UTF-8 or UTF-16. Never returns a value in a problem."""
+def _numbered_lines(raw: bytes) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """deny_lines, each line with its number: a line read more than one way comes once per reading."""
     lines: list[tuple[int, str]] = []
     problems: list[tuple[int, str]] = []
     for bom, enc in _BOMS:
         if raw.startswith(bom):
             text = raw.decode(enc, errors="replace")
-            return text.splitlines(), ([(1, "undecodable bytes")] if "\ufffd" in text else [])
+            return list(enumerate(text.splitlines(), 1)), ([(1, "undecodable bytes")] if "\ufffd" in text else [])
     line = 1
     starts = [(m.start(), m.group(0)) for m in _UTF16_START.finditer(raw)]
     # A byte section runs to the first UTF-16 BOM; a UTF-16 section runs to the next BOM.
@@ -152,6 +155,13 @@ def deny_lines(raw: bytes) -> tuple[list[str], list[tuple[int, str]]]:
     for k, (at, bom) in enumerate(starts):
         end = starts[k + 1][0] if k + 1 < len(starts) else len(raw)
         line = _utf16_lines(bom, raw[at + 2:end], line, lines, problems)
+    return lines, problems
+
+
+def deny_lines(raw: bytes) -> tuple[list[str], list[tuple[int, str]]]:
+    """The deny list's lines, whatever Windows saved or appended it as, and (line number, what was
+    wrong) for every line that was not clean UTF-8 or UTF-16. Never returns a value in a problem."""
+    lines, problems = _numbered_lines(raw)
     return [t for _, t in lines], problems
 
 
@@ -161,11 +171,15 @@ class DenyListUnreadable(Exception):
 
 
 _warned = False
+# What a problem says of a `re:` line whose pattern does not compile. Every other problem is a line
+# that is not clean UTF-8 or UTF-16.
+BAD_PATTERN = "a re: pattern that does not compile"
 
 
 def load_deny_report() -> tuple[list[str], list[re.Pattern], list[tuple[int, str]]]:
     """(literals, regexes, problems): problems name the lines that were not clean UTF-8 or UTF-16,
-    by number only. scan_pii refuses to call a commit clean over any of them.
+    or hold a pattern that does not compile (BAD_PATTERN), by number only. scan_pii refuses to
+    call a commit clean over any of them, and the CLI refuses to redact.
 
     Raises DenyListUnreadable when the list is there and cannot be read. That returned no terms
     and no problems, exactly what no deny list returns, so scan_pii exited 0 having checked
@@ -183,13 +197,9 @@ def load_deny_report() -> tuple[list[str], list[re.Pattern], list[tuple[int, str
         return literals, regexes, []
     except OSError as e:        # no permission, a directory in its place, a failing disk
         raise DenyListUnreadable(type(e).__name__) from None
-    texts, problems = deny_lines(raw)
-    if problems and not _warned:
-        _warned = True
-        sys.stderr.write(f"redact: {DENY_FILE.name} is not clean UTF-8 (line(s) "
-                         f"{', '.join(str(i) for i, _ in problems)}); those lines are read in every"
-                         " likely codepage. Re-save it as UTF-8.\n")
-    for line in texts:
+    lines, problems = _numbered_lines(raw)
+    unclean = [i for i, _ in problems]
+    for i, line in lines:
         # NULs: stray bytes of a UTF-16 newline; U+FEFF: a BOM that is not at a section start.
         line = line.replace("\x00", "").replace("\ufeff", "").strip()
         if not line or line.startswith("#"):
@@ -199,10 +209,25 @@ def load_deny_report() -> tuple[list[str], list[re.Pattern], list[tuple[int, str
             if pat and pat not in (r.pattern for r in regexes):
                 try:
                     regexes.append(re.compile(pat, re.I))
-                except re.error:
-                    pass  # a bad pattern shouldn't break the whole pass
+                except Exception:
+                    # A bad pattern still does not break the pass, but it is no longer dropped
+                    # without a word: a list whose pattern did not compile let scan_pii exit 0
+                    # with nothing printed and the CLI print the text back with "0
+                    # substitution(s)", as if nothing had been listed (review, 2026-10-04).
+                    if (i, BAD_PATTERN) not in problems:
+                        problems.append((i, BAD_PATTERN))
         elif line not in literals:
             literals.append(line)
+    if problems and not _warned:
+        _warned = True
+        if unclean:
+            sys.stderr.write(f"redact: {DENY_FILE.name} is not clean UTF-8 (line(s) "
+                             f"{', '.join(str(i) for i in unclean)}); those lines are read in every"
+                             " likely codepage. Re-save it as UTF-8.\n")
+        if len(problems) > len(unclean):
+            sys.stderr.write(f"redact: {DENY_FILE.name} has a re: pattern that does not compile (line(s) "
+                             f"{', '.join(str(i) for i, what in problems if what == BAD_PATTERN)});"
+                             " nothing is redacted for it. Correct or remove it.\n")
     return literals, regexes, problems
 
 
@@ -334,11 +359,24 @@ if __name__ == "__main__":
     raw = sys.stdin.buffer.read()
     # A deny list that cannot be read left every term in the output under "0 substitution(s)" and
     # exit 0 (review, 2026-10-02). redact_text only warns, for the recorder's sake; this refuses.
+    _warned = True              # the refusal below says it, with the lines
     try:
-        load_deny_report()
+        problems = load_deny_report()[2]
     except DenyListUnreadable as e:
         sys.stderr.write(f"redact: {DENY_FILE.name} is there but cannot be read ({e}), so no deny-listed term"
                          " would be redacted. Nothing was written.\n")
+        sys.exit(2)
+    if problems:
+        # The same for a list with a line that cannot be used as written. A line in cp866 or
+        # KOI8-R is read as cp1251 and cp1252, which is some other word, and a pattern that does
+        # not compile matches nothing: scan_pii blocked on the first and the CLI printed the term
+        # back with exit 0 on both (review, 2026-10-04). Which of the lines are read right cannot
+        # be known, so any problem refuses. Numbers and fixed words, never a value.
+        sys.stderr.write(f"redact: {DENY_FILE.name} cannot be used as it is ("
+                         + "; ".join(f"line {i}: {what}" for i, what in problems)
+                         + "), so a term on it may not be redacted. Save it as UTF-8 with every line"
+                         " reading as it should, and correct or remove a pattern that does not compile."
+                         " Nothing was written.\n")
         sys.exit(2)
     # A file with a BOM is redacted in its own encoding and written back in it, BOM included:
     # PowerShell 5.1 `>` writes UTF-16, which read as UTF-8 matched no term and came out with

@@ -19,7 +19,8 @@ Two tiers, matching the secret scanner's block/warn split:
 The deny list is read line by line in whatever Windows saved or appended it as (UTF-8, UTF-16,
 cp1251/cp1252). A line that is not clean UTF-8 or UTF-16 is checked in every likely reading, AND
 the commit is blocked until the file is re-saved as UTF-8: which codepage it is cannot be known,
-so a clean result over it would be a guess.
+so a clean result over it would be a guess. A `re:` line whose pattern does not compile blocks
+the commit as well: nothing was checked against it.
 
 A deny list that is there but cannot be read (no permission, a directory or a dangling link in its
 place) blocks every commit too: nothing was checked against it, and until the review of 2026-10-02
@@ -42,7 +43,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redact import DENY_FILE, DenyListUnreadable, is_hard, load_deny_report, term_pattern   # the one parser/matcher
+from redact import BAD_PATTERN, DENY_FILE, DenyListUnreadable, is_hard, load_deny_report, term_pattern   # the one parser/matcher
 from scan_secrets import NotScanned, masked_path, path_bytes, path_readings, staged_blobs, staged_files
 
 
@@ -147,17 +148,28 @@ def main() -> int:
     for rel, m, n, note in warning:
         print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m} (numeric/short; not blocking){note}")
 
-    if problems:
+    unclean = [(i, what) for i, what in problems if what != BAD_PATTERN]
+    if unclean:
         # Fail closed, as the strict read did before (with a traceback): a line in a codepage that
         # is neither cp1251 nor cp1252 is a term this scan cannot match, and a one-line stderr
         # warning in an unattended push surfaces nowhere. Line numbers only, never the values.
         print("")
         print(f"Commit blocked by pii-scan — tools/{DENY_FILE.name} is not clean UTF-8:")
-        for i, what in problems:
+        for i, what in unclean:
             print(f"  line {i}: {what}")
         print("Every term was still checked in each likely reading" + (" (findings below)." if blocking else "."))
         print("Open it, check that the lines listed read correctly, save it as UTF-8 (Notepad:")
         print("Save As, Encoding UTF-8) and commit again.")
+    if len(unclean) < len(problems):
+        # Fail closed here too. A pattern that does not compile was dropped without a word, so a
+        # list holding only that line gave exit 0 with nothing printed, and whatever the pattern
+        # was written to catch was committed (review, 2026-10-04). The number, never the pattern.
+        print("")
+        print(f"Commit blocked by pii-scan — tools/{DENY_FILE.name} has a pattern that cannot be used:")
+        for i, what in problems:
+            if what == BAD_PATTERN:
+                print(f"  line {i}: {what}")
+        print("Nothing was checked against it. Correct the pattern, or remove the line, and commit again.")
     if not blocking:
         if problems or failed:
             return 1
