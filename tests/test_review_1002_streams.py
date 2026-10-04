@@ -15,8 +15,8 @@ backslashreplace to strict, and three entry points (config.py and both hooks) ha
 5. Every entry point but rlm_worker.py (whose stdout is the worker protocol), after its own stream
    setup: a line and a traceback carrying a non-ASCII path and a surrogate arrive whole, as UTF-8.
 """
-import codecs, json, os, re, shutil, subprocess, sys
-from _util import Checks, TOOLS_SRC, make_vault, tempdir, write
+import codecs, json, os, re, subprocess, sys
+from _util import Checks, copy_tools, make_vault, tempdir, write
 
 BROKEN = '{"version": 1,,}\n'
 NAME = "\u041f\u0440\u0438\u043c\u0435\u0440"          # "Пример": a word, not a user name
@@ -114,7 +114,9 @@ def check_hook_stderr(c: Checks):
 
 def check_traceback_path(c: Checks):
     v = tempdir() / f"{NAME} vault"
-    shutil.copytree(TOOLS_SRC, v / "tools", ignore=shutil.ignore_patterns("cache", "__pycache__", "*.pyc"))
+    # copy_tools, not a copytree of TOOLS_SRC: that carried a used clone's gitignored state (its
+    # deny list, sync receipt and logs/) into this vault (review, 2026-10-02).
+    copy_tools(v / "tools")
     write(v, "State/entities.json", '{"entities": {"box": {"hot": true},}}\n')     # trailing comma
     script = v / "tools" / "state.py"
     # cp1252 lacks Cyrillic: a tool writing in the code page would escape the path, or mangle it.

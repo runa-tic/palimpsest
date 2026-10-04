@@ -10,9 +10,9 @@ One check per confirmed finding; every check fails on ba54bc9.
 6. the Stop hook reads its JSON as UTF-8 whatever the console code page
 7. files outside the content folders are reported as not backed up
 """
-import json, os, shutil, subprocess, sys, tempfile
+import json, os, subprocess, sys, tempfile
 from pathlib import Path
-from _util import Checks, TOOLS_SRC, git, run, write
+from _util import Checks, git, run, write
 import _util
 
 MADE: list[Path] = []                                        # every temp dir, removed at the end
@@ -35,7 +35,9 @@ def clone(remote: Path, name: str) -> Path:
     MADE.append(d)
     subprocess.run(["git", "clone", "-q", str(remote), str(d)], check=True, capture_output=True)
     git(d, "config", "user.name", name); git(d, "config", "user.email", f"{name}@example.invalid")
-    shutil.copytree(TOOLS_SRC, d / "tools", dirs_exist_ok=True, ignore=shutil.ignore_patterns("cache", "__pycache__"))
+    # copy_tools, not a copytree of TOOLS_SRC: that carried a used clone's gitignored state (its
+    # deny list, sync receipt and logs/) into this vault (review, 2026-10-02).
+    _util.copy_tools(d / "tools")
     write(d, "palimpsest.json", json.dumps({"version": 1, "push_remote": "origin"}))
     return d
 
@@ -74,7 +76,7 @@ def main() -> int:
     # dir made here and state.py's stdio defaults to cp1251, on any OS.
     v = Path(tempfile.mkdtemp(prefix="palimpsest-")) / "Пользователь" / "vault"
     MADE.append(v.parent.parent)
-    shutil.copytree(TOOLS_SRC, v / "tools", ignore=shutil.ignore_patterns("cache", "__pycache__", "*.pyc"))
+    _util.copy_tools(v / "tools")                           # not a copytree: see clone()
     write(v, "State/entities.json", '{"entities": {"box": {"hot": true},}}\n')
     r = subprocess.run([sys.executable, "-c", _util.UTF8_STDIO + "import sys; sys.path.insert(0, 'tools'); "
                         "import hook_session_start as h; print(repr(h.state_block()))"],

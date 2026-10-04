@@ -32,14 +32,25 @@ With a weekly_review.py without that guard the first two fail: the appended one 
 exit 0, and the whole one, though left alone with exit 1, is reported as having no generated block.
 The re-save is the control and passes there too.
 
+Test vault builders. Six of them, in five scripts, still copied TOOLS_SRC with shutil.copytree
+after make_vault had stopped, so a used clone's gitignored state (its deny list, sync receipt and
+logs/) reached their vaults.
+
+7. No test script calls copytree on TOOLS_SRC: _util.copy_tools is how a tools/ tree reaches a
+   test vault.
+
+Check 7 reads the test scripts next to this one, which PALIMPSEST_TOOLS does not swap: copied into
+a tests/ where a builder still copies TOOLS_SRC whole, it fails and names each call.
+
 The notes are built byte by byte here, as the tools' comments describe PowerShell's output; no
 PowerShell is run, no model is called and nothing is sent anywhere.
 """
-import codecs, json, os, subprocess, sys
+import ast, codecs, json, os, subprocess, sys
 from datetime import date
 from pathlib import Path
 from _util import Checks, make_vault, run, write
 
+HERE = Path(__file__).resolve().parent
 PAST = "Daily/2001-02-03.md"               # any earlier date: recent_daily() takes the latest one
 PASSPORT, PLUMBER = "- [ ] renew the passport", "- [ ] позвонить сантехнику"
 NOTE = f"# Saturday\n\n{PASSPORT}\n- [x] done already\n{PLUMBER}\n"
@@ -193,6 +204,34 @@ def check_weekly(c: Checks) -> None:
          f"exit={r.returncode} {(r.stdout + r.stderr)[-300:]!r}")
 
 
+def copies_of_tools_src(source: str) -> list[int]:
+    """The lines of every copytree(...) call with TOOLS_SRC among its arguments."""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")) != "copytree":
+            continue
+        args = [*node.args, *(k.value for k in node.keywords)]
+        if any(isinstance(n, ast.Name) and n.id == "TOOLS_SRC" or isinstance(n, ast.Attribute) and n.attr == "TOOLS_SRC"
+               for a in args for n in ast.walk(a)):
+            out.append(node.lineno)
+    return out
+
+
+def check_builders(c: Checks) -> None:
+    scripts = sorted(HERE.glob("test_*.py"))
+    found = [f"{p.name}:{n}" for p in scripts for n in copies_of_tools_src(p.read_text(encoding="utf-8"))]
+    # The scan itself, on the call it looks for: a scan that finds nothing anywhere proves nothing.
+    sees = (copies_of_tools_src('shutil.copytree(TOOLS_SRC, v / "tools")\n') == [1]
+            and copies_of_tools_src('copytree(dst=d, src=_util.TOOLS_SRC / "x")\n') == [1]
+            and copies_of_tools_src('_util.copy_tools(v / "tools")\nshutil.copytree(a, b)\n') == [])
+    c.ok(sees and Path(__file__).resolve() in scripts and not found,
+         f"none of the {len(scripts)} test scripts copies TOOLS_SRC with copytree; vaults get their "
+         "tools from _util.copy_tools", f"scan works: {sees}; calls: {', '.join(found) or 'none'}")
+
+
 def main() -> int:
     c = Checks("review 2026-10-02, follow-ups")
     check_bom_notes(c)
@@ -200,6 +239,7 @@ def main() -> int:
     check_sync_logs_notice(c)
     check_clean_note(c)
     check_weekly(c)
+    check_builders(c)
     return c.done()
 
 
