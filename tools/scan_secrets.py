@@ -751,6 +751,14 @@ def scan_blocks(blocks, allow: list[str]) -> list[tuple]:
             continue
         for ln, at, _, found in _located(text, allow):
             for sev, label, m in found or ():
+                if sev != "HIGH":
+                    # Only credentials count in another reading, as only block-tier deny entries do
+                    # in scan_pii. The WARN rules are loose by design, and mojibake meets them by
+                    # chance: in a cp1251 reading each Cyrillic letter is two characters, so a
+                    # six-letter quoted value reached 'secret-ish assignment', and one terminal
+                    # colour code in a note printed a WARN for it (2 lines became 2,552 on 42
+                    # such notes; review, 2026-10-04).
+                    continue
                 span = reading.at(at + m.start()), reading.at(at + m.end())
                 if not reading.run.covered(sev, label, span, allow):
                     out.append((sev, label, first - 1 + ln, mask(m.group(0)), way))

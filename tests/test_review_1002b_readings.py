@@ -694,6 +694,18 @@ def main() -> int:
                  f"16. a cp1251 name on a line across a run boundary is blocked, {size}, {where} (held before)",
                  f"{len(data)} bytes, line at {starts}, boundary {boundary}; rc={rp.returncode} {rp.stdout[-300:]}")
 
+    # 17. another reading applies the credential rules alone: a note that is not clean only because
+    # of a terminal colour code (or Ctrl-Z) must not print a WARN for a short Cyrillic value that
+    # its cp1251 reading doubles to twelve characters, and must pass --strict as it did
+    v = vault()
+    stage(v, b"10 Notes/colour.md", '\x1b[1mpassword = "\u043f\u0430\u0440\u043e\u043b\u044c"\x1b[0m\n'.encode("utf-8"))
+    rs, rstrict = run(v, "scan_secrets.py"), run(v, "scan_secrets.py", "--strict")
+    c.ok(rs.returncode == 0 and rstrict.returncode == 0 and "WARN" not in rs.stdout + rstrict.stdout
+         and "(read as" not in rs.stdout,
+         "17. in another reading scan_secrets applies its credential rules alone: a colour-coded note with "
+         "a short Cyrillic value prints no WARN and passes --strict",
+         f"{rs.returncode} {rs.stdout[-300:]}\n{rstrict.returncode} {rstrict.stdout[-300:]}")
+
     return c.done()
 
 
