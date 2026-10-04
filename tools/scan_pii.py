@@ -21,6 +21,11 @@ cp1251/cp1252). A line that is not clean UTF-8 or UTF-16 is checked in every lik
 the commit is blocked until the file is re-saved as UTF-8: which codepage it is cannot be known,
 so a clean result over it would be a guess.
 
+A staged file that is not clean UTF-8 is checked in every likely reading as well
+(scan_secrets.readings: its BOM's encoding, UTF-8, cp1251, cp1252, cp866, UTF-16 from either
+byte), and a term in any of them counts: a file's first bytes do not say what a later writer
+appended to it.
+
 Values are never printed. The Stop hook records this session into the vault, so echoing an
 address while removing it just recreates the leak in a new file; masked forms only.
 
@@ -63,20 +68,33 @@ def _safe_path(rel: str, literals, regexes) -> str:
     return rel
 
 
-def _scan(rel: str, content: str, hard, soft, regexes, blocking: dict, warning: dict) -> None:
+def _scan(rel: str, way: str, content: str, hard, soft, regexes, blocking: dict, warning: dict) -> None:
     """Add this text's match counts to blocking / warning, keyed (file label, term) with the
-    masked term as the value's label: a large file arrives in several runs of lines."""
+    masked term as the value's label: a large file arrives in several runs of lines. Counts are
+    kept per reading (`way`, "" for the usual one): the readings of a file are the same bytes, so
+    adding them up would count one occurrence up to nine times (see _counted)."""
     if not content:
         return
     for terms, into in ((hard, blocking), (soft, warning)):
         for term in terms:
             if n := len(term_pattern(term).findall(content)):
-                shown, k = into.get((rel, term), (mask(term), 0))
-                into[(rel, term)] = (shown, k + n)
+                by = into.setdefault((rel, term), (mask(term), {}))[1]
+                by[way] = by.get(way, 0) + n
     for rx in regexes:
         if n := len(rx.findall(content)):
-            shown, k = blocking.get((rel, rx), (f"re:{mask(rx.pattern)}", 0))
-            blocking[(rel, rx)] = (shown, k + n)
+            by = blocking.setdefault((rel, rx), (f"re:{mask(rx.pattern)}", {}))[1]
+            by[way] = by.get(way, 0) + n
+
+
+def _counted(found: dict) -> list[tuple[str, str, int, str]]:
+    """(file label, masked term, count, note) per finding: the count of the reading that saw the
+    term most often, and a note naming that reading when it is not the usual one, since the
+    file's own editor does not show the term there."""
+    out = []
+    for (rel, _), (shown, by) in found.items():
+        way = max(by, key=lambda w: (by[w], not w))         # the usual reading wins a tie
+        out.append((rel, shown, by[way], f"  (read as {way})" if way else ""))
+    return out
 
 
 def main() -> int:
@@ -86,31 +104,30 @@ def main() -> int:
     hard = [t for t in literals if is_hard(t)]
     soft = [t for t in literals if not is_hard(t)]
 
-    found: dict[tuple, tuple[str, int]] = {}
-    warned: dict[tuple, tuple[str, int]] = {}
+    found: dict[tuple, tuple[str, dict[str, int]]] = {}      # (label, term) -> (masked, count per reading)
+    warned: dict[tuple, tuple[str, dict[str, int]]] = {}
     unscanned: list[tuple[str, str]] = []
     failed = False
     for rel, blocks in staged_blobs(staged_files()):
         # Scan the path as well as the content: a note named after a person or a conversation
         # title carries the term in its filename, where a contents-only scan never looks.
-        _scan(_safe_path(f"{rel} [path]", literals, regexes), rel, hard, soft, regexes, found, warned)
+        _scan(_safe_path(f"{rel} [path]", literals, regexes), "", rel, hard, soft, regexes, found, warned)
         label = _safe_path(rel, literals, regexes)
         try:
-            for _, text in blocks:
-                _scan(label, text, hard, soft, regexes, found, warned)
+            for _, way, text in blocks:
+                _scan(label, way, text, hard, soft, regexes, found, warned)
         except NotScanned as e:
             unscanned.append((label, e.why))
             failed |= e.fails
-    blocking = [(rel, m, n) for (rel, _), (m, n) in found.items()]
-    warning = [(rel, m, n) for (rel, _), (m, n) in warned.items()]
+    blocking, warning = _counted(found), _counted(warned)
 
     for rel, why in unscanned:
         print(f"pii-scan: NOT scanned ({why}): {rel}")
     if failed:
         print("pii-scan: FAILED — a staged file above could not be scanned, so the commit is not clean.")
 
-    for rel, m, n in warning:
-        print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m} (numeric/short; not blocking)")
+    for rel, m, n, note in warning:
+        print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m} (numeric/short; not blocking){note}")
 
     if problems:
         # Fail closed, as the strict read did before (with a traceback): a line in a codepage that
@@ -131,8 +148,8 @@ def main() -> int:
 
     print("")
     print("Commit blocked by pii-scan — staged content contains deny-listed PII:")
-    for rel, m, n in blocking:
-        print(f"  {rel}: {n}x {m}")
+    for rel, m, n, note in blocking:
+        print(f"  {rel}: {n}x {m}{note}")
     print("")
     print("Scrub the value from the file (do NOT paste it into the terminal — this session")
     print("is recorded into the vault). If the term no longer needs denying, remove it from")

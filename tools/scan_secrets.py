@@ -10,6 +10,9 @@ Severity:
   WARN  policy-sensitive but often public (EVM addresses, generic secret-ish
         assignments) -> reported only, never blocks (unless --strict)
 
+A file that is clean UTF-8 is read as that. Any other file (a UTF-16 or UTF-32 BOM, a NUL, a byte
+that is not UTF-8) is read every likely way, and a finding in any reading counts: see readings.
+
 Usage (from vault root):
   python tools/scan_secrets.py            # scan staged changes (used by pre-commit)
   python tools/scan_secrets.py --all      # scan the whole vault
@@ -157,12 +160,79 @@ def _encoding(head: bytes) -> str:
 def decode(raw: bytes) -> str:
     """File bytes as scannable text; never fails. Windows PowerShell 5 writes UTF-16 (`>`,
     Out-File), which read as UTF-8 put a NUL between every character so no pattern matched, and
-    a strict UTF-8 read dropped cp1251/latin-1 files from --all without a word (review, 2026-09-30)."""
+    a strict UTF-8 read dropped cp1251/latin-1 files from --all without a word (review, 2026-09-30).
+    This is the usual reading, the first that readings() gives; it is the only one for clean UTF-8."""
     enc = _encoding(raw)
     text = raw.decode(enc, errors="replace")
     # NULs left in a UTF-8 read are UTF-16 without a BOM (or appended to a UTF-8 file by `>>`):
     # dropping them joins the characters back up.
     return text.replace("\x00", "") if enc == "utf-8" else text
+
+
+# What a file's first bytes say holds for the bytes a later writer appended only when that writer
+# wrote the same encoding, and on Windows the next one often does not: PowerShell 5.1 `>>` appends
+# UTF-16 to anything, Git Bash appends UTF-8 to a UTF-16 file, cmd.exe's `echo >>` appends in the
+# console's code page, and a program that appends "ANSI" text writes the system code page. The one
+# reading decode() picks then turns the other part into replacement characters, CJK or private-use
+# characters, and a key or a deny-listed name in it was committed as clean by both guards (review,
+# 2026-10-02). So bytes that are not clean UTF-8 are read every likely way, and a finding in any
+# reading counts.
+#
+# LEGACY: the code pages such a writer uses when it does not write Unicode. cp1251 and cp866 are the
+# ANSI and the console (OEM) code page of a Russian Windows, cp1252 the ANSI one of a Western
+# Windows. A Western console's cp437/cp850, and any other locale's pages, are NOT read.
+LEGACY = ("cp1251", "cp1252", "cp866")
+# From byte 1 as well: text appended after an odd number of bytes is UTF-16 that no reading from
+# byte 0 pairs up, in either byte order.
+_UTF16 = (("utf-16-le", 0), ("utf-16-le", 1), ("utf-16-be", 0), ("utf-16-be", 1))
+
+
+def clean_text(raw: bytes, enc: str) -> str | None:
+    """`raw` as text when it has one reading, else None: strictly valid UTF-8 with no NUL, in a
+    file that starts with a UTF-8 BOM or with none. `enc` is what _encoding says of that file's
+    first bytes; raw may be a later part of it."""
+    if enc not in ("utf-8", "utf-8-sig") or b"\x00" in raw:
+        return None
+    try:
+        return raw.decode(enc)
+    except UnicodeDecodeError:
+        return None
+
+
+def other_readings(raw: bytes, enc: str):
+    """(codec, first byte, text) for every reading of `raw` besides the usual one of a file whose
+    first bytes say `enc`: UTF-8 with the NULs removed, each LEGACY code page, and UTF-16 in both
+    byte orders from byte 0 and from byte 1. errors="replace" throughout, so no reading fails, and
+    one at a time: held together, the readings of a 5MB file came to between 54 and 88MB."""
+    # The usual reading of a file with no BOM already is this one; with a UTF-8 BOM it differs
+    # only by the NULs that reading keeps.
+    if enc != "utf-8" and (enc != "utf-8-sig" or b"\x00" in raw):
+        yield "utf-8", 0, raw.decode("utf-8", errors="replace").replace("\x00", "")
+    for cp in LEGACY:
+        yield cp, 0, raw.decode(cp, errors="replace")
+    for codec, off in _UTF16:
+        yield codec, off, raw[off:].decode(codec, errors="replace")
+
+
+def reading_name(codec: str, off: int) -> str:
+    """A reading as a finding names it: 'cp866', 'utf-16-le from byte 1'."""
+    return f"{codec} from byte {off}" if off else codec
+
+
+def readings(raw: bytes):
+    """(how, text) for every reading of `raw` to check, the usual one (decode) first with how "".
+
+    Clean input has that one reading, as before: strictly valid UTF-8 with no NUL, with or without a
+    UTF-8 BOM. Anything else (a UTF-16 or UTF-32 BOM, a NUL, a byte that is not UTF-8) is followed
+    by other_readings: up to nine scans instead of one, for every UTF-16 file and every binary."""
+    enc = _encoding(raw)
+    text = clean_text(raw, enc)
+    if text is not None:
+        yield "", text
+        return
+    yield "", decode(raw)
+    for codec, off, alt in other_readings(raw, enc):
+        yield reading_name(codec, off), alt
 
 
 # Size policy, the same in every mode. Up to MAX_BYTES a file is read whole and scanned, binary or
@@ -234,9 +304,36 @@ def _read_n(read, n: int) -> bytes:
     return out
 
 
+class _OtherRuns:
+    """The other readings of a file, fed its bytes in order: (first line number, how, text) for
+    each run of whole byte lines that is not clean (see readings). By runs of about CHUNK bytes,
+    and only the runs that need it: a 5MB UTF-8 note with one cp1251 line at its end took 2.7s to
+    scan with all of it read every way, 0.8s with only its last run, and 0.4s before (macOS). The
+    usual reading is not made here, so a file read whole keeps it whole. Line numbers count the
+    b"\n" bytes before the run, then the reading's own lines inside it. Limit: a run ends at a
+    b"\n" byte, which inside UTF-16 text may be half of a character (U+040A, all of Gurmukhi); a
+    term holding that character is not matched across the cut."""
+
+    def __init__(self, enc: str):
+        self.enc, self.line, self.held = enc, 1, []
+
+    def feed(self, data: bytes, final: bool):
+        end = len(data) if final else data.rfind(b"\n") + 1
+        if not (end or final):
+            self.held.append(data)
+            return
+        run, self.held = b"".join(self.held) + data[:end], [data[end:]]
+        if run and clean_text(run, self.enc) is None:
+            for codec, off, alt in other_readings(run, self.enc):
+                yield self.line, reading_name(codec, off), alt
+        self.line += run.count(b"\n")
+
+
 def text_blocks(read, size: int, path: str = ""):
-    """(first line number, text of whole lines) runs of a file of `size` bytes that `read(n)`
-    returns in order. Raises NotScanned (before yielding) for a large binary or oversize text."""
+    """(first line number, how, text of whole lines) runs of a file of `size` bytes that `read(n)`
+    returns in order. `how` is "" for the usual reading (decode) and names any other reading of the
+    same bytes (see readings, _OtherRuns). Raises NotScanned (before yielding) for a large binary
+    or oversize text."""
     head = _read_n(read, min(size, HEAD))
     if size > MAX_BYTES:
         # Skipped only when the NAME and the BYTES agree it is media: a head that merely looks
@@ -247,10 +344,16 @@ def text_blocks(read, size: int, path: str = ""):
             raise NotScanned("binary over 5MB", fails=False)
         if size > TEXT_MAX:
             raise NotScanned(f"text over {TEXT_MAX // 1_000_000}MB, too large to scan", fails=True)
-    if size <= MAX_BYTES:
-        yield 1, decode(head + _read_n(read, size - len(head)))
-        return
     enc = _encoding(head)
+    others = _OtherRuns(enc)
+    if size <= MAX_BYTES:
+        raw = head + _read_n(read, size - len(head))
+        text = clean_text(raw, enc)
+        yield 1, "", decode(raw) if text is None else text
+        if text is None:
+            for i in range(0, len(raw), CHUNK):
+                yield from others.feed(raw[i:i + CHUNK], i + CHUNK >= len(raw))
+        return
     dec = codecs.getincrementaldecoder(enc)(errors="replace")
     line, carry, left, data = 1, "", size - len(head), head
     while True:
@@ -261,8 +364,9 @@ def text_blocks(read, size: int, path: str = ""):
         cut = len(text) if final else text.rfind("\n") + 1
         block, carry = text[:cut], text[cut:]
         if block:
-            yield line, block
+            yield line, "", block
             line += len(block.splitlines())
+        yield from others.feed(data, final)
         if final:
             return
         data = _read_n(read, min(CHUNK, left))
@@ -349,9 +453,18 @@ def walk_files(root: Path):
 
 
 def scan_blocks(blocks, allow: list[str]) -> list[tuple]:
-    """scan_text over text_blocks, with line numbers counted from the start of the file."""
-    return [(sev, label, first - 1 + ln, masked)
-            for first, text in blocks for sev, label, ln, masked in scan_text(text, allow)]
+    """scan_text over text_blocks, with line numbers counted from the start of the file, as
+    (severity, label, line, masked, how). The usual reading reports every match, as before. Another
+    reading reports a value once, and only if nothing has reported it yet: the same key shows in
+    most readings of a UTF-16 file, and would otherwise be listed up to nine times."""
+    out, seen = [], set()
+    for first, way, text in blocks:
+        for sev, label, ln, masked in scan_text(text, allow):
+            if way and (sev, label, masked) in seen:
+                continue
+            seen.add((sev, label, masked))
+            out.append((sev, label, first - 1 + ln, masked, way))
+    return out
 
 
 def main() -> int:
@@ -381,7 +494,7 @@ def main() -> int:
             wanted = [rel for rel in staged_files() if not is_skipped(rel, walk=False)]
             for rel, blocks in staged_blobs(wanted):
                 # The name is content too: import_claude.py names files after the conversation.
-                yield f"{rel} [path]", [(1, rel)], False
+                yield f"{rel} [path]", [(1, "", rel)], False
                 yield rel, blocks, False
 
     high, warn, n = [], [], 0
@@ -394,8 +507,10 @@ def main() -> int:
             continue
         n += not rel.endswith(" [path]")
         rel = safe_label(rel)
-        for sev, label, lineno, masked in found:
-            (high if sev == "HIGH" else warn).append((rel, label, lineno, masked))
+        for sev, label, lineno, masked, way in found:
+            # Which reading, when not the usual one: the file's own editor does not show it there.
+            (high if sev == "HIGH" else warn).append(
+                (rel, label, lineno, masked + (f"  (read as {way})" if way else "")))
     mode = "whole vault" if "--all" in args else f"{n} path(s)" if args else "staged changes"
 
     if skipped:
