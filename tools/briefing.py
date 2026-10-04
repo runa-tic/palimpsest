@@ -50,11 +50,57 @@ READ_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
 OPEN_TASK = re.compile(r"^\s*- \[ \] (.+)$", re.M)
 
 
+# A rolled-over task that names a day already gone, or has rolled for a week, says so at the end
+# of its line. The list is copied forward verbatim every day, so a task done and recorded somewhere
+# else (a tracker, the ledger) keeps reading as open: on 2026-10-01 the list carried four finished
+# or expired items, and on 10-04 an email sent that evening was reported as never sent. The mark
+# is text derived from the task and the dates alone, so both machines render the same line, and it
+# is stripped before a task is compared or rolled over again (canon), never stacked.
+MARK = re.compile(r"[ \t]*⏰ \*(?:due \d{4}-\d{2}-\d{2} passed|open since \d{4}-\d{2}-\d{2})\*[ \t]*$")
+_BY_DAY = re.compile(r"(?i)\bby\s+(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?(\d{4}-\d{2}-\d{2})\b")
+_LEAD_DAY = re.compile(r"^\W{0,4}(\d{4}-\d{2}-\d{2})\b")      # "**2026-09-17:** ...", "2026-09-07: ..."
+OLD_AFTER_DAYS = 7
+_notes_cache: dict[str, str] | None = None
+
+
+def canon(task: str) -> str:
+    """A task's text without the mark."""
+    return MARK.sub("", task)
+
+
+def first_seen(task: str, today: str) -> str | None:
+    """The earliest daily note before today that holds this task (by the start of its text)."""
+    global _notes_cache
+    if _notes_cache is None:
+        _notes_cache = {}
+        for q in sorted(DAILY.glob("*.md")):
+            if re.match(r"\d{4}-\d{2}-\d{2}$", q.stem):
+                try:
+                    _notes_cache[q.stem] = q.read_bytes().decode("utf-8", errors="replace")
+                except OSError:
+                    pass
+    key = canon(task)[:60]
+    return next((stem for stem, text in _notes_cache.items() if stem < today and key in text), None)
+
+
+def stale_mark(task: str, today: str) -> str:
+    """The mark for an open task, or "": the day it names has passed (a leading date, or "by
+    <date>"), or it has been in the daily notes for OLD_AFTER_DAYS or more."""
+    t = canon(task)
+    day = next(iter(_LEAD_DAY.findall(t) + _BY_DAY.findall(t)), None)
+    if day and day < today:
+        return f" ⏰ *due {day} passed*"
+    seen = first_seen(t, today)
+    if seen and (date.fromisoformat(today) - date.fromisoformat(seen)).days >= OLD_AFTER_DAYS:
+        return f" ⏰ *open since {seen}*"
+    return ""
+
+
 def tasks_in(text: str) -> list[str]:
     # Line ends as a text-mode read gives them (bytes.decode keeps the CRs, and a task would roll
     # over ending in "\r"), and a NUL ends a line too: a task that carried one into today's note
     # made every later refresh of it exit 1, because main() refuses to rewrite a note with a NUL.
-    return OPEN_TASK.findall(re.sub(r"\r\n?|\x00", "\n", text))
+    return [canon(t) for t in OPEN_TASK.findall(re.sub(r"\r\n?|\x00", "\n", text))]
 
 
 def open_tasks(p: Path | None) -> list[str]:
@@ -198,7 +244,7 @@ def build_block() -> str:
     tasks = open_tasks(recent_daily(today))
     lines = [START, f"## 🌅 Briefing — {date.today():%A, %B %d}", ""]
     lines.append("### ↩️ Rolled-over tasks")
-    lines += [f"- [ ] {t}" for t in tasks] if tasks else ["- *(none)*"]
+    lines += [f"- [ ] {t}{stale_mark(t, today)}" for t in tasks] if tasks else ["- *(none)*"]
     lines.append("\n### 🎯 Active projects")
     aps = active_projects()
     lines += [f"- [[{a}]]" for a in aps] if aps else ["- *(none)*"]
@@ -248,10 +294,19 @@ def keep_ticks(block: str, old: str) -> str:
     if not new_s or not old_s:
         return block
     prev = old[old_s[0]:old_s[1]]
-    kept = set(TASK_LINE.findall(prev))
+    # Compared without the mark: a list rendered before a task's day passed (or before the mark
+    # existed) holds the same task unmarked, and it must not come back as a second line.
+    kept = {canon(t) for t in TASK_LINE.findall(prev)}
     lines = [l for l in prev.splitlines() if TASK_LINE.match(l)]
     lines += [l for l in block[new_s[0]:new_s[1]].splitlines()
-              if TASK_LINE.match(l) and TASK_LINE.match(l).group(1) not in kept]
+              if TASK_LINE.match(l) and canon(TASK_LINE.match(l).group(1)) not in kept]
+    # The mark is today's for an open task and none for a ticked one; nothing else of a kept line
+    # changes.
+    today = date.today().isoformat()
+    def remark(line: str) -> str:
+        text = canon(TASK_LINE.match(line).group(1))
+        return line[:6] + text + ("" if line[3] in "xX" else stale_mark(text, today))
+    lines = [remark(l) for l in lines]
     return block[:new_s[0]] + "\n".join(lines or ["- *(none)*"]) + "\n" + block[new_s[1]:]
 
 

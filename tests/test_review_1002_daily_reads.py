@@ -18,12 +18,14 @@ Each of 1-4 has a check that fails with PALIMPSEST_TOOLS pointed at tools/ from 
 byte checks alone pass there, because the old tools raised before writing anything).
 """
 import json, os, subprocess, sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from _util import Checks, make_vault, run, write
 
 CFG = json.dumps({"version": 1, "steps": {"pull": False}})
-PAST = "Daily/2001-02-03.md"               # any earlier date: recent_daily() takes the latest one
+# Yesterday: recent_daily() takes the latest earlier note, and a task from a note a week old or
+# more would roll over with briefing's "open since" mark on it.
+PAST = f"Daily/{(date.today() - timedelta(days=1)).isoformat()}.md"
 FFFD = b"\xef\xbf\xbd"                     # U+FFFD in UTF-8: what errors="replace" writes
 
 

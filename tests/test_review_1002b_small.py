@@ -61,12 +61,14 @@ The notes are built byte by byte here, as the tools' comments describe PowerShel
 PowerShell is run, no model is called and nothing is sent anywhere.
 """
 import ast, codecs, json, os, subprocess, sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from _util import Checks, make_vault, run, write
 
 HERE = Path(__file__).resolve().parent
-PAST = "Daily/2001-02-03.md"               # any earlier date: recent_daily() takes the latest one
+# Yesterday: recent_daily() takes the latest earlier note, and a task from a note a week old or
+# more would roll over with briefing's "open since" mark on it.
+PAST = f"Daily/{(date.today() - timedelta(days=1)).isoformat()}.md"
 PASSPORT, PLUMBER = "- [ ] renew the passport", "- [ ] позвонить сантехнику"
 NOTE = f"# Saturday\n\n{PASSPORT}\n- [x] done already\n{PLUMBER}\n"
 STEPS = ("pull", "import", "extract", "skills", "link", "maintenance", "dedupe", "triage", "weekly",

@@ -36,7 +36,7 @@ Usage:
   state.py accept <id> | accept --all       # promote from proposed.jsonl
   state.py register <id> --kind K [--alias A ...] [--hot] [--stale-after H] [--desc D]
   state.py station show | take [--force] [--code] | release [--code]
-  state.py lint                             # unknown entities, open conflicts, stale, duplicates
+  state.py lint                             # unknown entities, open conflicts, stale, overdue, duplicates
 WHEN accepts 2026-09-01, 2026-09-08T15:01Z, 2026-09-08T23:01+08:00, "2026-09-08 23:01 UTC".
 Omit --since for "now": a date-only --since means midnight UTC, which loses the fold to any
 same-day timestamped fact (add prints a WARNING when that happens). A time without a zone is UTC
@@ -381,6 +381,36 @@ def last_seen(rec: dict, eid: str, attr: str, obs: dict) -> str | None:
     return max(filter(None, (obs.get(f"{eid}.{attr}"), rec.get("t"))), default=None)
 
 
+_ISO_DAY = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_BY_DAY = re.compile(r"(?i)\bby\s+(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?(\d{4}-\d{2}-\d{2})\b")
+
+
+def overdue(cur: dict, today: str | None = None) -> list[tuple[str, str, str, dict]]:
+    """(entity, attr, date, record) for each current intention whose date has passed: a `next`
+    whose value says "by <date>", and a `deadline` holding a date. Nothing else is read: values
+    are prose full of dates. The ledger only changes when someone appends to it, so a `next` that
+    was done and recorded in a note alone stays "to do" here for ever; on 2026-10-04 an email
+    sent that evening was still "email ... by 2026-10-02" in the ledger, and a session answering
+    from it called it unsent. This does not fix the fact; it says the fact needs a look."""
+    today = today or datetime.now().date().isoformat()
+    out = []
+    for eid, recs in sorted(cur.items()):
+        for attr, rec in sorted(recs.items()):
+            if rec.get("kind") == "retracted" or rec.get("value") is None:
+                continue
+            value = str(rec.get("value"))
+            if attr == "next" or attr.endswith(("_next", ".next")):
+                days = _BY_DAY.findall(value)
+            elif attr == "deadline" or attr.endswith(("_deadline", ".deadline")):
+                days = _ISO_DAY.findall(value)
+            else:
+                continue
+            past = sorted(d for d in days if d < today)
+            if past:
+                out.append((eid, attr, past[0], rec))
+    return out
+
+
 def is_stale(rec: dict, eid: str, attr: str, kinds: dict, ents: dict, obs: dict) -> bool:
     if rec.get("kind") != "observed":
         return False
@@ -476,6 +506,10 @@ def write_outputs(cur: dict, facts: list[dict], kinds: dict, ents: dict) -> None
     stale = [(e, a) for e, recs in cur.items() for a, r in recs.items() if is_stale(r, e, a, kinds, ents, obs)]
     lines += ["", "## ⏳ Stale observations", ""]
     lines += ([f"- **{e}.{a}** — last seen {local(last_seen(cur[e][a], e, a, obs))}" for e, a in stale] or ["✅ none"])
+    late = overdue(cur)
+    lines += ["", "## ⏰ Overdue", ""]
+    lines += ([f"- **{e}.{a}** — names {day}, which has passed: if it is done, append what happened "
+               f"(`state.py add {e} {a} \"...\"`)" for e, a, day, _ in late] or ["✅ none"])
     probes = {k: v for k, v in obs.items() if k.startswith("probe:")}
     if probes:
         lines += ["", "## 🔎 Probe runs (this machine)", ""] + [f"- `{k[6:]}` — {local(v)}" for k, v in sorted(probes.items())]
@@ -494,6 +528,7 @@ def refold() -> dict:
 # ----------------------------------------------------------------------------- show
 def opener_block(cur: dict, kinds: dict, ents: dict) -> str:
     obs = load_observed()
+    late = {(e, a) for e, a, _, _ in overdue(cur)}
     out = [f"**State** (fold {local(iso(utcnow()), '%H:%M')} local · [[State Register]])"]
     for eid, d in ents.items():
         if not d.get("hot"):
@@ -508,6 +543,7 @@ def opener_block(cur: dict, kinds: dict, ents: dict) -> str:
         for attr, rec in items:
             flag = " ⚠️ stale" if is_stale(rec, eid, attr, kinds, ents, obs) else ""
             conf = " ⚠️ conflict" if rec.get("conflicts") else ""
+            flag += " ⏰ overdue" if (eid, attr) in late else ""
             parts.append(f"{attr}: {render_value(rec)}{flag}{conf} ({when_str(rec, eid, attr, obs)})")
         line = f"- **{eid}** — " + " · ".join(parts)
         if eid == "station":
@@ -1014,6 +1050,9 @@ def cmd_lint(args):
     for e, a, r in future:
         print(f"future-dated: {e}.{a} = {render_value(r)} valid from {r.get('valid_from')} ({r.get('id')}) "
               f"outranks every observation until then")
+    late = overdue(cur)
+    for e, a, day, r in late:
+        print(f"overdue: {e}.{a} names {day}, which has passed ({r.get('id')}): done? then append what happened")
     if bad:
         print(f"malformed lines: {bad}")
     if dups:
@@ -1023,7 +1062,8 @@ def cmd_lint(args):
     if badkind:
         print(f"bad kinds: {badkind}")
     print(f"state: facts={len(facts)} entities={len(ents)} with-facts={len(cur)} unknown={len(unknown)} "
-          f"conflicts={len(conflicts)} stale={len(stale)} no-facts={len(nofacts)} malformed={bad} dups={dups}")
+          f"conflicts={len(conflicts)} stale={len(stale)} no-facts={len(nofacts)} malformed={bad} dups={dups} "
+          f"overdue={len(late)}")
     if args.verbose and nofacts:
         print("entities without facts: " + ", ".join(nofacts))
     write_outputs(cur, facts, kinds, ents)
@@ -1081,7 +1121,7 @@ def main():
     stn.add_argument("--no-pull", action="store_true", help="take without pulling first (offline)")
     stn.set_defaults(fn=cmd_station)
 
-    l = sub.add_parser("lint", help="unknown entities, open conflicts, stale observations, duplicates")
+    l = sub.add_parser("lint", help="unknown entities, open conflicts, stale observations, overdue next/deadline facts, duplicates")
     l.add_argument("--verbose", action="store_true"); l.set_defaults(fn=cmd_lint)
 
     args = ap.parse_args()
