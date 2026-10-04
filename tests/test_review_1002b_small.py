@@ -20,6 +20,18 @@ had crashed and the sync had shown it.
 With PALIMPSEST_TOOLS pointed at a tools/ whose briefing.py still reads the previous note with
 errors="replace", every check of 1 to 4 fails; 5 is the control and passes there too.
 
+A weekly review with UTF-16 in it. weekly_review reads and writes the review with surrogateescape,
+which keeps the bytes of a UTF-16 tail but not its line ends: "\r\x00\n\x00" came back as
+"\n\x00\n\x00" (on macOS), with exit 0 and nothing printed.
+
+6. weekly_review leaves a review with UTF-16 appended to it (PowerShell 5.1's `>>`), or UTF-16 as a
+   whole, byte-identical, exits 1 and says it is UTF-16. Re-saved as UTF-8, the review is refreshed
+   again.
+
+With a weekly_review.py without that guard the first two fail: the appended one is rewritten with
+exit 0, and the whole one, though left alone with exit 1, is reported as having no generated block.
+The re-save is the control and passes there too.
+
 The notes are built byte by byte here, as the tools' comments describe PowerShell's output; no
 PowerShell is run, no model is called and nothing is sent anywhere.
 """
@@ -152,12 +164,42 @@ def check_clean_note(c: Checks) -> None:
          f"exit={r.returncode} rolled={got!r} stderr={r.stderr[-300:]!r}")
 
 
+def check_weekly(c: Checks) -> None:
+    v = make_vault()
+    write(v, PAST, f"{PASSPORT}\n")
+    run(v, "weekly_review.py")
+    weekly = sorted((v / "Reviews" / "Weekly").glob("*.md"))
+    if not weekly:
+        c.ok(False, "weekly_review wrote this week's file to append to")
+        return
+    out = weekly[0]
+    first = out.read_bytes()
+    write(v, "20 Projects/Garden.md", "---\nstatus: active\n---\n")      # so a refresh changes the block
+    for label, body in (
+            ("UTF-16 appended to its Reflection (PowerShell 5.1's `>>`)",
+             first + "- from PowerShell\r\n".encode("utf-16-le")),
+            ("UTF-16 as a whole, with a BOM",
+             codecs.BOM_UTF16_LE + first.decode("utf-8").replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-16-le"))):
+        out.write_bytes(body)
+        r = run(v, "weekly_review.py")
+        c.ok(r.returncode == 1 and out.read_bytes() == body and out.name in r.stderr and "UTF-16" in r.stderr,
+             f"weekly_review leaves a review with {label} byte-identical, exits 1 and says it is UTF-16",
+             f"exit={r.returncode} same={out.read_bytes() == body} tail={out.read_bytes()[-12:]!r} "
+             f"stderr={r.stderr[-300:]!r}")
+    out.write_bytes(first)
+    r = run(v, "weekly_review.py")
+    c.ok(r.returncode == 0 and b"[[Garden]]" in out.read_bytes(),
+         "control: re-saved as UTF-8, the review is refreshed again",
+         f"exit={r.returncode} {(r.stdout + r.stderr)[-300:]!r}")
+
+
 def main() -> int:
     c = Checks("review 2026-10-02, follow-ups")
     check_bom_notes(c)
     check_undecodable_notes(c)
     check_sync_logs_notice(c)
     check_clean_note(c)
+    check_weekly(c)
     return c.done()
 
 
