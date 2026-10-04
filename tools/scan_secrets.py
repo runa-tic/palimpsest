@@ -25,7 +25,7 @@ Allowlist: tools/.secret_scan_allow.txt  (substrings of known-public values;
 Bypass one commit (use sparingly): git commit --no-verify
 """
 from __future__ import annotations
-import codecs, re, sys, subprocess
+import bisect, codecs, re, sys, subprocess
 from pathlib import Path
 
 try:
@@ -120,18 +120,46 @@ def safe_label(rel: str) -> str:
     return rel
 
 
+def shown(masked: str) -> str:
+    """A masked value as printed: a control character in it as its escape. A value seen in another
+    reading of UTF-16 text keeps half of each character as a byte like 0x04, and a report goes to a
+    terminal and into vault_push's log (review, 2026-10-04). The characters are those of _CONTROL,
+    which clean text does not hold, so what is printed for a clean file is what it always was."""
+    return re.sub(r"[\x00-\x08\x0b\x0e-\x1f\x7f]", lambda m: f"\\x{ord(m.group(0)):02x}", masked)
+
+
+def _line_findings(line: str):
+    """(severity, label, match) for each rule that matches a line: its first match there."""
+    for sev, rules in (("HIGH", HIGH), ("WARN", WARN)):
+        for label, rx in rules:
+            m = rx.search(line)
+            if m:
+                yield sev, label, m
+
+
 def scan_text(text: str, allow: list[str]) -> list[tuple]:
     """Return list of (severity, label, lineno, masked) findings."""
     findings = []
     for lineno, line in enumerate(text.splitlines(), 1):
         if any(a in line for a in allow):
             continue
-        for sev, rules in (("HIGH", HIGH), ("WARN", WARN)):
-            for label, rx in rules:
-                m = rx.search(line)
-                if m:
-                    findings.append((sev, label, lineno, mask(m.group(0))))
+        for sev, label, m in _line_findings(line):
+            findings.append((sev, label, lineno, mask(m.group(0))))
     return findings
+
+
+def _located(text: str, allow: list[str]):
+    """scan_text with places: (line number, the character of `text` the line starts at, the line,
+    its findings) for each line that has any, the findings as (severity, label, match). A line the
+    allow list exempts comes with None for its findings."""
+    at = 0
+    for lineno, piece in enumerate(text.splitlines(True), 1):
+        line = piece.splitlines()[0]            # the piece without its line end, as scan_text sees it
+        if any(a in line for a in allow):
+            yield lineno, at, line, None
+        elif found := list(_line_findings(line)):
+            yield lineno, at, line, found
+        at += len(piece)
 
 
 def staged_files() -> list[str]:
@@ -211,23 +239,96 @@ def clean_text(raw: bytes, enc: str) -> str | None:
         return None
 
 
-def other_readings(raw: bytes, enc: str):
-    """(codec, first byte, text) for every reading of `raw` besides the usual one of a file whose
-    first bytes say `enc`: UTF-8, each LEGACY code page, and UTF-16 in both byte orders from byte 0
-    and from byte 1; UTF-8 and UTF-16 with the NULs removed. errors="replace" throughout, so no
-    reading fails, and one at a time: held together, the readings of a 5MB file came to between 54
-    and 88MB."""
+_REPLACED: list[tuple[int, int]] = []
+
+
+def _replace_and_note(e: UnicodeError):
+    """errors="replace" for decoding (the same text), noting in _REPLACED the first byte of each
+    sequence replaced and the byte after it: _Reading._marks reads the list right after a decode."""
+    _REPLACED.append((e.start, e.end))
+    return "\ufffd", e.end
+
+
+codecs.register_error("palimpsest-replace", _replace_and_note)
+
+
+class _Reading:
+    """One way of reading a run of bytes: `text` is what is scanned, and at() says which byte a
+    character of it starts at, so that two readings can tell they found the same bytes.
+
+    The text is raw[off:] decoded with errors="replace", so no reading fails, and with its NULs
+    removed where `strip` says so: that joins up the ASCII of UTF-16 read as UTF-8, and the
+    characters of UTF-32, or of UTF-16 with U+0000 between them, read as UTF-16. `lossless` reads
+    with surrogateescape instead, which is how a staged path that is not UTF-8 arrives."""
+
+    def __init__(self, raw: bytes, codec: str, off: int = 0, strip: bool = False, lossless: bool = False):
+        self.raw, self.codec, self.off, self.lossless = raw, codec, off, lossless
+        self.full = raw[off:].decode(codec, errors="surrogateescape" if lossless else "replace")
+        self.text = self.full.replace("\x00", "") if strip else self.full
+        self.run = None                         # what the readings of one run share: see _Run
+        self._nuls = self._chars = self._bytes = None
+
+    def _marks(self) -> tuple[list[int], list[int]]:
+        """Characters of `full` and the byte each starts at, to count on from. Between two of them
+        every character is as many bytes as it encodes to, which holds for all of UTF-16 and
+        UTF-32 (a unit that does not decode is replaced by one character as wide), and for UTF-8
+        except at a replaced sequence: one U+FFFD there stands for one to three bytes, so the
+        character after each is a mark."""
+        chars, at = [0], [self.off]
+        if self.codec == "utf-8" and not self.lossless:
+            body, n, done = self.raw[self.off:], 0, 0
+            del _REPLACED[:]
+            body.decode("utf-8", errors="palimpsest-replace")
+            for start, end in _REPLACED:
+                n += len(body[done:start].decode("utf-8")) + 1
+                done = end
+                chars.append(n)
+                at.append(self.off + end)
+        return chars, at
+
+    def at(self, i: int) -> int:
+        """The byte of the run that character i of `text` starts at; the run's length at its end."""
+        if self.text is not self.full:          # NULs were removed: count those before character i
+            if self._nuls is None:
+                self._nuls = [m.start() - k for k, m in enumerate(re.finditer("\x00", self.full))]
+            i += bisect.bisect_right(self._nuls, i)
+        if i >= len(self.full):                 # the end: a cut-off last unit is one character too
+            return len(self.raw)
+        if self.codec in LEGACY:
+            return self.off + i                 # one byte, one character
+        if self._chars is None:
+            self._chars, self._bytes = self._marks()
+        k = bisect.bisect_right(self._chars, i) - 1
+        b = self._bytes[k] + len(self.full[self._chars[k]:i].encode(
+            self.codec, "surrogateescape" if self.lossless else "strict"))
+        if i > self._chars[k]:                  # findings come in order: the next counts on from here
+            self._chars.insert(k + 1, i)
+            self._bytes.insert(k + 1, b)
+        return b
+
+
+def _others(raw: bytes, enc: str):
+    """A _Reading for every reading of `raw` besides the usual one of a file whose first bytes say
+    `enc`: UTF-8, each LEGACY code page, and UTF-16 in both byte orders from byte 0 and from byte
+    1; UTF-8 and UTF-16 with the NULs removed. One at a time: held together, the readings of a
+    5MB file came to between 54 and 88MB."""
     # The usual reading of a file with no BOM already is this one; with a UTF-8 BOM it differs
     # only by the NULs that reading keeps.
     if enc != "utf-8" and (enc != "utf-8-sig" or b"\x00" in raw):
-        yield "utf-8", 0, raw.decode("utf-8", errors="replace").replace("\x00", "")
+        yield _Reading(raw, "utf-8", strip=True)
     for cp in LEGACY:
-        yield cp, 0, raw.decode(cp, errors="replace")
+        yield _Reading(raw, cp)
     for codec, off in _UTF16:
         # Without the NULs here too: a Cyrillic word in a UTF-32 section, or in a UTF-16 file
         # with U+0000 between its letters, reads as that word with a NUL after each letter, which
         # no term matches (review, 2026-10-04). A path has no NUL byte, so its readings are as before.
-        yield codec, off, raw[off:].decode(codec, errors="replace").replace("\x00", "")
+        yield _Reading(raw, codec, off, strip=True)
+
+
+def other_readings(raw: bytes, enc: str):
+    """(codec, first byte, text) for each of _others."""
+    for r in _others(raw, enc):
+        yield r.codec, r.off, r.text
 
 
 def reading_name(codec: str, off: int) -> str:
@@ -314,18 +415,27 @@ def path_bytes(rel: str) -> bytes | None:
         return None
 
 
-def path_readings(rel: str):
-    """(how, text) for every reading of a staged path: the path itself, and for one that is not
-    UTF-8 every other reading of its bytes. Since the staged names stopped being decoded strictly
+def path_blocks(rel: str) -> list[tuple]:
+    """A staged path as text_blocks gives a file: the path itself, and for one that is not UTF-8
+    every other reading of its bytes. Since the staged names stopped being decoded strictly
     (first with replacement, then losslessly so that two such names stay apart: staged_files), a
     name byte that is not UTF-8 is a surrogate, which no deny-listed term and no pattern matches.
     A name in cp1251 was committed with the term in it, where the strict decode had crashed and
     blocked (review, 2026-10-02)."""
-    yield "", rel
+    out = [(1, "", rel, None)]
     raw = path_bytes(rel)
     if raw is not None:
-        for codec, off, text in other_readings(raw, "utf-8"):
-            yield reading_name(codec, off), text
+        run = _Run(lambda: _Reading(raw, "utf-8", lossless=True))   # the usual reading: the path as staged
+        for r in _others(raw, "utf-8"):
+            r.run = run
+            out.append((1, reading_name(r.codec, r.off), r.text, r))
+    return out
+
+
+def path_readings(rel: str):
+    """(how, text) for every reading of a staged path: see path_blocks."""
+    for _, how, text, _ in path_blocks(rel):
+        yield how, text
 
 
 def masked_path(raw: bytes, rel: str, find) -> str:
@@ -421,18 +531,66 @@ def _read_n(read, n: int) -> bytes:
     return out
 
 
-class _OtherRuns:
-    """The other readings of a file, fed its bytes in order: (first line number, how, text) for
-    each run of whole byte lines that is not clean (see readings). By runs of about CHUNK bytes,
-    and only the runs that need it: a 5MB UTF-8 note with one cp1251 line at its end took 2.7s to
-    scan with all of it read every way, 0.8s with only its last run, and 0.4s before (macOS). The
-    usual reading is not made here, so a file read whole keeps it whole. Line numbers count the
-    b"\n" bytes before the run, then the reading's own lines inside it. Limit: a run ends at a
-    b"\n" byte, which inside UTF-16 text may be half of a character (U+040A, all of Gurmukhi); a
-    term holding that character is not matched across the cut."""
+class _Run:
+    """What the other readings of one run of bytes share: where the usual reading has a finding
+    there, and what another reading has reported already.
 
-    def __init__(self, enc: str):
-        self.enc, self.line, self.held = enc, 1, []
+    The usual reading reports its findings itself (text_blocks gives it whole). It is read once
+    more here, over the run alone and only when another reading finds something, to learn which
+    bytes those findings cover. `usual` is a function that gives that reading, so a run where
+    nothing is found is not decoded again."""
+
+    def __init__(self, usual):
+        self.usual, self.spans = usual, None
+
+    def _over(self, key, span: tuple[int, int]) -> bool:
+        have = self.spans.get(key, ())          # in order, and no two of them overlap
+        k = bisect.bisect_right(have, span)
+        return (k > 0 and have[k - 1][1] > span[0]) or (k < len(have) and have[k][0] < span[1])
+
+    def covered(self, sev: str, label: str, span: tuple[int, int], allow: list[str]) -> bool:
+        """Whether a finding of another reading, at the bytes `span`, is one to leave out:
+        - the usual reading has a finding of the same rule on those bytes. It was told apart by
+          its masked text, which differs with the reading wherever the value is not ASCII: one
+          password in Cyrillic was listed four times, as itself and as three kinds of mojibake
+          (review, 2026-10-04);
+        - another reading has reported that rule on those bytes.
+        A finding that stays is remembered, so the next reading does not report it again."""
+        if self.spans is None:
+            self.spans, u = {}, self.usual()
+            for _, at, line, found in _located(u.text, allow):
+                for s, l, m in found or ():
+                    self.spans.setdefault((s, l), []).append((u.at(at + m.start()), u.at(at + m.end())))
+        if self._over((sev, label), span):
+            return True
+        bisect.insort(self.spans.setdefault((sev, label), []), span)
+        return False
+
+
+class _OtherRuns:
+    """The other readings of a file, fed its bytes in order: (first line number, how, text,
+    reading) for each run of whole byte lines that is not clean (see readings). By runs of about
+    CHUNK bytes, and only the runs that need it: a 5MB UTF-8 note with one cp1251 line at its end
+    took 2.7s to scan with all of it read every way, 0.8s with only its last run, and 0.4s before
+    (macOS). The usual reading is not made here, so a file read whole keeps it whole. Line numbers
+    count the b"\n" bytes before the run, then the reading's own lines inside it. Limit: a run
+    ends at a b"\n" byte, which inside UTF-16 text may be half of a character (U+040A, U+010A,
+    U+4E0A, all of Gurmukhi and Gujarati); a term holding that character is not matched across
+    the cut."""
+
+    def __init__(self, enc: str, head: bytes):
+        self.enc, self.line, self.pos, self.held = enc, 1, 0, []
+        self.order = "be" if head.startswith((codecs.BOM_UTF16_BE, codecs.BOM_UTF32_BE)) else "le"
+
+    def usual(self, run: bytes, at: int) -> _Reading:
+        """What decode() makes of a run that starts at byte `at` of the file: the reading the
+        file's first bytes name, in step with the units counted from its start, without the BOM."""
+        if self.enc == "utf-8":
+            return _Reading(run, "utf-8", strip=True)
+        if self.enc == "utf-8-sig":
+            return _Reading(run, "utf-8", 0 if at else 3)
+        unit = 2 if self.enc == "utf-16" else 4
+        return _Reading(run, f"{self.enc}-{self.order}", -at % unit if at else unit)
 
     def feed(self, data: bytes, final: bool):
         end = len(data) if final else data.rfind(b"\n") + 1
@@ -441,16 +599,20 @@ class _OtherRuns:
             return
         run, self.held = b"".join(self.held) + data[:end], [data[end:]]
         if run and clean_text(run, self.enc) is None:
-            for codec, off, alt in other_readings(run, self.enc):
-                yield self.line, reading_name(codec, off), alt
+            shared = _Run(lambda at=self.pos: self.usual(run, at))
+            for r in _others(run, self.enc):
+                r.run = shared
+                yield self.line, reading_name(r.codec, r.off), r.text, r
         self.line += run.count(b"\n")
+        self.pos += len(run)
 
 
 def text_blocks(read, size: int, path: str = ""):
-    """(first line number, how, text of whole lines) runs of a file of `size` bytes that `read(n)`
-    returns in order. `how` is "" for the usual reading (decode) and names any other reading of the
-    same bytes (see readings, _OtherRuns). A file that starts as a known binary format has the
-    usual reading alone. Raises NotScanned (before yielding) for a large binary or oversize text."""
+    """(first line number, how, text of whole lines, reading) runs of a file of `size` bytes that
+    `read(n)` returns in order. `how` is "" for the usual reading (decode), whose `reading` is
+    None, and names any other reading of the same bytes (see readings, _OtherRuns), which comes
+    with its _Reading. A file that starts as a known binary format has the usual reading alone.
+    Raises NotScanned (before yielding) for a large binary or oversize text."""
     head = _read_n(read, min(size, HEAD))
     if size > MAX_BYTES:
         # Skipped only when the NAME and the BYTES agree it is media: a head that merely looks
@@ -462,11 +624,11 @@ def text_blocks(read, size: int, path: str = ""):
         if size > TEXT_MAX:
             raise NotScanned(f"text over {TEXT_MAX // 1_000_000}MB, too large to scan", fails=True)
     enc = _encoding(head)
-    others = None if known_binary(head) else _OtherRuns(enc)
+    others = None if known_binary(head) else _OtherRuns(enc, head)
     if size <= MAX_BYTES:
         raw = head + _read_n(read, size - len(head))
         text = clean_text(raw, enc)
-        yield 1, "", decode(raw) if text is None else text
+        yield 1, "", decode(raw) if text is None else text, None
         if text is None and others:
             for i in range(0, len(raw), CHUNK):
                 yield from others.feed(raw[i:i + CHUNK], i + CHUNK >= len(raw))
@@ -481,7 +643,7 @@ def text_blocks(read, size: int, path: str = ""):
         cut = len(text) if final else text.rfind("\n") + 1
         block, carry = text[:cut], text[cut:]
         if block:
-            yield line, "", block
+            yield line, "", block, None
             line += len(block.splitlines())
         if others:
             yield from others.feed(data, final)
@@ -573,15 +735,19 @@ def walk_files(root: Path):
 def scan_blocks(blocks, allow: list[str]) -> list[tuple]:
     """scan_text over text_blocks, with line numbers counted from the start of the file, as
     (severity, label, line, masked, how). The usual reading reports every match, as before. Another
-    reading reports a value once, and only if nothing has reported it yet: the same key shows in
-    most readings of a UTF-16 file, and would otherwise be listed up to nine times."""
-    out, seen = [], set()
-    for first, way, text in blocks:
-        for sev, label, ln, masked in scan_text(text, allow):
-            if way and (sev, label, masked) in seen:
-                continue
-            seen.add((sev, label, masked))
-            out.append((sev, label, first - 1 + ln, masked, way))
+    reading reports a finding only where no reading has reported that rule on the same bytes (see
+    _Run.covered): the same key shows in most readings of a UTF-16 file, and would otherwise be
+    listed up to nine times."""
+    out = []
+    for first, way, text, reading in blocks:
+        if reading is None:
+            out += [(sev, label, first - 1 + ln, masked, way) for sev, label, ln, masked in scan_text(text, allow)]
+            continue
+        for ln, at, _, found in _located(text, allow):
+            for sev, label, m in found or ():
+                span = reading.at(at + m.start()), reading.at(at + m.end())
+                if not reading.run.covered(sev, label, span, allow):
+                    out.append((sev, label, first - 1 + ln, mask(m.group(0)), way))
     return out
 
 
@@ -612,7 +778,7 @@ def main() -> int:
             wanted = [rel for rel in staged_files() if not is_skipped(rel, walk=False)]
             for rel, blocks in staged_blobs(wanted):
                 # The name is content too: import_claude.py names files after the conversation.
-                yield f"{rel} [path]", [(1, way, text) for way, text in path_readings(rel)], False
+                yield f"{rel} [path]", path_blocks(rel), False
                 yield rel, blocks, False
 
     high, warn, n = [], [], 0
@@ -628,7 +794,7 @@ def main() -> int:
         for sev, label, lineno, masked, way in found:
             # Which reading, when not the usual one: the file's own editor does not show it there.
             (high if sev == "HIGH" else warn).append(
-                (rel, label, lineno, masked + (f"  (read as {way})" if way else "")))
+                (rel, label, lineno, shown(masked) + (f"  (read as {way})" if way else "")))
     mode = "whole vault" if "--all" in args else f"{n} path(s)" if args else "staged changes"
 
     if skipped:

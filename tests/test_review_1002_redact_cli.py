@@ -16,9 +16,15 @@ stock Windows, and compares the output byte for byte.
  4. Input that is not UTF-8 and has no BOM (cp1251, a stray byte, UTF-16 without a BOM, UTF-16
     appended by `>>`), or that its BOM misdescribes, exits 2 and writes nothing: no mangled copy,
     no unredacted one.
+ 5. A file that is UTF-16 throughout is redacted, not refused, whatever short terms the list
+    holds (review, 2026-10-04). The check that reads the output every other way refused such
+    files over bytes that hold no term: "Ng" is the bytes of two Chinese characters, "4471" those
+    of "447" and a Cyrillic letter, and a term inside the [redacted] marker ("Ted", or the longer
+    "acted") made every file with one substitution fail. Only a BLOCK-tier term outside a marker
+    refuses now.
 
 Set PALIMPSEST_TOOLS to a tools/ tree from before e232e70 (1, 2) or from before BOM handling (3, 4)
-to see these fail.
+to see these fail; 5 fails with the tools that first read the output every other way.
 """
 import codecs, os, subprocess, sys
 import _util
@@ -91,6 +97,23 @@ def main() -> int:
             bad.append((name, rc, out[:60], err))
     c.ok(not bad, "input that is not UTF-8 and has no BOM, or that its BOM misdescribes, exits 2 and"
          " writes nothing", repr(bad)[:1500])
+
+    # 5. UTF-16 throughout, with terms on the list that its bytes or the marker spell by chance
+    (v / "tools" / ".redact_terms.txt").write_bytes(f"{NAME}\nNg\n4471\nacted\n".encode("utf-8"))
+    bad = []
+    for name, text, want in (("Chinese whose bytes spell Ng", "一个最好的办法\r\n", "一个最好的办法\r\n"),
+                             ("447 and a Cyrillic letter, bytes 4471", "дом 447б\r\n", "дом 447б\r\n"),
+                             ("a name, redacted, beside a listed part of the marker",
+                              f"met {NAME} today\r\n", None)):
+        for bom, enc in ((codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be")):
+            rc, out, err = cli(v, bom + text.encode(enc))
+            got = out[len(bom):].decode(enc, "replace")
+            # The last: what redact_text makes of it, marker and all; the name must be gone.
+            right = got == want if want is not None else NAME not in got and MARK in got and got.endswith(" today\r\n")
+            if rc != 0 or not out.startswith(bom) or not right or "substitution(s)" not in err:
+                bad.append((name, enc, rc, got, err))
+    c.ok(not bad, "a file that is UTF-16 throughout is redacted whatever short terms, or parts of the marker,"
+         " the deny list holds", repr(bad)[:1500])
 
     return c.done()
 
