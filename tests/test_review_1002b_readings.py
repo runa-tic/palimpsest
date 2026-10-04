@@ -1,7 +1,7 @@
 """Bytes that do not decode cleanly are checked in every likely reading, not in the one their first bytes name.
 
-Review of 2026-10-02, second pass. Both commit guards trusted one reading of a staged file, the
-one its first bytes name, and one reading of a staged name.
+Review of 2026-10-02, second pass. The commit guards and the redact CLI each trusted one reading
+of a file, the one its first bytes name, and the guards one reading of a staged name.
 
 A file's first bytes say how it began, not what a later writer appended: PowerShell 5.1 `>>`
 appends UTF-16 to anything, Git Bash appends UTF-8 to a UTF-16 file, cmd.exe's `echo >>` appends
@@ -32,10 +32,14 @@ encodings those programs are understood to use; none of the programs was run.
     and no line prints the name, its bytes as escapes included. A key in such a name still blocks
     scan_secrets, masked (it did before: a key is ASCII), and so does a secret access key that
     only a code page reading of the name shows, masked in the label as well.
+ 7. The redact CLI exits 2 and writes nothing for a UTF-16 file followed by (D1) a cp1251 line,
+    (D2) UTF-16 after an odd number of bytes, (D3) a cp866 line. A file that is UTF-16 throughout
+    is still redacted in UTF-16, byte for byte.
 
-Set PALIMPSEST_TOOLS to a tools/ tree from before these fixes to see the checks fail; 2(b), the passing halves of 5 and the key half of 6 held before and pass there.
+Set PALIMPSEST_TOOLS to a tools/ tree from before these fixes to see the checks fail; 2(b), the
+passing halves of 5, the key half of 6 and the second half of 7 held before and pass there.
 """
-import codecs, hashlib, json, subprocess, sys
+import codecs, hashlib, json, os, subprocess, sys
 import _util
 from _util import Checks, run, write
 
@@ -43,6 +47,7 @@ TERM = "Сидорова"                                       # synthetic deny
 MAIL = "zq.private@example.invalid"                     # synthetic address
 AKIA = "AKIA" + "QZXW" * 4                              # synthetic, AWS-shaped
 AWS_SECRET = "Ab3dEf9hIj" * 4                           # synthetic, 40 characters
+MARK = "[redacted]"
 BOM16 = codecs.BOM_UTF16_LE
 SECRET = f"key {AKIA} mail {MAIL} met {TERM}"            # what each mixed file holds, once
 
@@ -65,6 +70,13 @@ def stage(v, name: bytes, data: bytes) -> None:
                          capture_output=True, check=True).stdout.strip()
     subprocess.run(["git", "update-index", "--add", "-z", "--index-info"], cwd=v,
                    input=b"100644 " + oid + b"\t" + name + b"\0", check=True)
+
+
+def cli(v, data: bytes):
+    """(exit code, stdout bytes, stderr) of the redact CLI fed `data`, with a cp1251 stdio."""
+    r = subprocess.run([sys.executable, str(v / "tools" / "redact.py")], cwd=v, input=data, capture_output=True,
+                       env={**os.environ, "PYTHONIOENCODING": "cp1251"})
+    return r.returncode, r.stdout, r.stderr.decode("utf-8", "replace")
 
 
 def noise(n: int) -> bytes:
@@ -232,6 +244,29 @@ def main() -> int:
          and AWS_SECRET[3:-3] not in out and "Traceback" not in out,
          "6. scan_secrets blocks a secret access key in a file name where only a code page reads the"
          " separator as a space, and masks it in the label too", f"rc={r.returncode} {out[-400:]}")
+
+    # 7. the redact CLI: a UTF-16 file with something else after it
+    v = vault(f"{TERM}\n".encode("utf-8"))
+    for name, data in (
+            ("(D1) a cp1251 line", BOM16 + u16("notes\r\n") + f"met {TERM} today\r\n".encode("cp1251")),
+            # shifted by one byte and evened out by another: still valid UTF-16, as CJK
+            ("(D2) UTF-16 after an odd number of bytes",
+             BOM16 + u16("notes\r\n") + b"x" + u16(f"met {TERM} today\r\n") + b"y"),
+            ("(D3) a cp866 line", BOM16 + u16("notes\r\n") + f"met {TERM} today\r\n".encode("cp866"))):
+        rc, out, err = cli(v, data)
+        c.ok(len(data) % 2 == 0 and rc == 2 and out == b"" and "Nothing was written" in err
+             and "re-save it as UTF-8" in err and "substitution" not in err and "Traceback" not in err,
+             f"7. the redact CLI exits 2 and writes nothing for a UTF-16 file followed by {name}",
+             f"rc={rc} out={out[:80]!r} err={err[-300:]}")
+    bad = []
+    text = f"met {TERM} today\r\nkey {AKIA}\r\nend\r\n"
+    for bom, enc in ((BOM16, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be")):
+        rc, out, err = cli(v, bom + text.encode(enc))
+        want = bom + f"met {MARK} today\r\nkey {MARK}\r\nend\r\n".encode(enc)
+        if rc != 0 or out != want or "redact: 2 substitution(s)" not in err:
+            bad.append((enc, rc, out[:80], err))
+    c.ok(not bad, "7. a file that is UTF-16 throughout is still redacted in UTF-16, byte for byte (held before)",
+         repr(bad)[:800])
 
     return c.done()
 
