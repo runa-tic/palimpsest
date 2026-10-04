@@ -533,12 +533,12 @@ def _read_n(read, n: int) -> bytes:
 
 class _Run:
     """What the other readings of one run of bytes share: where the usual reading has a finding
-    there, and what another reading has reported already.
+    there or a line the allow list exempts, and what another reading has reported already.
 
     The usual reading reports its findings itself (text_blocks gives it whole). It is read once
     more here, over the run alone and only when another reading finds something, to learn which
-    bytes those findings cover. `usual` is a function that gives that reading, so a run where
-    nothing is found is not decoded again."""
+    bytes those findings and those exempt lines cover. `usual` is a function that gives that
+    reading, so a run where nothing is found is not decoded again."""
 
     def __init__(self, usual):
         self.usual, self.spans = usual, None
@@ -554,14 +554,20 @@ class _Run:
           its masked text, which differs with the reading wherever the value is not ASCII: one
           password in Cyrillic was listed four times, as itself and as three kinds of mojibake
           (review, 2026-10-04);
-        - another reading has reported that rule on those bytes.
+        - another reading has reported that rule on those bytes;
+        - the allow list exempts the usual reading's line there. A reading that splits lines
+          elsewhere, or loses the file's first character, or turns the entry into mojibake, no
+          longer shows the entry on its own line, and a marked line in a UTF-16 file that had
+          always passed was blocked (review, 2026-10-04).
         A finding that stays is remembered, so the next reading does not report it again."""
         if self.spans is None:
             self.spans, u = {}, self.usual()
             for _, at, line, found in _located(u.text, allow):
+                if found is None:
+                    self.spans.setdefault(None, []).append((u.at(at), u.at(at + len(line))))
                 for s, l, m in found or ():
                     self.spans.setdefault((s, l), []).append((u.at(at + m.start()), u.at(at + m.end())))
-        if self._over((sev, label), span):
+        if self._over(None, span) or self._over((sev, label), span):
             return True
         bisect.insort(self.spans.setdefault((sev, label), []), span)
         return False
@@ -735,9 +741,9 @@ def walk_files(root: Path):
 def scan_blocks(blocks, allow: list[str]) -> list[tuple]:
     """scan_text over text_blocks, with line numbers counted from the start of the file, as
     (severity, label, line, masked, how). The usual reading reports every match, as before. Another
-    reading reports a finding only where no reading has reported that rule on the same bytes (see
-    _Run.covered): the same key shows in most readings of a UTF-16 file, and would otherwise be
-    listed up to nine times."""
+    reading reports a finding only where no reading has reported that rule on the same bytes, and
+    not where the allow list exempts the usual reading's line (see _Run.covered): the same key
+    shows in most readings of a UTF-16 file, and would otherwise be listed up to nine times."""
     out = []
     for first, way, text, reading in blocks:
         if reading is None:

@@ -64,6 +64,10 @@ they cost or broke.
     readings show it and however they spell it, prints no control character, and lists two
     occurrences of one key in an appended part as two. The redact CLI's refusal (7) names the
     reading that shows the term, and a credential in another reading refuses as a term does.
+13. The allow list holds across readings: a line it exempts in the usual reading is exempt in
+    every other (a UTF-16 file whose first line starts with the entry, or has U+041E after it; a
+    UTF-8 note with a stray byte and a Cyrillic entry). A key on another line of such a file is
+    still blocked.
 
 With the tools from before the 2026-10-04 fixes the checks from 10 on fail, and so do the parts
 of 1 and 7 added with them, except the checks that say "held before" in their names: those passed
@@ -546,6 +550,29 @@ def main() -> int:
     c.ok(out.count("ctl.md:1  ") == 1 and 'k\\x04"' in out and "\x04" not in out,
          "12. ...and a control character inside a value it lists is printed as its escape, not as the byte",
          repr(out[-300:]))
+
+    # 13. the allow list holds across readings
+    allow = "PUBLIC-DOCS-EXAMPLE\nпример\n".encode("utf-8")
+    for name, data in (
+            ("a UTF-16 file whose first line starts with the entry",
+             BOM16 + u16(f"PUBLIC-DOCS-EXAMPLE ключ: {AKIA}\r\nend\r\n")),
+            ("a UTF-16 file with U+041E between the entry and the key",
+             BOM16 + u16(f"PUBLIC-DOCS-EXAMPLE О: {AKIA}\r\nend\r\n")),
+            ("a UTF-8 note with a stray byte and a Cyrillic entry",
+             f"пример ключа {AKIA}\n".encode("utf-8") + b"stray \xff byte\n")):
+        v = vault()
+        (v / "tools" / ".secret_scan_allow.txt").write_bytes(allow)
+        stage(v, b"10 Notes/n.txt", data)
+        rs = run(v, "scan_secrets.py")
+        c.ok(rs.returncode == 0 and "secret-scan: clean" in rs.stdout,
+             f"13. a key on an allow-listed line passes in {name}", f"rc={rs.returncode} {rs.stdout[-300:]}")
+    v = vault()
+    (v / "tools" / ".secret_scan_allow.txt").write_bytes(allow)
+    stage(v, b"10 Notes/n.txt", BOM16 + u16("PUBLIC-DOCS-EXAMPLE note\r\n") + f"key {AKIA}\n".encode("utf-8"))
+    rs = run(v, "scan_secrets.py")
+    c.ok(rs.returncode == 1 and rs.stdout.count("AWS access key id") == 1 and "(read as utf-8)" in rs.stdout,
+         "13. ...and a key on another line of such a file, one only another reading shows, still blocks"
+         " (held before)", f"rc={rs.returncode} {rs.stdout[-300:]}")
 
     return c.done()
 
