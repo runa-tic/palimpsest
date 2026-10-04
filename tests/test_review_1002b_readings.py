@@ -59,12 +59,17 @@ they cost or broke.
     added; an ASCII key and an ASCII name after the PNG signature still block. A note that
     merely begins with the letters such a format begins with ("BM", "MZ", "ID3", "RIFF", ...)
     keeps every reading, and so does a file with a BOM before the signature.
+12. In another reading scan_pii matches BLOCK-tier terms only and prints no WARN line: a UTF-16
+    file of Chinese no longer warns about "Ng". scan_secrets lists one value once, whichever
+    readings show it and however they spell it, prints no control character, and lists two
+    occurrences of one key in an appended part as two. The redact CLI's refusal (7) names the
+    reading that shows the term, and a credential in another reading refuses as a term does.
 
 With the tools from before the 2026-10-04 fixes the checks from 10 on fail, and so do the parts
 of 1 and 7 added with them, except the checks that say "held before" in their names: those passed
 there too, and are here so that they keep passing.
 """
-import codecs, hashlib, json, os, subprocess, sys
+import codecs, hashlib, json, os, re, subprocess, sys
 import _util
 from _util import Checks, git, run, write
 
@@ -343,6 +348,15 @@ def main() -> int:
              and "re-save it as UTF-8" in err and "substitution" not in err and "Traceback" not in err,
              f"7. the redact CLI exits 2 and writes nothing for a UTF-16 file followed by {name}",
              f"rc={rc} out={out[:80]!r} err={err[-300:]}")
+        c.ok(re.search(r"read as (cp1251|cp1252|cp866|utf-8|utf-16-[lb]e)", err) is not None
+             and "more than one" not in err and TERM not in err,
+             "7. ...and says which reading shows the term, not that the file is in two encodings",
+             f"err={err[-300:]}")
+    rc, out, err = cli(v, BOM16 + u16("notes\r\n") + f"the key is {AKIA}, kept\n".encode("utf-8"))
+    c.ok(rc == 2 and out == b"" and "read as utf-8" in err and "Nothing was written" in err and AKIA not in err,
+         "7. the redact CLI exits 2 and writes nothing for a UTF-16 file followed by a key in UTF-8: a"
+         " credential in another reading refuses, as a term does (held before)",
+         f"rc={rc} out={out[:80]!r} err={err[-300:]}")
     bad = []
     text = f"met {TERM} today\r\nkey {AKIA}\r\nend\r\n"
     for bom, enc in ((BOM16, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be")):
@@ -500,6 +514,38 @@ def main() -> int:
     c.ok(rp.returncode == 1 and rp.stdout.count(".md: 1x Си******  (read as cp1251)") == len(TEXT_HEADS),
          "11. ...and scan_pii blocks a cp1251 name in each of those notes (held before)",
          f"rc={rp.returncode} {rp.stdout[-600:]}")
+
+    # 12. another reading: BLOCK-tier terms only, one line per value, no control characters
+    v = vault("Ng\nИв\n4471\n".encode("utf-8"))
+    stage(v, b"40 Resources/zh.txt", BOM16 + u16("一个最好的办法\r\n" * 300))     # the bytes of 个最 spell "*Ng"
+    stage(v, b"40 Resources/house.txt", BOM16 + u16("дом 447б\r\n"))           # 447 and б, bytes 31 04
+    stage(v, b"10 Notes/said.md", b"Ng said so\n\xff\n")
+    rp = run(v, "scan_pii.py")
+    c.ok(rp.returncode == 0 and "(read as" not in rp.stdout and rp.stdout.count("pii-scan WARN") == 1
+         and "said.md" in rp.stdout,
+         "12. scan_pii matches short terms in the usual reading alone: one WARN line, for the note that"
+         " holds the term, and none from another reading", f"rc={rp.returncode} {rp.stdout[-500:]}")
+    v = vault()
+    pw = "pass" + 'word = "пароль-очень-длинный"'           # in two parts: this file must scan clean itself
+    stage(v, b"10 Notes/stray.md", f"{pw}\n".encode("utf-8") + b"\xff\n")
+    stage(v, b"10 Notes/wide.txt", BOM16 + u16(f"{pw}\r\n"))
+    stage(v, b"10 Notes/twice.txt", BOM16 + u16("notes\r\n") + f"key {AKIA}\nnext line\nkey {AKIA}\n".encode("utf-8"))
+    rs = run(v, "scan_secrets.py")
+    out = rs.stdout
+    c.ok(out.count("stray.md:1  ") == 1 and out.count("wide.txt:1  ") == 1 and "Secret-ish assignment" in out
+         and not any(ord(ch) < 32 and ch not in "\r\n" for ch in out),
+         "12. scan_secrets lists a password in Cyrillic once, in a UTF-8 note with a stray byte and in a"
+         " UTF-16 file, and prints no control character", f"rc={rs.returncode} {out[-700:]!r}")
+    c.ok(rs.returncode == 1 and out.count("AWS access key id") == 2 and "twice.txt:2  " in out
+         and "twice.txt:4  " in out and AKIA not in out,
+         "12. ...and lists two occurrences of one key in an appended part as two, each at its line",
+         f"rc={rs.returncode} {out[-500:]}")
+    v = vault()
+    stage(v, b"10 Notes/ctl.md", ("tok" + 'en = "abcdefghijk\x04"\n').encode("utf-8"))
+    out = run(v, "scan_secrets.py").stdout
+    c.ok(out.count("ctl.md:1  ") == 1 and 'k\\x04"' in out and "\x04" not in out,
+         "12. ...and a control character inside a value it lists is printed as its escape, not as the byte",
+         repr(out[-300:]))
 
     return c.done()
 

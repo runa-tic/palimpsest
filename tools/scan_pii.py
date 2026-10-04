@@ -27,9 +27,9 @@ that passed as clean without a word.
 
 A staged file, or a staged name, that is not clean UTF-8 is checked in every likely reading as
 well (scan_secrets.readings: its BOM's encoding, UTF-8, cp1251, cp1252, cp866, UTF-16 from either
-byte), and a term in any of them counts: a file's first bytes do not say what a later writer
-appended to it. A file that starts as a known binary format does has the usual reading alone
-(scan_secrets.known_binary).
+byte), and a BLOCK term in any of them counts: a file's first bytes do not say what a later writer
+appended to it. WARN terms are matched in the usual reading alone, and a file that starts as a
+known binary format does has that one reading (scan_secrets.known_binary).
 
 Values are never printed. The Stop hook records this session into the vault, so echoing an
 address while removing it just recreates the leak in a new file; masked forms only.
@@ -42,7 +42,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redact import DENY_FILE, DenyListUnreadable, load_deny_report, is_phone, term_pattern   # the one parser/matcher
+from redact import DENY_FILE, DenyListUnreadable, is_hard, load_deny_report, term_pattern   # the one parser/matcher
 from scan_secrets import NotScanned, masked_path, path_bytes, path_readings, staged_blobs, staged_files
 
 
@@ -50,17 +50,6 @@ def mask(term: str) -> str:
     """Identifiable to the operator, useless to a reader. Never the value itself."""
     head = term[:2]
     return f"{head}{'*' * max(3, len(term) - 2)}"
-
-
-def is_hard(term: str) -> bool:
-    # A phone number is what SETUP asks for first and promises is blocked at commit time; it only
-    # warned, which in the unattended nightly push surfaces nowhere (review, 2026-09-30).
-    if "@" in term or is_phone(term):
-        return True
-    # Name punctuation is not "numeric": counting each space as a non-letter made every full name
-    # of three words ("Mary Ann Lee") a soft term that only warned (review, 2026-09-30).
-    other = sum(not (c.isalpha() or c in " -'.") for c in term)
-    return len(term) >= 5 and other <= 1 and sum(c.isalpha() for c in term) >= 3
 
 
 def _safe_path(rel: str, literals, regexes) -> str:
@@ -82,10 +71,15 @@ def _scan(rel: str, way: str, content: str, hard, soft, regexes, blocking: dict,
     """Add this text's match counts to blocking / warning, keyed (file label, term) with the
     masked term as the value's label: a large file arrives in several runs of lines. Counts are
     kept per reading (`way`, "" for the usual one): the readings of a file are the same bytes, so
-    adding them up would count one occurrence up to nine times (see _counted)."""
+    adding them up would count one occurrence up to nine times (see _counted).
+
+    Another reading is matched against the BLOCK terms alone (is_hard, and the patterns). A WARN
+    term is a few letters or digits, which the wrong reading of any bytes holds by chance: "Ng"
+    was counted 300 times in a UTF-16 file of 300 lines of Chinese with no such letters in it, and
+    a two-letter Cyrillic term 38 times in 600KB of noise read as cp1251 (review, 2026-10-04)."""
     if not content:
         return
-    for terms, into in ((hard, blocking), (soft, warning)):
+    for terms, into in ((hard, blocking), (soft if not way else (), warning)):
         for term in terms:
             if n := len(term_pattern(term).findall(content)):
                 by = into.setdefault((rel, term), (mask(term), {}))[1]
@@ -99,7 +93,7 @@ def _scan(rel: str, way: str, content: str, hard, soft, regexes, blocking: dict,
 def _counted(found: dict) -> list[tuple[str, str, int, str]]:
     """(file label, masked term, count, note) per finding: the count of the reading that saw the
     term most often, and a note naming that reading when it is not the usual one, since the
-    file's own editor does not show the term there."""
+    file's own editor does not show the term there. A warning is always of the usual reading."""
     out = []
     for (rel, _), (shown, by) in found.items():
         way = max(by, key=lambda w: (by[w], not w))         # the usual reading wins a tie
@@ -138,7 +132,7 @@ def main() -> int:
             _scan(path_label, way, text, hard, soft, regexes, found, warned)
         label = _safe_path(rel, literals, regexes)
         try:
-            for _, way, text in blocks:
+            for _, way, text, _ in blocks:
                 _scan(label, way, text, hard, soft, regexes, found, warned)
         except NotScanned as e:
             unscanned.append((label, e.why))

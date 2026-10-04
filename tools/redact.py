@@ -215,6 +215,19 @@ def is_phone(term: str) -> bool:
     return sum(c.isdigit() for c in term) >= 7 and all(c.isdigit() or c in " +-.()" for c in term)
 
 
+def is_hard(term: str) -> bool:
+    """Whether a literal term is BLOCK-tier: one scan_pii blocks a commit on, rather than warns
+    about, and the only kind matched in a reading other than the usual one."""
+    # A phone number is what SETUP asks for first and promises is blocked at commit time; it only
+    # warned, which in the unattended nightly push surfaces nowhere (review, 2026-09-30).
+    if "@" in term or is_phone(term):
+        return True
+    # Name punctuation is not "numeric": counting each space as a non-letter made every full name
+    # of three words ("Mary Ann Lee") a soft term that only warned (review, 2026-09-30).
+    other = sum(not (c.isalpha() or c in " -'.") for c in term)
+    return len(term) >= 5 and other <= 1 and sum(c.isalpha() for c in term) >= 3
+
+
 def term_pattern(term: str) -> re.Pattern:
     """How a literal deny-list term matches, here and in scan_pii. A phone number is listed once but
     written many ways ('+1 555-0100' / '+1 (555) 0100' / '15550100'), and a literal match caught
@@ -255,6 +268,23 @@ def _mark(m: re.Match) -> str:
 
 
 _unreadable_said = False
+
+
+def still_shows(text: str) -> bool:
+    """Whether `text`, a reading of redacted output other than the one it was redacted in, shows
+    something redaction should have reached: a credential, or a BLOCK-tier deny-list entry (a
+    pattern, or a term is_hard accepts). Short terms are left out, and so is a match that lies
+    inside a [redacted] marker, because both are found in output that holds nothing: "Ng" is the
+    bytes of two Chinese characters in UTF-16, "4471" those of "447" and a Cyrillic letter, and
+    "Ted" is in every marker, so a UTF-16 file with one substitution was refused (review,
+    2026-10-04)."""
+    literals, regexes = _load_deny()
+    marks = [m.span() for m in re.finditer(re.escape(MARK), text)]
+    for rx in (_PEM_BLOCK, *_CRED, *regexes, *(term_pattern(t) for t in literals if is_hard(t))):
+        for m in rx.finditer(text):
+            if not any(a <= m.start() and m.end() <= b for a, b in marks):
+                return True
+    return False
 
 
 def redact_text(s: str) -> tuple[str, int]:
@@ -336,15 +366,17 @@ if __name__ == "__main__":
     # private-use characters, so a term in it went out unredacted with "0 substitution(s)" and exit
     # 0. The first fix re-read the input as UTF-8 alone, on the claim that cmd appends UTF-8, which
     # it does not (review, 2026-10-02). So what is about to be written is read every other likely
-    # way (scan_secrets.readings), and if any reading still shows a deny-listed term or a
-    # credential, nothing is written. Which writer left it there is not known and not claimed.
-    # Clean UTF-8 has no other reading, so this costs a UTF-8 file nothing.
+    # way (scan_secrets.readings), and if any reading still shows a credential or a BLOCK-tier
+    # deny-list entry outside a [redacted] marker (still_shows), nothing is written. Which writer
+    # left it there is not known and not claimed, nor that the file is in two encodings: a file
+    # that is UTF-16 throughout can show a listed number in its bytes read as UTF-8. Clean UTF-8
+    # has no other reading, so this costs a UTF-8 file nothing.
     from scan_secrets import readings           # no fallback: without it this check cannot be made
     for way, text in readings(done):
-        if way and redact_text(text)[1]:
-            sys.stderr.write(f"redact: input starts as {enc.upper()}, but read as {way} it holds a deny-listed"
-                             " term or a credential that redaction did not reach (a file in more than one"
-                             " encoding?); re-save it as UTF-8. Nothing was written.\n")
+        if way and still_shows(text):
+            sys.stderr.write(f"redact: read as {way}, the input shows a deny-listed term or a credential that"
+                             f" redaction, done in {enc.upper()}, did not reach; re-save it as UTF-8. Nothing"
+                             " was written.\n")
             sys.exit(2)
     sys.stderr.write(f"redact: {hits} substitution(s)\n")
     sys.stdout.buffer.write(done)                    # bytes: no newline translation on Windows
