@@ -1,19 +1,25 @@
 """Regressions for the 2026-10-02 review of rlm.py: a model name chosen by model code reached argv.
 
 Model-written code in the REPL can pass model= to rlm()/rlm_map(), and rlm.py put it unchecked into
-[claude, "-p", "--model", model]. On Windows claude resolves to npm's claude.cmd, which CreateProcess
-runs through cmd.exe, and CPython does not escape arguments for a batch file, so a model name of
-`x|calc` would run calc outside the sandbox; model=123 ended the run with an uncaught TypeError.
+[claude, "-p", "--model", model]. Where claude on Windows is npm's claude.cmd (the native installer's
+claude.exe is not affected), CreateProcess runs it through cmd.exe, and CPython does not escape
+arguments for a batch file, so a model name of `x|calc` would run calc outside the sandbox;
+model=123 ended the run with an uncaught TypeError.
 
 1. Hostile model names are refused before any process starts: the stub claude never sees them, the
    model code gets an error string back, and the run completes. A valid name still gets through.
 2. model=123 is refused the same way instead of crashing the run.
 3. An invalid --root-model / --sub-model stops rlm.py before it calls claude at all.
-4. The batch-file guard refuses cmd.exe metacharacters in the arguments of a .cmd/.bat launch.
+4. Real model ids pass the name check, the Vertex (claude-...@20250929) and Bedrock ARN
+   (arn:aws:bedrock:...:inference-profile/...) forms included; cmd.exe metacharacters, an option
+   ("-p"), an empty name, a space, a newline and 201 characters do not.
+5. The batch-file guard refuses cmd.exe metacharacters in the arguments of a .cmd/.bat launch.
 
-Checks 1-4 fail with PALIMPSEST_TOOLS pointed at tools/ from 60b4bff, except the valid-name check
-in 1, which is the control and passes on both. Every model call goes to a fake `claude` first on
-PATH that logs its argv and never talks to anything.
+With PALIMPSEST_TOOLS pointed at a tools/ from before rlm.py checked model names, checks 1-5 fail,
+except the valid-name check in 1, which is the control and passes on both. Pointed at a tools/
+whose name check did not yet allow "@" and "/", only check 4 fails: it refused the Vertex and ARN
+ids. Every model call goes to a fake `claude` first on PATH that logs its argv and never talks to
+anything.
 """
 import json, os, subprocess, sys
 from pathlib import Path
