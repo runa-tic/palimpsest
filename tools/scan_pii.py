@@ -21,6 +21,10 @@ cp1251/cp1252). A line that is not clean UTF-8 or UTF-16 is checked in every lik
 the commit is blocked until the file is re-saved as UTF-8: which codepage it is cannot be known,
 so a clean result over it would be a guess.
 
+A deny list that is there but cannot be read (no permission, a directory or a dangling link in its
+place) blocks every commit too: nothing was checked against it, and until the review of 2026-10-02
+that passed as clean without a word.
+
 A staged file, or a staged name, that is not clean UTF-8 is checked in every likely reading as
 well (scan_secrets.readings: its BOM's encoding, UTF-8, cp1251, cp1252, cp866, UTF-16 from either
 byte), and a term in any of them counts: a file's first bytes do not say what a later writer
@@ -37,7 +41,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redact import DENY_FILE, load_deny_report, is_phone, term_pattern   # the one parser/matcher
+from redact import DENY_FILE, DenyListUnreadable, load_deny_report, is_phone, term_pattern   # the one parser/matcher
 from scan_secrets import NotScanned, masked_path, path_bytes, path_readings, staged_blobs, staged_files
 
 
@@ -103,7 +107,17 @@ def _counted(found: dict) -> list[tuple[str, str, int, str]]:
 
 
 def main() -> int:
-    literals, regexes, problems = load_deny_report()
+    try:
+        literals, regexes, problems = load_deny_report()
+    except DenyListUnreadable as e:
+        # Fail closed. This returned "no terms", so the scan exited 0 having checked nothing, and
+        # the unattended push went on trusting it (review, 2026-10-02). The reason is an error's
+        # name or fixed words, never a value: nothing of the list was read.
+        print("")
+        print(f"Commit blocked by pii-scan — tools/{DENY_FILE.name} is there but cannot be read ({e}),")
+        print("so no staged file was checked against it. Make it a file this user can read and commit")
+        print("again. If you mean to have no deny list, delete it.")
+        return 1
     if not literals and not regexes and not problems:
         return 0
     hard = [t for t in literals if is_hard(t)]

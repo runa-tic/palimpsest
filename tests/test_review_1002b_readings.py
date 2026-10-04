@@ -1,7 +1,8 @@
 """Bytes that do not decode cleanly are checked in every likely reading, not in the one their first bytes name.
 
 Review of 2026-10-02, second pass. The commit guards and the redact CLI each trusted one reading
-of a file, the one its first bytes name, and the guards one reading of a staged name.
+of a file, the one its first bytes name, and the guards one reading of a staged name; all three
+also took a deny list they could not read for no deny list at all.
 
 A file's first bytes say how it began, not what a later writer appended: PowerShell 5.1 `>>`
 appends UTF-16 to anything, Git Bash appends UTF-8 to a UTF-16 file, cmd.exe's `echo >>` appends
@@ -35,15 +36,22 @@ encodings those programs are understood to use; none of the programs was run.
  7. The redact CLI exits 2 and writes nothing for a UTF-16 file followed by (D1) a cp1251 line,
     (D2) UTF-16 after an odd number of bytes, (D3) a cp866 line. A file that is UTF-16 throughout
     is still redacted in UTF-16, byte for byte.
+ 8. A deny list that is there but cannot be read (a directory in its place; mode 000; a dangling
+    link) blocks scan_pii with a message that says so, and makes the redact CLI exit 2 with
+    nothing written. No deny list at all still passes.
+ 9. The recorder still records with such a list: hook_record exits 0, the note is written with
+    its credentials masked, and stderr says once that deny-listed terms were not redacted. The
+    commit guard then blocks that note, while the list is unreadable and after it is readable.
 
 Set PALIMPSEST_TOOLS to a tools/ tree from before these fixes to see the checks fail; 2(b), the
-passing halves of 5, the key half of 6 and the second half of 7 held before and pass there.
+passing halves of 5 and 8, the key half of 6 and the second half of 7 held before and pass there.
 """
 import codecs, hashlib, json, os, subprocess, sys
 import _util
-from _util import Checks, run, write
+from _util import Checks, git, run, write
 
 TERM = "Сидорова"                                       # synthetic deny-listed surname, Cyrillic
+NAME = "Zorbanek"                                       # synthetic, Latin
 MAIL = "zq.private@example.invalid"                     # synthetic address
 AKIA = "AKIA" + "QZXW" * 4                              # synthetic, AWS-shaped
 AWS_SECRET = "Ab3dEf9hIj" * 4                           # synthetic, 40 characters
@@ -267,6 +275,76 @@ def main() -> int:
             bad.append((enc, rc, out[:80], err))
     c.ok(not bad, "7. a file that is UTF-16 throughout is still redacted in UTF-16, byte for byte (held before)",
          repr(bad)[:800])
+
+    # 8. a deny list that is there but cannot be read
+    def unreadable(how: str, make, undo=lambda p: None) -> None:
+        v = vault()
+        stage(v, b"10 Notes/n.md", f"met {NAME} today\n".encode("utf-8"))
+        make(v / "tools" / ".redact_terms.txt")
+        try:
+            r = run(v, "scan_pii.py")
+            rc, out, err = cli(v, f"met {NAME} today\n".encode("utf-8"))
+        finally:
+            undo(v / "tools" / ".redact_terms.txt")
+        c.ok(r.returncode == 1 and "cannot be read" in r.stdout and "Commit blocked" in r.stdout
+             and "Traceback" not in r.stdout + r.stderr and NAME not in r.stdout + r.stderr,
+             f"8. scan_pii blocks the commit when the deny list is {how}, and says so",
+             f"rc={r.returncode} {(r.stdout + r.stderr)[-400:]}")
+        c.ok(rc == 2 and out == b"" and "cannot be read" in err and "substitution" not in err
+             and "Traceback" not in err,
+             f"8. the redact CLI exits 2 and writes nothing when the deny list is {how}",
+             f"rc={rc} out={out!r} err={err[-300:]}")
+
+    unreadable("a directory", lambda p: p.mkdir())
+    if os.name == "nt" or os.geteuid() == 0:
+        c.skip("8. the deny list with mode 000", "Windows has no such mode, and root reads through it")
+    else:
+        def lock(p):
+            p.write_bytes(f"{NAME}\n".encode("utf-8"))
+            p.chmod(0)
+        unreadable("mode 000", lock, lambda p: p.chmod(0o600))
+    if _util.can_symlink():
+        unreadable("a link to a file that is gone", lambda p: os.symlink("not-mounted.txt", p))
+    else:
+        c.skip("8. the deny list as a dangling link", "this process may not create symlinks")
+    v = vault()
+    stage(v, b"10 Notes/n.md", f"met {NAME} today\n".encode("utf-8"))
+    r = run(v, "scan_pii.py")
+    rc, out, err = cli(v, f"met {NAME}, key {AKIA}\n".encode("utf-8"))
+    c.ok(r.returncode == 0 and rc == 0 and out == f"met {NAME}, key {MARK}\n".encode("utf-8"),
+         "8. no deny list at all is still not an error: scan_pii passes and the CLI masks credentials",
+         f"rc={r.returncode} {r.stdout[-200:]} | rc={rc} out={out!r} err={err[-200:]}")
+
+    # 9. the recorder with an unreadable deny list: it records, masks credentials, and says what it did not
+    v = vault()
+    deny = v / "tools" / ".redact_terms.txt"
+    deny.mkdir()
+    rows = [{"type": "user", "timestamp": "2026-10-02T10:00:00Z",
+             "message": {"role": "user", "content": f"notes from the call with {NAME}"}},
+            {"type": "assistant", "timestamp": "2026-10-02T10:00:05Z",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": f"saved; the key was {AKIA}"}]}}]
+    tr = write(v, "fixture/projects/-home-me-proj/abcd1234-0000-0000-0000-000000000000.jsonl",
+               "\n".join(json.dumps(row) for row in rows) + "\n")
+    env = {k: val for k, val in os.environ.items() if k != "CLAUDE_BRAIN_NO_HOOK"}
+    r = subprocess.run([sys.executable, str(v / "tools" / "hook_record.py")], cwd=v, env=env, capture_output=True,
+                       input=json.dumps({"transcript_path": str(tr)}, ensure_ascii=False).encode("utf-8"))
+    err = r.stderr.decode("utf-8", "replace")
+    notes = list((v / "40 Resources" / "Claude Conversations").rglob("*(abcd1234).md"))
+    text = notes[0].read_text(encoding="utf-8") if len(notes) == 1 else ""
+    c.ok(r.returncode == 0 and len(notes) == 1 and MARK in text and AKIA not in text
+         and err.count("deny-listed terms were NOT") == 1 and "Traceback" not in err and NAME not in err,
+         "9. the recorder still records when the deny list cannot be read: credentials masked, and one"
+         " line on stderr says deny-listed terms were not", f"rc={r.returncode} notes={notes} err={err[-400:]}")
+    git(v, "add", "--", "40 Resources")
+    blocked = run(v, "scan_pii.py")
+    deny.rmdir()
+    deny.write_bytes(f"{NAME}\n".encode("utf-8"))
+    after = run(v, "scan_pii.py")
+    c.ok(blocked.returncode == 1 and "cannot be read" in blocked.stdout and after.returncode == 1
+         and "Zo******" in after.stdout and NAME not in blocked.stdout + after.stdout,
+         "9. ...and the commit guard keeps that note out of git: while the list is unreadable, and for"
+         " the term once it is readable",
+         f"{blocked.returncode} {blocked.stdout[-200:]}\n{after.returncode} {after.stdout[-300:]}")
 
     return c.done()
 
