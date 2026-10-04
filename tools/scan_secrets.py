@@ -12,7 +12,7 @@ Severity:
 
 A file that is clean UTF-8 is read as that. Any other file (a UTF-16 or UTF-32 BOM, a NUL or other
 control byte, a byte that is not UTF-8) is read every likely way, and a finding in any reading
-counts: see readings.
+counts: see readings. A file that starts as a known binary format does is read the one way.
 
 Usage (from vault root):
   python tools/scan_secrets.py            # scan staged changes (used by pre-commit)
@@ -235,21 +235,68 @@ def reading_name(codec: str, off: int) -> str:
     return f"{codec} from byte {off}" if off else codec
 
 
+# How the files of the usual binary formats begin. Such a file keeps the one reading every file
+# had before the other readings were added: this is that behaviour kept for these formats, not a
+# new skip, and the one reading still finds an ASCII key or name anywhere in the file. Read every
+# way, 39MB of system binaries took 22s to scan where they had taken 3s (macOS), and code-page
+# readings of compressed data match Cyrillic terms by chance: a five-letter term in either case
+# is 32 of the 256^5 strings of five bytes, about 3 matches per 100,000 terms per MB, and a
+# two-letter one matched 38 times in 600KB of noise (review, 2026-10-04). A signature that is
+# letters alone is taken only with the binary fields that follow it in a real file: a note may
+# well begin "BM", "MZ", "ID3" or "RIFF", and must keep its readings.
+_BINARY_HEADS = re.compile(b"|".join(b"(?:" + rx + b")" for rx in (
+    rb"\x89PNG\r\n\x1a\n",                                   # PNG
+    rb"\xff\xd8\xff",                                          # JPEG
+    rb"GIF8[79]a.[\x00-\x1f].[\x00-\x1f]..\x00",                # GIF under 8192 pixels a side, aspect byte 0
+    rb"RIFF...[\x00-\x08\x0e-\x1f\x80-\xff](?:WEBP|WAVE|AVI )",   # WebP, WAV, AVI: a size that is not text
+    rb"BM.{4}\x00{4}.{4}[\x0c\x28\x34\x38\x40\x6c\x7c]\x00{3}",  # BMP: reserved zeros, a header size
+    rb"\x00\x00[\x01\x02]\x00[^\x00]\x00",                     # ICO, CUR: 1 to 255 images
+    rb"%PDF-\d\.\d",                                            # PDF
+    rb"PK(?:\x03\x04|\x05\x06|\x07\x08)",                      # ZIP: docx, xlsx, jar, apk, epub
+    rb"\x1f\x8b\x08",                                          # gzip
+    rb"BZh[1-9](?:1AY&SY|\x17rE8P\x90)",                        # bzip2
+    rb"\xfd7zXZ\x00",                                          # xz
+    rb"7z\xbc\xaf\x27\x1c",                                    # 7z
+    rb"Rar!\x1a\x07",                                          # RAR
+    rb"ID3[\x02-\x04]\x00.[\x00-\x7f]{4}",                     # MP3 with an ID3v2 tag
+    rb"\x00\x00\x00.ftyp",                                     # MP4, MOV, M4A, HEIC
+    rb"OggS\x00[\x00-\x07]",                                   # Ogg
+    rb"fLaC[\x00\x80]\x00\x00\x22",                            # FLAC
+    rb"SQLite format 3\x00",                                   # SQLite
+    rb"\x7fELF",                                               # ELF
+    rb"\xfe\xed\xfa[\xce\xcf]|[\xce\xcf]\xfa\xed\xfe",          # Mach-O
+    rb"\xca\xfe\xba[\xbe\xbf]|[\xbe\xbf]\xba\xfe\xca",          # Mach-O universal, Java class
+    rb"wOF[F2](?:\x00\x01\x00\x00|OTTO|true|ttcf)",            # WOFF, WOFF2
+    rb"\x00\x01\x00\x00\x00|(?:OTTO|true)\x00|ttcf\x00[\x01\x02]\x00\x00",   # TrueType, OpenType
+)), re.DOTALL)
+
+
+def known_binary(head: bytes) -> bool:
+    """Whether a file's first bytes are those of a known binary format (_BINARY_HEADS, or a
+    Windows executable: "MZ" and the PE signature where its header says). None of them begins
+    as a BOM does, so a file with a BOM is never one."""
+    if _BINARY_HEADS.match(head):
+        return True
+    pe = int.from_bytes(head[0x3c:0x40], "little")
+    return head[:2] == b"MZ" and head[pe:pe + 4] == b"PE\x00\x00"
+
+
 def readings(raw: bytes):
     """(how, text) for every reading of `raw` to check, the usual one (decode) first with how "".
 
     Clean input has that one reading, as before: strictly valid UTF-8 with no control byte of
-    _CONTROL, with or without a UTF-8 BOM. Anything else (a UTF-16 or UTF-32 BOM, a NUL or other
-    control byte, a byte that is not UTF-8) is followed by other_readings: up to nine scans
-    instead of one, for every UTF-16 file and every binary."""
+    _CONTROL, with or without a UTF-8 BOM. So has a known binary format. Anything else (a UTF-16 or
+    UTF-32 BOM, a NUL or other control byte, a byte that is not UTF-8) is followed by
+    other_readings: up to nine scans instead of one."""
     enc = _encoding(raw)
     text = clean_text(raw, enc)
     if text is not None:
         yield "", text
         return
     yield "", decode(raw)
-    for codec, off, alt in other_readings(raw, enc):
-        yield reading_name(codec, off), alt
+    if not known_binary(raw[:HEAD]):
+        for codec, off, alt in other_readings(raw, enc):
+            yield reading_name(codec, off), alt
 
 
 def path_bytes(rel: str) -> bytes | None:
@@ -402,8 +449,8 @@ class _OtherRuns:
 def text_blocks(read, size: int, path: str = ""):
     """(first line number, how, text of whole lines) runs of a file of `size` bytes that `read(n)`
     returns in order. `how` is "" for the usual reading (decode) and names any other reading of the
-    same bytes (see readings, _OtherRuns). Raises NotScanned (before yielding) for a large binary
-    or oversize text."""
+    same bytes (see readings, _OtherRuns). A file that starts as a known binary format has the
+    usual reading alone. Raises NotScanned (before yielding) for a large binary or oversize text."""
     head = _read_n(read, min(size, HEAD))
     if size > MAX_BYTES:
         # Skipped only when the NAME and the BYTES agree it is media: a head that merely looks
@@ -415,12 +462,12 @@ def text_blocks(read, size: int, path: str = ""):
         if size > TEXT_MAX:
             raise NotScanned(f"text over {TEXT_MAX // 1_000_000}MB, too large to scan", fails=True)
     enc = _encoding(head)
-    others = _OtherRuns(enc)
+    others = None if known_binary(head) else _OtherRuns(enc)
     if size <= MAX_BYTES:
         raw = head + _read_n(read, size - len(head))
         text = clean_text(raw, enc)
         yield 1, "", decode(raw) if text is None else text
-        if text is None:
+        if text is None and others:
             for i in range(0, len(raw), CHUNK):
                 yield from others.feed(raw[i:i + CHUNK], i + CHUNK >= len(raw))
         return
@@ -436,7 +483,8 @@ def text_blocks(read, size: int, path: str = ""):
         if block:
             yield line, "", block
             line += len(block.splitlines())
-        yield from others.feed(data, final)
+        if others:
+            yield from others.feed(data, final)
         if final:
             return
         data = _read_n(read, min(CHUNK, left))

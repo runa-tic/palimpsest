@@ -53,6 +53,12 @@ they cost or broke.
     04, valid UTF-8 made of control bytes) is blocked by scan_pii and refused by the redact CLI,
     in either byte order, alone, and after an ASCII line. So is the name in a UTF-32 section, and
     in a UTF-16 file with U+0000 between its letters.
+11. A file that starts as a known binary format does has the usual reading alone, under 5MB and
+    over it: a file of noise after a PNG signature, and a minimal head of each format listed. A
+    Cyrillic name in cp1251 inside such a file is not seen, as before the other readings were
+    added; an ASCII key and an ASCII name after the PNG signature still block. A note that
+    merely begins with the letters such a format begins with ("BM", "MZ", "ID3", "RIFF", ...)
+    keeps every reading, and so does a file with a BOM before the signature.
 
 With the tools from before the 2026-10-04 fixes the checks from 10 on fail, and so do the parts
 of 1 and 7 added with them, except the checks that say "held before" in their names: those passed
@@ -106,6 +112,59 @@ def noise(n: int) -> bytes:
         out += hashlib.sha256(b"readings" + i.to_bytes(4, "big")).digest()
         i += 1
     return bytes(out[:n])
+
+
+def ask(v, code: str, data: dict | None = None):
+    """What a driver run in vault v prints as JSON: `code` sees scan_secrets as s, redact as redact,
+    and `data`, the JSON given. None when it fails."""
+    driver = (_util.UTF8_STDIO + "import io, json, sys\nsys.path.insert(0, 'tools')\nimport redact, scan_secrets as s\n"
+              "data = json.load(sys.stdin)\n" + code)
+    r = subprocess.run([sys.executable, "-c", driver], cwd=v, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", input=json.dumps(data or {}))
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+# How a file of each known binary format begins: a minimal head, built here. None is a real file.
+BINARY_HEADS = {
+    "PNG": b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+    "JPEG": b"\xff\xd8\xff\xe0\x00\x10JFIF\x00",
+    "GIF": b"GIF89a\x10\x00\x10\x00\x80\x00\x00",
+    "WebP": b"RIFF\x24\x00\x00\x00WEBPVP8 ",
+    "WAV": b"RIFF\x24\x00\x00\x00WAVEfmt ",
+    "BMP": b"BM\x46\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00\x28\x00\x00\x00",
+    "ICO": b"\x00\x00\x01\x00\x01\x00\x10\x10\x00\x00",
+    "PDF": b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n",
+    "ZIP": b"PK\x03\x04\x14\x00\x00\x00\x08\x00",
+    "gzip": b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03",
+    "bzip2": b"BZh91AY&SY\x00\x00",
+    "xz": b"\xfd7zXZ\x00\x00\x04",
+    "7z": b"7z\xbc\xaf\x27\x1c\x00\x04",
+    "RAR": b"Rar!\x1a\x07\x00",
+    "MP3 with an ID3 tag": b"ID3\x04\x00\x00\x00\x00\x02\x01TIT2",
+    "MP4": b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00",
+    "MOV": b"\x00\x00\x00\x14ftypqt  ",
+    "Ogg": b"OggS\x00\x02\x00\x00\x00\x00",
+    "FLAC": b"fLaC\x00\x00\x00\x22\x10\x00",
+    "SQLite": b"SQLite format 3\x00\x10\x00",
+    "ELF": b"\x7fELF\x02\x01\x01\x00",
+    "Mach-O": b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01",
+    "Mach-O universal, or a class file": b"\xca\xfe\xba\xbe\x00\x00\x00\x41",
+    "PE": b"MZ\x90\x00" + b"\x00" * 56 + (0x80).to_bytes(4, "little") + b"\x00" * 64 + b"PE\x00\x00\x4c\x01",
+    "WOFF": b"wOFF\x00\x01\x00\x00",
+    "WOFF2": b"wOF2OTTO\x00\x00",
+    "TrueType": b"\x00\x01\x00\x00\x00\x0c\x00\x80",
+    "OpenType": b"OTTO\x00\x0b\x00\x80",
+}
+# Notes that begin with the letters one of those formats begins with, and one with a BOM first.
+TEXT_HEADS = [b"BMW service notes\n", b"MZ is a region code\n", b"ID3 tags of the album\n",
+              b"RIFF is a container format\n", b"RIFF or WAVE, which is it\n", b"GIF89a is the version\n",
+              "GIF89a — формат\n".encode("utf-8"), b"OTTO was the name\n",
+              b"true or false\n", b"BZh is not a word\n", b"PK, the notes\n", b"%PDF is how one begins\n",
+              b"OggS and fLaC files\n", b"wOFF fonts\n", b"Rar! archive notes\n", b"7z archive notes\n",
+              b"SQLite format 3 is its header\n", codecs.BOM_UTF8 + b"\x89PNG\r\n\x1a\n in a note\n"]
 
 
 # The mixed files of checks 2 and 3. Each holds SECRET exactly once, in the appended part.
@@ -397,6 +456,50 @@ def main() -> int:
         c.ok(rp.returncode == 1 and "1x Си******" in rp.stdout and rc == 2 and out == b"",
              f"10. scan_pii blocks the name {name}" + (", and the redact CLI writes nothing" if through_cli else ""),
              f"rc={rp.returncode} {rp.stdout[-300:]} | cli rc={rc} out={out[:60]!r} err={err[-200:]}")
+
+    # 11. a known binary format has the usual reading alone
+    v = vault(f"{TERM}\n{NAME}\n".encode("utf-8"))
+    chunk, head, max_bytes = ask(v, "print(json.dumps([s.CHUNK, s.HEAD, s.MAX_BYTES]))") or (1 << 20, 8192, 5_000_000)
+    png = BINARY_HEADS["PNG"]
+    cp_line = f"met {TERM} today\r\n".encode("cp1251")
+    samples = {f"binary: {k}": b + noise(4000) for k, b in BINARY_HEADS.items()}
+    samples["binary: PNG, 3MB"] = png + noise(3_000_000)
+    samples["binary: PNG, over 5MB"] = png + noise(max_bytes + 300_000)
+    samples.update({f"text: {t[:12]!r}": t + cp_line for t in TEXT_HEADS})
+    got = ask(v, "out = {}\n"
+                 "known = getattr(s, 'known_binary', lambda head: None)\n"
+                 "for name, raw in data.items():\n"
+                 "    raw = bytes.fromhex(raw)\n"
+                 "    blocks = list(s.text_blocks(io.BytesIO(raw).read, len(raw), 'x.dat'))\n"
+                 "    out[name] = [known(raw[:s.HEAD]), sorted({b[1] for b in blocks}), [h for h, _ in s.readings(raw)]]\n"
+                 "print(json.dumps(out))\n", {k: b.hex() for k, b in samples.items()}) or {}
+    wrong = {k: val for k, val in got.items() if k.startswith("binary") and val != [True, [""], [""]]}
+    c.ok(len(got) == len(samples) and not wrong,
+         f"11. a file that starts as one of {len(BINARY_HEADS)} known binary formats does has the usual reading"
+         " alone, read whole and (over 5MB) in runs", f"{len(got)} of {len(samples)} answered; wrong: {wrong!r}"[:900])
+    wrong = {k: val for k, val in got.items() if k.startswith("text")
+             and (val[0] is not False or "cp1251" not in val[1] or "cp1251" not in val[2])}
+    c.ok(len(got) == len(samples) and not wrong,
+         f"11. a note that begins with the letters such a format begins with, or has a BOM before its"
+         f" signature, keeps every reading ({len(TEXT_HEADS)} of them)", repr(wrong)[:900])
+    stage(v, b"40 Resources/shot.png", png + noise(100_000) + b"\n" + cp_line + noise(1000))
+    rp = run(v, "scan_pii.py")
+    c.ok(rp.returncode == 0 and "pii-scan: clean" in rp.stdout,
+         "11. a Cyrillic name in cp1251 inside a PNG is not seen: the one reading such a file had before"
+         " the other readings were added", f"rc={rp.returncode} {rp.stdout[-300:]}")
+    stage(v, b"40 Resources/shot.png", png + noise(100_000) + f"\nkey {AKIA} met {NAME}\n".encode() + noise(1000))
+    rs, rp = run(v, "scan_secrets.py"), run(v, "scan_pii.py")
+    c.ok(rs.returncode == 1 and rs.stdout.count("AWS access key id") == 1 and AKIA not in rs.stdout
+         and rp.returncode == 1 and "shot.png: 1x Zo******" in rp.stdout,
+         "11. an ASCII key and an ASCII name after a PNG signature still block (held before)",
+         f"{rs.returncode} {rs.stdout[-300:]}\n{rp.returncode} {rp.stdout[-300:]}")
+    v = vault(f"{TERM}\n".encode("utf-8"))
+    for i, t in enumerate(TEXT_HEADS):
+        stage(v, f"10 Notes/note {i:02d}.md".encode(), t + cp_line)
+    rp = run(v, "scan_pii.py")
+    c.ok(rp.returncode == 1 and rp.stdout.count(".md: 1x Си******  (read as cp1251)") == len(TEXT_HEADS),
+         "11. ...and scan_pii blocks a cp1251 name in each of those notes (held before)",
+         f"rc={rp.returncode} {rp.stdout[-600:]}")
 
     return c.done()
 

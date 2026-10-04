@@ -28,7 +28,8 @@ that passed as clean without a word.
 A staged file, or a staged name, that is not clean UTF-8 is checked in every likely reading as
 well (scan_secrets.readings: its BOM's encoding, UTF-8, cp1251, cp1252, cp866, UTF-16 from either
 byte), and a term in any of them counts: a file's first bytes do not say what a later writer
-appended to it.
+appended to it. A file that starts as a known binary format does has the usual reading alone
+(scan_secrets.known_binary).
 
 Values are never printed. The Stop hook records this session into the vault, so echoing an
 address while removing it just recreates the leak in a new file; masked forms only.
