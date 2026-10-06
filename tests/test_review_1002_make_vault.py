@@ -154,6 +154,10 @@ def main() -> int:
     # "sub/" entry, and copying that entry as a file raised IsADirectoryError.
     nest = tempdir("palimpsest-tools-nested-")
     git(nest, "init", "-q", "-b", "main")
+    # Its own identity, as src has: without one this commit needs a global git identity, and on a
+    # machine with none (a Windows run under an empty home, 2026-10-06) it exits 128.
+    git(nest, "config", "user.name", "test")
+    git(nest, "config", "user.email", "test@example.invalid")
     write(nest, "tools/a.py", "print(1)\n")
     git(nest, "add", "tools/a.py"); git(nest, "commit", "-q", "-m", "seed")
     git(nest / "tools", "init", "-q", "sub")
