@@ -26,7 +26,8 @@ Rework after the review of fix/scanners (2026-09-30):
 15. A staged file over 5MB is not read into the hook, and is listed as NOT scanned by both guards.
 16. The JSON-escaped AWS secret access key is redacted and blocked, and its label survives.
 17. A private key quoted with "> " on every line (a thinking callout) is redacted whole.
-18. A phone-shaped term does not match inside a longer run of digits (a Telegram id).
+18. A phone-shaped term blocks as its own number. Inside a longer run of digits (a Telegram id) it
+    does not block: it warns, and is still redacted (2026-10-06; it was left as it stood there).
 
 Second review of fix/scanners (2026-09-30):
 19. A staged TEXT file over 5MB is still scanned (in chunks) by both guards and blocks the commit,
@@ -317,8 +318,9 @@ def main() -> int:
     git(v18, "add", "-A")
     loud = run(v18, "scan_pii.py")
     out = redact(v18, "id 9555010077123 / call 555.0100.77\n")
-    c.ok(quiet.returncode == 0 and loud.returncode == 1 and "9555010077123" in out and "0100.77" not in out,
-         "a phone-shaped term blocks its own number but not a longer digit run containing it",
+    c.ok(quiet.returncode == 0 and "inside a longer number" in quiet.stdout and loud.returncode == 1
+         and "555010077" not in out and "0100.77" not in out,
+         "a phone-shaped term blocks its own number; in a longer digit run it warns and is redacted, without blocking",
          quiet.stdout + loud.stdout + out)
 
     # 19. large staged TEXT is scanned by both guards and blocks the commit (the size cap skipped it)

@@ -9,12 +9,15 @@ address, deny-listed since 07-23, sitting in an atomic note written 08-04.
 
 Two tiers, matching the secret scanner's block/warn split:
   BLOCK  terms that are unambiguously an identifier — anything containing "@", a phone number
-         or other run of 7+ digits (matched in any separator spelling), or an alphabetic term of
+         or other run of 7+ digits (matched in any separator spelling, as a whole number or
+         behind a country/trunk code such as "+7", "+380" or "8"), or an alphabetic term of
          5+ characters (surnames, full names, handles, reference codes); spaces, hyphens,
          apostrophes and dots do not count against "alphabetic".
   WARN   short numeric literals and short words (amounts, small ids, 2-4 letter names). These
          collide with legitimate vault content — the vault is full of numbers — so they report
          and let the commit through rather than wedging the automated sync on a coincidence.
+         A phone-shaped term found deep inside a longer digit run (a Telegram id, a timestamp)
+         warns too, for the same reason.
 
 The deny list is read line by line in whatever Windows saved or appended it as (UTF-8, UTF-16,
 cp1251/cp1252). A line that is not clean UTF-8 or UTF-16 is checked in every likely reading, AND
@@ -43,7 +46,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redact import BAD_PATTERN, DENY_FILE, DenyListUnreadable, is_hard, load_deny_report, term_pattern   # the one parser/matcher
+from redact import BAD_PATTERN, DENY_FILE, DenyListUnreadable, is_hard, load_deny_report, term_pattern, block_pattern   # the one parser/matcher
 from scan_secrets import NotScanned, masked_path, path_bytes, path_readings, staged_blobs, staged_files
 
 
@@ -69,22 +72,33 @@ def _safe_path(rel: str, literals, regexes) -> str:
 
 
 def _scan(rel: str, way: str, content: str, hard, soft, regexes, blocking: dict, warning: dict) -> None:
-    """Add this text's match counts to blocking / warning, keyed (file label, term) with the
+    """Add this text's match counts to blocking / warning, keyed (file label, term[, why]) with the
     masked term as the value's label: a large file arrives in several runs of lines. Counts are
     kept per reading (`way`, "" for the usual one): the readings of a file are the same bytes, so
     adding them up would count one occurrence up to nine times (see _counted).
 
-    Another reading is matched against the BLOCK terms alone (is_hard, and the patterns). A WARN
-    term is a few letters or digits, which the wrong reading of any bytes holds by chance: "Ng"
-    was counted 300 times in a UTF-16 file of 300 lines of Chinese with no such letters in it, and
-    a two-letter Cyrillic term 38 times in 600KB of noise read as cp1251 (review, 2026-10-04)."""
+    Another reading is matched against the BLOCK terms alone (is_hard, and the patterns), and adds
+    no warning. A WARN term is a few letters or digits, which the wrong reading of any bytes holds
+    by chance: "Ng" was counted 300 times in a UTF-16 file of 300 lines of Chinese with no such
+    letters in it, and a two-letter Cyrillic term 38 times in 600KB of noise read as cp1251
+    (review, 2026-10-04)."""
     if not content:
         return
-    for terms, into in ((hard, blocking), (soft if not way else (), warning)):
-        for term in terms:
+    def add(into: dict, key: tuple, shown: str, n: int) -> None:
+        by = into.setdefault(key, (shown, {}))[1]
+        by[way] = by.get(way, 0) + n
+
+    for term in hard:
+        n = len(block_pattern(term).findall(content))
+        if n:
+            add(blocking, (rel, term), mask(term), n)
+        # A phone's digits also inside a longer number: redacted by the recorder, not blocking.
+        if not way and (rest := len(term_pattern(term).findall(content)) - n) > 0:
+            add(warning, (rel, term, "long"), mask(term) + " (inside a longer number)", rest)
+    if not way:
+        for term in soft:
             if n := len(term_pattern(term).findall(content)):
-                by = into.setdefault((rel, term), (mask(term), {}))[1]
-                by[way] = by.get(way, 0) + n
+                add(warning, (rel, term, "soft"), mask(term) + " (numeric/short)", n)
     for rx in regexes:
         if n := len(rx.findall(content)):
             by = blocking.setdefault((rel, rx), (f"re:{mask(rx.pattern)}", {}))[1]
@@ -96,7 +110,8 @@ def _counted(found: dict) -> list[tuple[str, str, int, str]]:
     term most often, and a note naming that reading when it is not the usual one, since the
     file's own editor does not show the term there. A warning is always of the usual reading."""
     out = []
-    for (rel, _), (shown, by) in found.items():
+    for key, (shown, by) in found.items():
+        rel = key[0]
         way = max(by, key=lambda w: (by[w], not w))         # the usual reading wins a tie
         out.append((rel, shown, by[way], f"  (read as {way})" if way else ""))
     return out
@@ -146,7 +161,7 @@ def main() -> int:
         print("pii-scan: FAILED — a staged file above could not be scanned, so the commit is not clean.")
 
     for rel, m, n, note in warning:
-        print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m} (numeric/short; not blocking){note}")
+        print(f"pii-scan WARN: {rel} — {n}x deny-listed literal {m}, not blocking{note}")
 
     unclean = [(i, what) for i, what in problems if what != BAD_PATTERN]
     if unclean:

@@ -13,8 +13,10 @@ Two redaction sources:
   2. A local, git-ignored deny list: tools/.redact_terms.txt — one term per line.
          plain line   -> literal, case-insensitive substring match. A number of 7+ digits
                          with only " +-.()" besides (a phone, an EMPLID, an application
-                         number) matches its digits in any separator spelling, but not
-                         inside a longer digit run; scan_pii blocks a commit on it.
+                         number) matches its digits in any separator spelling, still as a
+                         substring ("+7" / "8" written in front stay, the number goes).
+                         scan_pii blocks a commit on it as a whole number ("+" and 1-3
+                         digits, or one bare digit, allowed in front) and warns on the rest.
          re: PATTERN  -> Python regex (case-insensitive)
          # comment
      This is where personal identifiers go (EMPLIDs, application numbers, emails,
@@ -67,9 +69,13 @@ _BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"))   # w
 # Where a UTF-16 section starts: its BOM at the start of the file or of a line, or anywhere when the
 # next two bytes are an ASCII character in that byte order. PowerShell 5 `>>` appends UTF-16 with a
 # BOM to a UTF-8 file, and the file may not end in a newline. "\xff\xfe" is also cp1251 "яю", which
-# never starts a line and is never followed by a NUL.
+# never starts a line and is never followed by a NUL. A first character up to U+05FF that is not
+# ASCII (Cyrillic, Greek, Hebrew, accented Latin) has a byte 0x01-0x05 in it, which UTF-8 and
+# cp1251/cp1252 text never holds: without this, "Smithson" + UTF-16 "Иванов" merged into one line
+# of mojibake and both terms were lost to redaction (review, 2026-10-01).
 _UTF16_START = re.compile(
-    rb"(?:\A|(?<=\n)|(?<=\n\x00))(?:\xff\xfe|\xfe\xff)|\xff\xfe(?=[^\x00]\x00)|\xfe\xff(?=\x00[^\x00])")
+    rb"(?:\A|(?<=\n)|(?<=\n\x00))(?:\xff\xfe|\xfe\xff)"
+    rb"|\xff\xfe(?=[^\x00]\x00|[\x00-\xff][\x01-\x05])|\xfe\xff(?=\x00[^\x00]|[\x01-\x05][\x00-\xff])")
 _LEGACY = ("cp1251", "cp1252")     # Windows ANSI for the lists this vault holds; not tellable apart
 
 
@@ -243,6 +249,11 @@ def is_phone(term: str) -> bool:
     return sum(c.isdigit() for c in term) >= 7 and all(c.isdigit() or c in " +-.()" for c in term)
 
 
+def _digit_run(term: str) -> str:
+    """A phone-shaped term's digits, any separators between them."""
+    return r"[\s().+-]*".join(c for c in term if c.isdigit())
+
+
 def is_hard(term: str) -> bool:
     """Whether a literal term is BLOCK-tier: one scan_pii blocks a commit on, rather than warns
     about, and the only kind matched in a reading other than the usual one."""
@@ -257,14 +268,30 @@ def is_hard(term: str) -> bool:
 
 
 def term_pattern(term: str) -> re.Pattern:
-    """How a literal deny-list term matches, here and in scan_pii. A phone number is listed once but
-    written many ways ('+1 555-0100' / '+1 (555) 0100' / '15550100'), and a literal match caught
-    only the spelling on the list, so its digits match with any separators between them. Not
-    inside a longer run of digits: a 7-digit id blocks the commit now, and a Telegram id or a
-    timestamp that merely contains its digits must not stop the unattended nightly push."""
+    """How a literal deny-list term is REDACTED (and masked in printed paths). A phone number is
+    listed once but written many ways ('+1 555-0100' / '+1 (555) 0100' / '15550100'), and a
+    literal match caught only the spelling on the list, so its digits match with any separators
+    between them. Still a substring, as the literal was: a Russian number is listed as its 10
+    digits and written '+7XXXXXXXXXX' or '8XXXXXXXXXX', and a digit boundary here let exactly those
+    through into the note raw (review, 2026-10-01). Masking a Telegram id that
+    happens to contain the digits costs nothing; missing the number is the leak."""
     if is_phone(term):
-        return re.compile(r"(?<![0-9])" + r"[\s().+-]*".join(c for c in term if c.isdigit()) + r"(?![0-9])")
+        return re.compile(_digit_run(term))
     return re.compile(re.escape(term), re.I)
+
+
+def block_pattern(term: str) -> re.Pattern:
+    """How scan_pii decides a literal term BLOCKS a commit. A phone-shaped term blocks as a whole
+    number, with a country or trunk code written in front of it allowed: '+' and 1-3 digits
+    ('+7', '+380'), or one bare digit ('8', '0', '7'). Not deep inside a longer digit run: a
+    10-digit Telegram id, a -100 channel id or a millisecond timestamp that merely contains a
+    listed id must not stop the unattended nightly push, so three bare digits in front do not
+    count. Such a hit is a WARN (the term_pattern count minus this one). Every block_pattern hit
+    is also a term_pattern hit, so a note the recorder wrote never blocks on a phone."""
+    if is_phone(term):
+        return re.compile(r"(?<![0-9])(?:\+[0-9]{1,3}[\s().-]*|[0-9][\s().-]*)?"
+                          + _digit_run(term) + r"(?![0-9])")
+    return term_pattern(term)
 
 
 # A private key is a BLOCK: the header alone matched before (the scanner's pattern is only the
