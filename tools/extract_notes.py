@@ -124,15 +124,16 @@ def default_mode(path: Path) -> int:
         return 0o666 & ~mask
 
 
-def write_state(path: Path, state: dict, mode: int | None = None):
+def write_whole(path: Path, text: str, mode: int | None = None):
     # Atomic: write a temp file, then rename over. Rewriting in place left a truncated file
     # whenever sync.py's timeout killed the step mid-write. The temp file sits in the gitignored
     # logs dir (same filesystem), so one orphaned by a kill is never committed.
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(LOCK_DIR), prefix=path.name + ".", suffix=".tmp")
+    # 40 characters of the name: a note's can be 200 bytes, and the temp name adds to it.
+    fd, tmp = tempfile.mkstemp(dir=str(LOCK_DIR), prefix=path.name[:40] + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(state, indent=2))
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         if mode is not None:
@@ -144,6 +145,18 @@ def write_state(path: Path, state: dict, mode: int | None = None):
         except OSError:
             pass
         raise
+
+
+def write_state(path: Path, state: dict, mode: int | None = None):
+    write_whole(path, json.dumps(state, indent=2), mode)
+
+
+def write_item(dest: Path, content: str):
+    """A new note or proposed skill, whole or not at all. Written straight to its name, a write cut
+    short (the disk filling, or sync.py's timeout) left a fragment there; the retry never overwrites
+    an existing item, so it kept the fragment and checkpointed the conversation as done (review,
+    2026-10-06). The same bytes as write_text gave, and the mode a plain write would."""
+    write_whole(dest, content, default_mode(dest))
 
 
 def load_state() -> dict:
@@ -200,6 +213,30 @@ def content_sig(transcript: str) -> str:
     are normalised so a CRLF checkout hashes the same as the machine that wrote the note."""
     norm = transcript.replace("\r\n", "\n").replace("\r", "\n")
     return "sha1:" + hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def read_transcript(src: Path, checked: str | None) -> tuple[bytes | None, str, str]:
+    """A conversation note as (its bytes, its "mtime_ns:size", its text with LF line ends); the
+    bytes are None, and the file is not read, when the second equals `checked`. Raises OSError or
+    UnicodeDecodeError: both extractors catch them per conversation. They read and decoded outside
+    the handler that skips a failed conversation, so one transcript that is not UTF-8 (a file
+    saved by PowerShell 5.1's `>`, an export in a code page) ended the run with a traceback before
+    any later conversation was looked at, every night (review, 2026-10-06). Strict, not
+    errors="replace": UTF-16 read that way is NULs and U+FFFD, the model finds nothing in it, and
+    the conversation would be checkpointed as done."""
+    st = src.stat()
+    stat_sig = f"{st.st_mtime_ns}:{st.st_size}"
+    if checked == stat_sig:
+        return None, stat_sig, ""
+    raw = src.read_bytes()
+    return raw, stat_sig, raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def unreadable(e: Exception) -> str:
+    """Why read_transcript failed, for the "skipped" line."""
+    if isinstance(e, UnicodeDecodeError):
+        return f"not UTF-8 text: byte 0x{e.object[e.start]:02x} at {e.start}; re-save it as UTF-8"
+    return f"unreadable: {e}"
 
 
 def file_sizes(raw: bytes) -> set[int]:
@@ -642,7 +679,7 @@ def write_atomic_note(note: dict, src: Path, date: str, dry: bool, sig: str = ""
         remember_note(title, body, tags)
         return fname
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content, encoding="utf-8")
+    write_item(dest, content)
     remember_note(title, body, tags)   # so a later note in this same run sees it too
     print(f"  + 10 Notes/{fname}")
     return fname
@@ -673,13 +710,15 @@ def main():
     adopted = False
     for src in sources:
         key = str(src.relative_to(VAULT))
-        st = src.stat()
-        stat_sig = f"{st.st_mtime_ns}:{st.st_size}"
         prev = state.get(key, {})
-        if not args.force and prev.get("stat") == stat_sig:
-            continue                     # untouched since it was checked: skip without reading it
-        raw = src.read_bytes()
-        transcript = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            raw, stat_sig, transcript = read_transcript(src, None if args.force else prev.get("stat"))
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"• {src.name}\n  ! skipped ({unreadable(e)})")
+            failed.append(src.name)
+            continue
+        if raw is None:
+            continue                     # untouched since it was checked: skipped without reading it
         # strip the frontmatter of the conversation note before sending
         transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
         sig = content_sig(transcript)

@@ -183,6 +183,12 @@ def run_guards(env: dict | None = None) -> tuple[bool, str]:
     return True, "\n".join(out)
 
 
+# How push_target's error begins when no remote is named at all. That is a vault with nowhere to
+# push to or pull from yet, and not a failure; a remote that is named and missing, or a config that
+# cannot be read, is one.
+NOT_SET = "`push_remote` is not set in palimpsest.json"
+
+
 def push_target() -> tuple[str, str]:
     """(remote, error). The remote is palimpsest.json's push_remote and must exist."""
     sys.path.insert(0, str(TOOLS))
@@ -197,7 +203,7 @@ def push_target() -> tuple[str, str]:
         # to add a key the file may already hold.
         return "", f"{broken} — so push_remote cannot be read"
     if not remote:
-        return "", ("`push_remote` is not set in palimpsest.json. Set it to YOUR vault's remote. If "
+        return "", (NOT_SET + ". Set it to YOUR vault's remote. If "
                     "you cloned Palimpsest and use the clone as your vault, `origin` still points at "
                     "the harness repo and your notes would be pushed there.")
     have = git("remote").stdout.split()
@@ -228,14 +234,63 @@ def _set_aside() -> dict[str, bytes]:
     return kept
 
 
+def _staged() -> dict | None:
+    """What is staged by hand, before a pull: the index as a tree, HEAD, and the staged paths.
+    None when nothing is staged, which is every unattended run."""
+    paths = [p for p in git("diff", "--cached", "--name-only", "-z", "--no-renames").stdout.split("\0") if p]
+    if not paths:
+        return None
+    head, tree = git("rev-parse", "--verify", "--quiet", "HEAD"), git("write-tree")
+    if head.returncode != 0 or tree.returncode != 0:
+        return None
+    return {"tree": tree.stdout.strip(), "head": head.stdout.strip(), "paths": paths,
+            "stashes": len(git("stash", "list").stdout.splitlines())}
+
+
+def _restage(was: dict | None) -> None:
+    """Put back what was staged before the pull. git re-applies an autostash to the working tree
+    only, after a rebase and after `rebase --abort` alike: an edit staged by hand came back
+    unstaged, and where the file had been edited again since, the staged version was gone from
+    the index for good. That was every run with content to commit, whose pull carries a local
+    commit, even with the remote current (review, 2026-10-06). Rule 3 says what is staged by hand
+    stays out of the automated commit; it should also still be staged afterwards.
+
+    Each path the pull left alone gets its index entry back exactly. A path the pull changed
+    cannot: the staged version predates the other machine's change, and staging it would stage
+    that change's removal. It is named, and its edits are in the working tree. Nothing is done
+    when the autostash was not re-applied (the edits, and their staging, are in the stash)."""
+    if not was or rebase_in_progress() or unmerged():
+        return
+    if len(git("stash", "list").stdout.splitlines()) > was["stashes"]:
+        return
+    lit = lambda ps: [f":(literal){p}" for p in ps]
+    head = git("rev-parse", "HEAD").stdout.strip()
+    moved = set()
+    if head != was["head"]:
+        for i in range(0, len(was["paths"]), 200):
+            moved |= {p for p in git("diff", "--name-only", "-z", "--no-renames", was["head"], head, "--",
+                                     *lit(was["paths"][i:i + 200])).stdout.split("\0") if p}
+    keep = [p for p in was["paths"] if p not in moved]
+    for i in range(0, len(keep), 200):
+        git("reset", "-q", was["tree"], "--", *lit(keep[i:i + 200]))
+    if moved:
+        names = sorted(moved)
+        print(f"vault-push: {len(names)} file(s) you had staged also changed in the pull and are no longer "
+              f"staged (your edits are in the working tree; stage them again): {', '.join(names[:5])}"
+              + (f" and {len(names) - 5} more" if len(names) > 5 else ""))
+
+
 def pull_rebase(remote: str) -> tuple[bool, str]:
     """`git pull --rebase --autostash <remote> <branch>`. Returns (ok, one-line report). Never
     forces, never resolves: a conflicted rebase is aborted — git then re-applies the autostash —
     and the file list is reported for a human. This machine's PER_MACHINE renders sit out the
-    pull and come back after it, whatever it did."""
+    pull and come back after it, whatever it did, and what was staged by hand is staged again."""
     kept = _set_aside()
+    was = _staged()
     try:
-        return _pull_rebase(remote)
+        done = _pull_rebase(remote)
+        _restage(was)       # prints before the caller's report: the session hook reads the last line
+        return done
     finally:
         for rel, data in kept.items():
             try:
@@ -354,8 +409,11 @@ def _run() -> int:
     if args.pull_only:
         remote, err = push_target()
         if not remote:
+            # Exit 0 only when no remote is named. A push_remote that does not exist (a typo, a
+            # remote removed) exited 0 too, so the sync's pull step read as clean and the briefing
+            # was rendered on a tree that had never been pulled (review, 2026-10-06).
             print(f"vault-push: nothing to pull from — {err}")
-            return 0
+            return 0 if err.startswith(NOT_SET) else 1
         if args.dry_run:
             print(f"vault-push (dry run): would pull --rebase --autostash from {remote}")
             return 0
@@ -490,7 +548,7 @@ def _run() -> int:
         return 0
     if not remote:
         print(f"vault-push: committed, but NOT pushed — {remote_err}")
-        return 0 if "not set" in remote_err else 1
+        return 0 if remote_err.startswith(NOT_SET) else 1
 
     # Pull AFTER committing, so the rebase carries a real commit and the autostash only has to
     # hold uncommitted code edits (content was just committed).

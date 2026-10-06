@@ -27,9 +27,9 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The checkpoint, lock, model call, chunking and field hygiene are extract_notes.py's. Two copies
 # of each meant every defect in them was found twice and, as often, fixed once.
-from extract_notes import (sanitize, read_state, write_state, open_state, hold_lock, content_sig,
+from extract_notes import (sanitize, read_state, write_state, write_item, open_state, hold_lock, content_sig,
                            is_extracted, mark_pending, source_index, captured_block, as_text, clean_tags,
-                           run_claude, chunk_transcript, WORD, file_sizes, Ledger)
+                           run_claude, chunk_transcript, WORD, file_sizes, Ledger, read_transcript, unreadable)
 
 try:
     # UTF-8 whatever the code page, as callers read it, and backslashreplace: under "strict" a
@@ -267,7 +267,7 @@ def write_proposed_skill(skill: dict, src: Path, date: str, dry: bool,
         remember_proposal(skill, dest.stem)   # so a later chunk in this run can't re-propose it
         return fname
     PROPOSED_DIR.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content, encoding="utf-8")
+    write_item(dest, content)
     remember_proposal(skill, dest.stem)
     print(f"  + Skills/_proposed/{fname}")
     return fname
@@ -304,13 +304,15 @@ def main():
     adopted = False
     for src in sources:
         key = str(src.relative_to(VAULT))
-        st = src.stat()
-        stat_sig = f"{st.st_mtime_ns}:{st.st_size}"
         prev = state.get(key, {})
-        if not args.force and prev.get("stat") == stat_sig:
+        try:
+            raw, stat_sig, transcript = read_transcript(src, None if args.force else prev.get("stat"))
+        except (OSError, UnicodeDecodeError) as e:      # this conversation only, as in extract_notes
+            print(f"• {src.name}\n  ! skipped ({unreadable(e)})")
+            failed.append(src.name)
             continue
-        raw = src.read_bytes()
-        transcript = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        if raw is None:
+            continue
         transcript = re.sub(r"^---\n.*?\n---\n", "", transcript, count=1, flags=re.DOTALL)
         sig = content_sig(transcript)
         from_here = by_source.get(src.stem, [])

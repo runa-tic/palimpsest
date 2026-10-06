@@ -238,6 +238,19 @@ def load_facts(path: Path = FACTS) -> tuple[list[dict], int]:
     return facts, bad
 
 
+def damaged(bad: int) -> str:
+    """What every reader of the fold says when `bad` ledger lines did not parse, or "". Only lint
+    reported the count. With the newest fact of an attribute cut short (a kill mid-append, a bad
+    merge), the fold falls back to the fact before it, and `show`, the opener, the Register and
+    ask.py's prompt gave that older value as the current one with nothing said (review,
+    2026-10-06). Which entity the lost line was about is not knowable from a line that does not
+    parse, so the warning is about every value."""
+    if not bad:
+        return ""
+    return (f"⚠️ {bad} ledger line{'s' if bad != 1 else ''} in State/facts.jsonl could not be read: a newer "
+            "fact may be missing, so any value here may be out of date (`state.py lint`, then repair the file)")
+
+
 def fact_id(entity: str, attr: str, value, valid_from: str, seq: int = 0) -> str:
     # seq 0 keeps the original id scheme, so every fact already on file keeps its id
     key = f"{entity}|{attr}|{'' if value is None else value}|{valid_from}" + (f"|{seq}" if seq else "")
@@ -455,7 +468,7 @@ def attr_order(attr: str):
     return (ATTR_ORDER.index(attr) if attr in ATTR_ORDER else len(ATTR_ORDER), attr)
 
 
-def write_outputs(cur: dict, facts: list[dict], kinds: dict, ents: dict) -> None:
+def write_outputs(cur: dict, facts: list[dict], kinds: dict, ents: dict, bad: int = 0) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
     obs = load_observed()
     now = utcnow()
@@ -467,6 +480,8 @@ def write_outputs(cur: dict, facts: list[dict], kinds: dict, ents: dict) -> None
              f"from `State/facts.jsonl` ({len(facts)} facts, {len(cur)} entities with facts). "
              "This file is DERIVED — change state with `python tools/state.py add …`, never by editing "
              "this file. Two clocks: *since* = when true in the world, *seen* = last observation.*", ""]
+    if bad:
+        lines += [f"> {damaged(bad)}", ""]
     hot = [e for e, d in ents.items() if d.get("hot")]
     lines += ["## 🔥 Hot", "", "| entity | attribute | value | when | kind | source |", "|---|---|---|---|---|---|"]
     for eid in hot:
@@ -518,18 +533,20 @@ def write_outputs(cur: dict, facts: list[dict], kinds: dict, ents: dict) -> None
 
 
 def refold() -> dict:
-    facts, _ = load_facts()
+    facts, bad = load_facts()
     kinds, ents, _ = load_entities()
     cur = fold(facts)
-    write_outputs(cur, facts, kinds, ents)
+    write_outputs(cur, facts, kinds, ents, bad)
     return cur
 
 
 # ----------------------------------------------------------------------------- show
-def opener_block(cur: dict, kinds: dict, ents: dict) -> str:
+def opener_block(cur: dict, kinds: dict, ents: dict, bad: int = 0) -> str:
     obs = load_observed()
     late = {(e, a) for e, a, _, _ in overdue(cur)}
     out = [f"**State** (fold {local(iso(utcnow()), '%H:%M')} local · [[State Register]])"]
+    if bad:
+        out.append(f"- {damaged(bad)}")
     for eid, d in ents.items():
         if not d.get("hot"):
             continue
@@ -559,16 +576,18 @@ def opener_block(cur: dict, kinds: dict, ents: dict) -> str:
 
 
 def cmd_show(args):
-    facts, _ = load_facts()
+    facts, bad = load_facts()
     kinds, ents, alias = load_entities()
     cur = fold(facts)
+    if args.hot and args.opener:
+        print(opener_block(cur, kinds, ents, bad))
+        return
+    if bad and not args.json:
+        print(damaged(bad) + "\n")
     if args.hot:
-        if args.opener:
-            print(opener_block(cur, kinds, ents))
-        else:
-            for eid, d in ents.items():
-                if d.get("hot"):
-                    show_entity(eid, cur, facts, ents, kinds, args.history, args.json)
+        for eid, d in ents.items():
+            if d.get("hot"):
+                show_entity(eid, cur, facts, ents, kinds, args.history, args.json, bad)
         return
     if not args.entity:
         print(f"{len(facts)} facts, {len(cur)} entities with facts, {len(ents)} registered. "
@@ -580,15 +599,18 @@ def cmd_show(args):
     if not eid:
         print(f"unknown entity {args.entity!r}. Known ids: {', '.join(sorted(ents)) or '(none registered)'}")
         sys.exit(2)
-    show_entity(eid, cur, facts, ents, kinds, args.history, args.json)
+    show_entity(eid, cur, facts, ents, kinds, args.history, args.json, bad)
 
 
-def show_entity(eid: str, cur: dict, facts: list[dict], ents: dict, kinds: dict, history: bool, as_json: bool):
+def show_entity(eid: str, cur: dict, facts: list[dict], ents: dict, kinds: dict, history: bool, as_json: bool,
+                bad: int = 0):
     obs = load_observed()
     recs = cur.get(eid, {})
     if as_json:
+        # "malformed": ledger lines that did not parse; above 0, "current" may be out of date.
         print(json.dumps({"entity": eid, "registry": ents.get(eid), "current": recs,
-                          "history": [f for f in facts if f.get("entity") == eid] if history else None},
+                          "history": [f for f in facts if f.get("entity") == eid] if history else None,
+                          "malformed": bad},
                          ensure_ascii=False, indent=1))
         return
     d = ents.get(eid, {})
@@ -959,8 +981,10 @@ def cmd_station(args):
     The lease is a ledger fact, so every take, takeover and release is dated and sourced. `take`
     pulls first and pushes the lease; `release` pushes everything, then frees the lease. It is a
     convention the ledger records, not a lock git enforces: vault_push does not refuse commits."""
-    facts, _ = load_facts()
+    facts, bad = load_facts()
     holder, since = _lease(fold(facts))
+    if bad:
+        print(damaged(bad))      # the holder comes from the fold too
     if args.action == "show":
         age = f" for {hours_since(since):.1f} h" if since and holder != "free" else ""
         print(f"station lease: {holder}{age} (this machine: {MACHINE})"
@@ -1066,7 +1090,7 @@ def cmd_lint(args):
           f"overdue={len(late)}")
     if args.verbose and nofacts:
         print("entities without facts: " + ", ".join(nofacts))
-    write_outputs(cur, facts, kinds, ents)
+    write_outputs(cur, facts, kinds, ents, bad)
 
 
 # ----------------------------------------------------------------------------- main
