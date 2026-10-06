@@ -12,7 +12,7 @@ Usage (from vault root):
 No API key needed; uses your Claude Code login.
 """
 from __future__ import annotations
-import sys, os, re, math, shutil, subprocess, argparse, importlib.util
+import sys, re, math, argparse, importlib.util
 from pathlib import Path
 from datetime import datetime
 
@@ -222,12 +222,18 @@ def state_context(q: str) -> tuple[str, list[str]]:
                 hits.append(eid)
         if not hits:
             return "", []
-        facts, _ = st.load_facts()
+        facts, bad = st.load_facts()
         cur, obs = st.fold(facts), st.load_observed()
         lines = ["### STATE (ledger — current view, dated and sourced; prefer it over prose for "
                  "where-does-X-run / status / flag questions; cite [[State Register]] and the fact's source. "
                  "A ⚠️ flag means the value is uncertain: say it is stale, disputed or not yet in effect, "
                  "do not assert it as current)"]
+        if bad:
+            # Lines that did not parse are facts the fold never saw: with the newest one lost, the
+            # value below is the one before it, and it arrived here looking current (review,
+            # 2026-10-06).
+            lines.append(f"- {st.damaged(bad)}. Say that the ledger is damaged, and give every value "
+                         "below as possibly out of date, not as the current one.")
         for eid in hits[:6]:
             recs = cur.get(eid, {})
             if not recs:
@@ -358,14 +364,22 @@ def main():
         "say so and mark any answer about current state as unverified.\n\n"
         f"QUESTION: {q}\n\n===NOTES===\n" + "\n".join(ctx)
     )
-    # shutil.which honours PATHEXT: a bare "claude" argv does not find npm's claude.cmd on Windows.
-    proc = subprocess.run([shutil.which("claude") or "claude", "-p", "--model", args.model],
-                          input=prompt, capture_output=True, text=True, encoding="utf-8",
-                          env={**os.environ, "CLAUDE_BRAIN_NO_HOOK": "1"}, errors="replace")  # don't trigger vault hooks
-    if proc.returncode != 0:
-        print("claude CLI failed:", (proc.stderr or "").strip()[:300])
+    # The extractors' launch, not a bare `claude -p`. Started plainly it ran where ask.py was run
+    # (the vault), with the vault's CLAUDE.md, every built-in tool and every MCP server the user's
+    # settings allow, on a prompt that is retrieved notes and transcripts: a line inside one of
+    # them could ask for more reads than the notes selected, or for a tool the vault allows
+    # (review, 2026-10-06). The answer needs no tool: it is to come from the notes in the prompt.
+    # No tools, no MCP servers, no session file, a directory outside the vault: see
+    # extract_notes.run_claude, which also finds claude through shutil.which (PATHEXT, so npm's
+    # claude.cmd on Windows).
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from extract_notes import run_claude
+    try:
+        ans = run_claude(prompt, args.model)
+    except (RuntimeError, OSError) as e:      # the CLI failed, or it or its directory is not there
+        print(f"ask.py: {str(e)[:400]}")
         sys.exit(1)
-    ans = proc.stdout.strip()
     print(ans)
     print(f"\n— sources scanned ({label}): " + ", ".join(f.stem for f in top))
 

@@ -20,6 +20,9 @@ try:
 except Exception:
     pass
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from briefing import canon      # a task's text without the stale mark the briefing appends
+
 VAULT = Path(__file__).resolve().parent.parent
 NOTES = VAULT / "10 Notes"
 PROJECTS = VAULT / "20 Projects"
@@ -139,7 +142,7 @@ def open_tasks_today():
 def dedupe_tasks(tasks):
     seen, out = set(), []
     for src, t in tasks:
-        k = t.strip()
+        k = canon(t).strip()
         if k not in seen:
             seen.add(k)
             out.append((src, t))
@@ -196,7 +199,11 @@ def main():
                   f"untouched.", file=sys.stderr)
             return 1
     generated = pair.group(0) if pair else (old[:r.start()] if old is not None else "")
-    ticked = {m.group(1).strip() for m in re.finditer(r"^- \[[xX]\] (.+?)  <sub>", generated, re.M)}
+    # A task is the same task with or without the briefing's stale mark ("⏰ *open since ...*"):
+    # matched on the whole text, a loop ticked before its task was marked came back unticked the
+    # day the mark appeared, and a task also open in a project note was listed twice (review,
+    # 2026-10-06). A ticked loop is shown without the mark, as the briefing shows a ticked task.
+    ticked = {canon(m.group(1)).strip() for m in re.finditer(r"^- \[[xX]\] (.+?)  <sub>", generated, re.M)}
 
     front = f"---\ntype: review\nweek: {tag}\ntags:\n  - review\n---\n"
     L = [START,
@@ -215,8 +222,8 @@ def main():
     L += [f"- {'🟢' if s=='active' else '⚪'} [[{n}]] — `{s}`" for n, s in projects] or ["- *(none)*"]
 
     L.append(f"\n## 🔓 Open loops ({len(tasks)})")
-    L += [f"- [{'x' if t.strip() in ticked else ' '}] {t}  <sub>([[{src}]])</sub>" for src, t in tasks] \
-        or ["- *(none)*"]
+    L += [f"- [x] {canon(t)}  <sub>([[{src}]])</sub>" if canon(t).strip() in ticked
+          else f"- [ ] {t}  <sub>([[{src}]])</sub>" for src, t in tasks] or ["- *(none)*"]
     L.append(END)
     block = "\n".join(L)
 
