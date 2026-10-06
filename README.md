@@ -76,6 +76,13 @@ What took months was learning which of the obvious designs are wrong. Those are 
   is all there is, and `rlm.py` says so when it starts.
 - **Generated blocks are not durable state.** The daily briefing is regenerated output; a
   checkbox ticked inside it is silently overwritten on the next run.
+- **A task has more than one copy, and nothing links them.** A ledger fact, a line in a tracker
+  note and the daily checkbox can each record the same intention; update one and the other two
+  still read as open. An email sent one evening was reported as unsent the same night, from the
+  two copies nobody had touched, and the rolled-over list had carried finished items for weeks.
+  The copies are not kept in step. They say when they have gone stale: the briefing marks a
+  rolled-over task whose day has passed or that is a week old, and the ledger flags a `next` or
+  `deadline` whose date has passed, in `state.py lint`, in the State Register and in the opener.
 - **Word overlap cannot see a reworded duplicate.** "GramJS FloodWaitError carries the wait
   duration on `.seconds`" and "…carries the wait on `.seconds`" are the same note twice and
   score 0.13 lexically. `semantic.py` compares meaning instead — TF-IDF plus a truncated SVD,
@@ -147,6 +154,7 @@ python tools/state.py register my-api --kind service --hot   # the State ledger:
 python tools/state.py add my-api host server-1 --source "[[Deploy notes]]"
 python tools/state.py show my-api                  # current value, when, who, why, what it superseded
 python tools/state.py probe                         # built-in probes + any declared in palimpsest.json
+python tools/state.py lint                          # contradictions, stale observations, overdue next/deadline
 
 python tests/run_all.py                    # regression tests: throwaway vaults, no claude calls;
                                            # run on macOS and Windows 11, not yet on Linux. With
@@ -214,10 +222,12 @@ than a chatbot standing next to it.
 Built for Windows with Obsidian and a PARA layout, so paths and a couple of process details
 assume that. This release was tested on macOS and on Windows 11 (Python 3.13, Git for Windows,
 `core.autocrlf=true`, a Cyrillic user profile); it has not been run on Linux. On Windows the
-suite (38 scripts) passed both as installed — UTF-8 mode off, a cp1251 code page, no Unix tools on
-PATH — and from Git Bash, the reranker test included. That run was of the commit before this
-section was last edited, an edit that changed only documentation and comments. From a fresh clone
-there the git hook blocked a staged key; the commit guards blocked a deny-listed name appended to
+suite passed both as installed — UTF-8 mode off, a cp1251 code page, no Unix tools on PATH — and
+from Git Bash: 39 of its 40 scripts on the commit before this section was last edited (an edit
+that changed only documentation), and the fortieth, the reranker test, a few commits earlier,
+since when no retrieval code has changed (the test machine no longer had the models cached). The
+fresh-clone checks are from that earlier run too, before the last changes to the backup, the
+extractors, `rlm.py`, the briefing and the ledger: the git hook blocked a staged key; the commit guards blocked a deny-listed name appended to
 a UTF-16 note in UTF-8 (by `cmd`) and to a UTF-8 note in cp1251 (by PowerShell's `Add-Content`),
 and the cp866 reading with hand-built bytes only; and the ledger, a lexical `ask.py`, the redact
 CLI and the line-ending repair ran.
