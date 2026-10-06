@@ -74,6 +74,35 @@ def redact_title(title: str) -> str:
     except Exception:
         return title
 
+
+def _mark() -> str:
+    try:
+        import redact
+        return redact.MARK
+    except Exception:
+        return "[redacted]"
+
+
+def cut_title(title: str, n: int = 60) -> str:
+    """The first n characters of a redacted title, never ending inside a redaction mark: a mark
+    cut in half ("[redac") is a stray bracket in the file name and reads as text in the header."""
+    mark, at = _mark(), 0
+    while (i := title.find(mark, at)) != -1 and i < n:
+        at = i + len(mark)
+    return title[:max(n, at)]
+
+
+def title_stem(title: str) -> str:
+    """A redacted title as the file-name part, with every redaction mark as the plain word
+    "redacted": the mark's brackets, next to the "]]" that closes a [[wikilink]] to the note, are
+    what breaks the link, and atomic notes link to their conversation by file name. Repeated,
+    because a term that itself sat in brackets leaves "[redacted]" again once the mark is
+    replaced. Brackets the user typed in the title are kept, as they always were."""
+    mark = _mark()
+    while mark in title:
+        title = title.replace(mark, "redacted")
+    return sanitize(title)
+
 # Transcripts stamp UTC ("...Z"); the vault's dates are local (daily notes, briefing, weekly
 # review), so convert before formatting. Unconverted, a UTC+8 session at 07:30 on the 1st was
 # filed under the 30th. A naive timestamp is already local and astimezone() leaves it alone.
@@ -241,12 +270,12 @@ def process_transcript(f: Path, include_thinking=False, include_tools=False, all
     # Redact BEFORE truncating: a key straddling char 60 would be cut into a fragment no
     # credential pattern matches, and its head would land in the filename.
     title = redact_title(title) if title else next(
-        (redact_title(txt)[:60] for role, txt in turns if role == "user"), "Untitled")
+        (cut_title(redact_title(txt)) for role, txt in turns if role == "user"), "Untitled")
 
     proj_label = f.parent.name.split("-")[-1] or f.parent.name
     date = iso_to_date(first_ts)
     folder = OUT_BASE / "Claude Code" / proj_label
-    fname = existing_note(folder, f.stem[:8]) or f"{date} {sanitize(title)} ({f.stem[:8]}).md"
+    fname = existing_note(folder, f.stem[:8]) or f"{date} {title_stem(title)} ({f.stem[:8]}).md"
 
     body_parts = [f"# {title}\n"]
     for role, txt in turns:
@@ -352,7 +381,7 @@ def import_web(args):
         if not turns:
             continue
         date = iso_to_date(created)
-        fname = existing_note(OUT_BASE / "claude.ai", uuid[:8]) or f"{date} {sanitize(name)} ({uuid[:8]}).md"
+        fname = existing_note(OUT_BASE / "claude.ai", uuid[:8]) or f"{date} {title_stem(name)} ({uuid[:8]}).md"
         body_parts = [f"# {name}\n"]
         for role, txt in turns:
             who = "🧑 **Me**" if role == "user" else "🤖 **Claude**"

@@ -159,8 +159,15 @@ def main():
     external = set()
     if MEMORY.exists():
         for m in MEMORY.glob("*.md"):
+            # An entry that cannot be opened (gone since the listing, a directory, a dangling
+            # link) is skipped: left to raise, it ended the whole health pass, and the session
+            # opener lost its health line with nothing said (review, 2026-10-06).
+            try:
+                mt = m.read_text(encoding="utf-8", errors="ignore")
+                mtime = m.stat().st_mtime
+            except OSError:
+                continue
             external.add(m.stem)
-            mt = m.read_text(encoding="utf-8", errors="ignore")
             h = re.search(r"(?m)^#\s+(.+?)\s*$", mt)
             if h:
                 external.add(h.group(1).strip())
@@ -204,14 +211,16 @@ def main():
                 except Exception:
                     pass
             if age is None:
-                age = int((time.time() - m.stat().st_mtime) / 86400)
+                age = int((time.time() - mtime) / 86400)
             if age >= MEM_STALE_DAYS:
                 mem_stale.append((age, m.stem, desc[:110]))
         mem_stale.sort(key=lambda x: -x[0])
         idx = MEMORY / "MEMORY.md"
-        if idx.exists():
+        try:
             external |= set(re.findall(r"^- \[(.+?)\]\(",
                                        idx.read_text(encoding="utf-8", errors="ignore"), re.M))
+        except OSError:
+            pass
 
     # Resolve [[wikilinks]] the way Obsidian does — against note ALIASES too, not just filenames.
     # A link to any of a note's aliases counts as a link to that note (and is not "broken"). A real

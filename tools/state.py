@@ -904,14 +904,15 @@ def cmd_probe(args):
     obs = load_observed(local_only=True)
     specs = {s["name"]: s for s in (CFG.get("probes") or []) if isinstance(s, dict) and s.get("name")}
     names = [n.strip() for n in args.only.split(",")] if args.only else list(BUILTIN) + list(specs)
+    known = lambda n: n in BUILTIN or n in specs
     added, seen = 0, 0
     for name in names:
         spec = specs.get(name)
         if spec and not args.force and hours_since(obs.get(f"probe:{name}")) < spec.get("min_interval_h", 0):
             print(f"  {name}: skipped (probed {int(hours_since(obs.get(f'probe:{name}')) * 60)} min ago)")
             continue
-        if name not in BUILTIN and not spec:
-            print(f"  {name}: no such probe (built-in: {', '.join(BUILTIN)}; declared: {', '.join(specs) or 'none'})")
+        if not known(name):
+            print(f"  {name or '(empty)'}: no such probe (built-in: {', '.join(BUILTIN)}; declared: {', '.join(specs) or 'none'})")
             continue
         try:
             triples, detail = BUILTIN[name]() if name in BUILTIN else probe_command(spec)
@@ -953,7 +954,13 @@ def cmd_probe(args):
             obs[f"detail:{name}"] = detail
     save_observed(obs)
     refold()
-    print(f"probe: {added} new fact(s), {seen} unchanged, probes run: {', '.join(names)}")
+    print(f"probe: {added} new fact(s), {seen} unchanged, probes run: "
+          f"{', '.join(n for n in names if known(n)) or 'none'}")
+    if not all(known(n) for n in names):
+        # A refused name was listed under "probes run" and the command exited 0: read by its last
+        # line or its exit code, a mistyped --only was a clean probe (review, 2026-10-06). 2, as
+        # every other refusal here.
+        sys.exit(2)
 
 
 # ----------------------------------------------------------------------------- station lease (turn-based handoff)
