@@ -27,7 +27,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The checkpoint, lock, model call, chunking and field hygiene are extract_notes.py's. Two copies
 # of each meant every defect in them was found twice and, as often, fixed once.
-from extract_notes import (sanitize, read_state, write_state, write_item, open_state, hold_lock, content_sig,
+from extract_notes import (PROMPT_TAIL, sanitize, read_state, write_state, write_item, open_state, hold_lock, content_sig,
                            is_extracted, mark_pending, source_index, captured_block, as_text, clean_tags,
                            run_claude, chunk_transcript, WORD, file_sizes, Ledger, read_transcript, unreadable)
 
@@ -93,7 +93,8 @@ def save_state(state: dict):
 
 
 def call_claude(transcript: str, model: str, captured=()) -> str:
-    return run_claude(PROMPT + captured_block(captured) + "\n===CONVERSATION===\n" + transcript, model)
+    return run_claude(PROMPT + captured_block(captured) + "\n===CONVERSATION===\n" + transcript
+                      + PROMPT_TAIL, model)
 
 
 def parse_skills(raw: str) -> list[dict]:
