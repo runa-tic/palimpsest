@@ -197,8 +197,12 @@ def _gather() -> list[Path]:
             # A note symlinked to a file outside the vault is a read the sandbox refuses, and
             # every corpus-wide call (search/grep/chunks/filter) reads every note, so one such
             # link made all of them fail (review, 2026-09-30). Skip it, and a dangling one.
-            real = f.resolve()
-            if not ((real == VAULT or VAULT in real.parents) and real.is_file()):
+            try:
+                real = f.resolve()
+                inside = (real == VAULT or VAULT in real.parents) and real.is_file()
+            except (OSError, RuntimeError):     # a link that loops raises before Python 3.13
+                inside = False
+            if not inside:
                 outside += 1
                 continue
             files.append(f)

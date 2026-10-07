@@ -225,6 +225,25 @@ def content_sig(transcript: str) -> str:
     return "sha1:" + hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+class OutsideVault(OSError):
+    """A path inside the vault that leads to a file outside it."""
+
+
+def real_in_vault(path: Path, vault: Path = VAULT) -> Path:
+    """The file this path leads to, when that file is inside the vault; OutsideVault when it is
+    not, and OSError when the path leads nowhere (a dangling or looping link). The conversation
+    notes were listed with rglob and read link or not, so a `.md` symlink pointing out of the
+    vault had its target sent to the model and distilled into notes the vault then syncs (review,
+    2026-10-07). The vault's edge is what may be sent, as in ask.py's gather and rlm.py's sandbox."""
+    try:
+        real = path.resolve(strict=True)
+    except RuntimeError as e:              # a symlink loop, before Python 3.13
+        raise OSError(str(e)) from None
+    if vault != real and vault not in real.parents:
+        raise OutsideVault(f"a link to a file outside the vault: {real}")
+    return real
+
+
 def read_transcript(src: Path, checked: str | None) -> tuple[bytes | None, str, str]:
     """A conversation note as (its bytes, its "mtime_ns:size", its text with LF line ends); the
     bytes are None, and the file is not read, when the second equals `checked`. Raises OSError or
@@ -233,17 +252,21 @@ def read_transcript(src: Path, checked: str | None) -> tuple[bytes | None, str, 
     saved by PowerShell 5.1's `>`, an export in a code page) ended the run with a traceback before
     any later conversation was looked at, every night (review, 2026-10-06). Strict, not
     errors="replace": UTF-16 read that way is NULs and U+FFFD, the model finds nothing in it, and
-    the conversation would be checkpointed as done."""
-    st = src.stat()
+    the conversation would be checkpointed as done. A note that is a link out of the vault is
+    refused before it is read (real_in_vault)."""
+    real = real_in_vault(src)          # read what was checked, not the link a second time
+    st = real.stat()
     stat_sig = f"{st.st_mtime_ns}:{st.st_size}"
     if checked == stat_sig:
         return None, stat_sig, ""
-    raw = src.read_bytes()
+    raw = real.read_bytes()
     return raw, stat_sig, raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def unreadable(e: Exception) -> str:
     """Why read_transcript failed, for the "skipped" line."""
+    if isinstance(e, OutsideVault):
+        return f"{e}; nothing was sent"
     if isinstance(e, UnicodeDecodeError):
         return f"not UTF-8 text: byte 0x{e.object[e.start]:02x} at {e.start}; re-save it as UTF-8"
     return f"unreadable: {e}"
