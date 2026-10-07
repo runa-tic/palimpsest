@@ -269,12 +269,18 @@ def append(fact: dict, path: Path = FACTS) -> bool:
     same = [f for f in existing if f.get("entity") == fact.get("entity") and f.get("attr") == fact.get("attr")
             and f.get("kind") != "contradicts"]
     if fact.get("kind") != "contradicts" and same:
-        cur = fold(same).get(fact["entity"], {}).get(fact["attr"]) or {}
+        # Folded with the key's contradictions, so an open conflict is seen: confirming the value
+        # that stands is how a contradiction is most naturally answered, and as a no-op it wrote
+        # nothing, so the conflict stayed open with no fact to resolve it (review, 2026-10-07).
+        disputes = [f for f in existing if f.get("entity") == fact.get("entity")
+                    and f.get("attr") == fact.get("attr") and f.get("kind") == "contradicts"]
+        cur = fold(same + disputes).get(fact["entity"], {}).get(fact["attr"]) or {}
         if (cur.get("value") == fact.get("value") and cur.get("kind") == fact.get("kind")
-                and cur.get("valid_from") == fact.get("valid_from")):
+                and cur.get("valid_from") == fact.get("valid_from") and not cur.get("conflicts")):
             return False
-    if fact.get("kind") != "contradicts":
-        fact["seq"] = len(same)
+    # A contradiction is stamped too: with the number the key's next fact will get, so the fold can
+    # tell a fact recorded after it in the same second from one recorded before (see fold).
+    fact["seq"] = len(same)
     if any(f.get("id") == fact["id"] for f in existing):
         if fact.get("kind") == "contradicts" or not fact.get("seq"):
             return False
@@ -375,7 +381,18 @@ def fold(facts: list[dict]) -> dict:
         rec = cur.setdefault(e, {}).setdefault(a, {"value": None, "kind": "contradicts", "t": c["t"],
                                                    "valid_from": c["t"], "source": [], "id": c.get("id"),
                                                    "by": c.get("by"), "note": "", "superseded": []})
-        resolved = any(f["t"] > c["t"] for f in hist.get((e, a), []))
+        # Resolved by a fact recorded after it. Timestamps have one-second precision, and "after"
+        # was a strictly later one: a fact appended in the same second as the contradiction it
+        # answers (a script, an agent's two commands) moved the value and left the conflict open
+        # until some later fact happened to land (review, 2026-10-07). Within the second, seq
+        # orders them, as it orders facts: the contradiction holds the number the next fact gets.
+        # A contradiction from before it was stamped keeps the strict rule; two machines number a
+        # key independently, so across machines the same-second case is a guess either way.
+        def after(f: dict) -> bool:
+            if f["t"] != c["t"]:
+                return f["t"] > c["t"]
+            return c.get("seq") is not None and (f.get("seq") or 0) >= c["seq"]
+        resolved = any(after(f) for f in hist.get((e, a), []))
         if not resolved:
             rec.setdefault("conflicts", []).append({"ids": c.get("ids"), "reason": c.get("reason"),
                                                     "confidence": c.get("confidence"), "t": c["t"]})

@@ -223,9 +223,12 @@ Built for Windows with Obsidian and a PARA layout, so paths and a couple of proc
 assume that. This release was tested on macOS and on Windows 11 (Python 3.13, Git for Windows,
 `core.autocrlf=true`, a Cyrillic user profile); it has not been run on Linux. On Windows the
 suite passed both as installed — UTF-8 mode off, a cp1251 code page, no Unix tools on PATH — and
-from Git Bash: 39 of its 40 scripts on the commit before this section was last edited (an edit
-that changed only documentation), and the fortieth, the reranker test, a few commits earlier,
-since when no retrieval code has changed (the test machine no longer had the models cached). The
+from Git Bash: 39 of its 40 scripts on commit `4d039f6` (2026-10-04), and the fortieth, the
+reranker test, a few commits earlier (the test machine no longer had the models cached);
+`ask.py` has since changed in how it starts the model and in its STATE block, not in how it
+ranks, and that test has not been rerun there. The commits since were run there as they landed,
+in cmd with and without UTF-8 mode: every script but the reranker test passed on the trees of
+`3a4b668` (42 scripts) and `c67aa5f` (43); under Git Bash only the tests new in each. The
 fresh-clone checks are from that earlier run too, before the last changes to the backup, the
 extractors, `rlm.py`, the briefing and the ledger: the git hook blocked a staged key; the commit guards blocked a deny-listed name appended to
 a UTF-16 note in UTF-8 (by `cmd`) and to a UTF-8 note in cp1251 (by PowerShell's `Add-Content`),
@@ -284,7 +287,13 @@ then keeps both versions of every line. `rlm.py`'s read confinement is
 OS-enforced on macOS only; elsewhere, treat the REPL as able to read what your user can. The skills extractor is disabled in the default pipeline — it burned most of a
 sync window and failed most of its inputs without checkpointing, which is documented in
 `sync.py` rather than quietly fixed. Extraction runs on a wall-clock timeout, so a long
-absence takes several nightly runs to drain. Embeddings are opt-in and CPU-bound. The default
+absence takes several nightly runs to drain. That timeout stops the step, not what the step
+started: a `claude` call in flight when the limit falls runs to its end, one call and minutes at
+most, after the sync has reported the step TIMED OUT. Killing the step's whole process tree was
+tried (2026-10-07) and withdrawn: the same kill reaches `git` in the pull and push steps, and a
+`git` killed in the middle of a rebase leaves the rebase open with the uncommitted work parked
+in its autostash, which the backup then refuses to touch until someone repairs it by hand.
+Embeddings are opt-in and CPU-bound. The default
 model, multilingual-e5-base, closes most of the cross-language gap (recall@8 with the rerank on
 the full source vault: 0.78 English, 0.63 Russian, against 0.73 / 0.45 for e5-small), but its
 first index over a large vault takes hours on a laptop CPU; until it covers 95% of the vault,

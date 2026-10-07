@@ -26,7 +26,7 @@ except Exception:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ask  # noqa: E402
-from extract_notes import run_claude  # noqa: E402
+from extract_notes import run_claude, real_in_vault  # noqa: E402
 
 VAULT = ask.VAULT
 QUERIES = VAULT / "tools" / "cache" / "bench-queries.jsonl"
@@ -52,7 +52,15 @@ def _body(text: str) -> str:
 
 
 def gen(n: int, seed: int):
-    notes = [p for p in (VAULT / "10 Notes").glob("*.md")]
+    # Only notes that are files of this vault: a link out of it would have its target's text sent
+    # to the model in the prompt below (review, 2026-10-07).
+    notes = []
+    for p in (VAULT / "10 Notes").glob("*.md"):
+        try:
+            real_in_vault(p, VAULT)        # this tool's own vault, not the importing module's
+            notes.append(p)
+        except OSError:
+            print(f"  skipped (dangling, or a link out of the vault): {p.name}")
     rng = random.Random(seed)
     rng.shuffle(notes)
     done = set()
